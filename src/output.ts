@@ -1,0 +1,30 @@
+// The output contract of the rig CLI: rig is an API. A command prints one JSON object on stdout and nothing else.
+// Success: the command's typed result, exit code 0. Failure: `{"error": {"code", "message"}}`, exit code nonzero.
+// The `code` is stable and machine-readable; the `message` is a text in rig's language (the only rig-language text a
+// client may see besides the agent rules rig generates). Display (ages, durations, wording) belongs to the client.
+
+export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
+
+export type ApiError = { code: string; message: string };
+export type ApiResult<T> = { ok: true; value: T } | { ok: false; error: ApiError };
+
+export const apiOk = <T>(value: T): ApiResult<T> => ({ ok: true, value });
+export const apiFail = (code: string, message: string): ApiResult<never> => ({ ok: false, error: { code, message } });
+
+// Codes the CLI layer itself produces; a command adds its own codes next to its handler.
+export const ERROR_CODE_USAGE = "usage";
+export const ERROR_CODE_RUNTIME = "runtime-unavailable";
+export const ERROR_CODE_INTERNAL = "internal-error";
+// A command that has not moved to typed results yet reports a plain failure under this code.
+export const ERROR_CODE_FAILED = "command-failed";
+
+export const SUCCESS_EXIT_CODE = 0;
+export const FAILURE_EXIT_CODE = 1;
+
+export const renderSuccess = (value: JsonValue): string => JSON.stringify(value);
+export const renderFailure = (error: ApiError): string => JSON.stringify({ error });
+
+// A progress event of a long-running command. It goes to stderr as one JSON object per line, `{"progress": {...}}`,
+// never to stdout, so stdout stays the one final JSON object. A client may read stderr or ignore it.
+export type ProgressEvent = { code: string; data?: JsonValue };
+export const renderProgress = (event: ProgressEvent): string => JSON.stringify({ progress: event });

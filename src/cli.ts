@@ -1,5 +1,6 @@
 import type { Language, Messages } from "./messages.js";
 import type { LockOwner } from "./lock.js";
+import type { ApiError, ApiResult, JsonValue, ProgressEvent } from "./output.js";
 import type { Result } from "./result.js";
 import type { RuntimePorts } from "./ports.js";
 import type { UpdateStep } from "./commands/update.js";
@@ -14,11 +15,34 @@ import { createRealRuntime, readRealLanguage } from "./commands/real-runtime.js"
 import { formatStatus, readStatus } from "./commands/status.js";
 import { runUpdateStep, updateRig } from "./commands/update.js";
 import { DEFAULT_LANGUAGE, isLanguage, messagesFor } from "./messages.js";
+import {
+	apiOk,
+	ERROR_CODE_FAILED,
+	ERROR_CODE_INTERNAL,
+	ERROR_CODE_RUNTIME,
+	ERROR_CODE_USAGE,
+	FAILURE_EXIT_CODE,
+	renderFailure,
+	renderProgress,
+	renderSuccess,
+	SUCCESS_EXIT_CODE,
+} from "./output.js";
 import { ok } from "./result.js";
 
-const SUCCESS_EXIT_CODE = 0;
-const FAILURE_EXIT_CODE = 1;
 const UPDATE_STEP_ARGUMENT_COUNT = 3;
+// The syntax of every command, as `rig help` returns it. Raw data: no language, a client formats it.
+const USAGE: string[] = [
+	"rig install [--dev]",
+	"rig apply",
+	"rig feature [--json]",
+	"rig feature <name> enable|disable",
+	"rig update [--pending]",
+	"rig status [--json]",
+	"rig check",
+	"rig language [en|ru] [--json]",
+	"rig info --session <id>",
+];
+const HELP: JsonValue = { usage: USAGE };
 
 export type Command =
 	| { name: "help" }
@@ -80,86 +104,154 @@ const parseUpdateStep = (args: string[]): ParsedCommand | null => {
 };
 
 // Where the runtime comes from. `readLanguage` reads only the language (state.json), for the commands that need no
-// runtime (`rig help`, usage errors); `create` builds the runtime, which reads the language itself.
+// runtime (usage errors); `create` builds the runtime, which reads the language itself.
 export type RuntimeFactory = { readLanguage: () => Promise<Language>; create: () => Promise<Result<RuntimePorts>> };
 
 const realRuntimeFactory: RuntimeFactory = { readLanguage: readRealLanguage, create: () => createRealRuntime() };
+
+// What a command hands back to the CLI layer, which turns it into stdout and an exit code.
+// - json: the command's typed result; the CLI prints it as the one JSON object (success) or the error object (failure).
+// - legacy: a command not yet moved to typed results; it printed its own text lines through `writeLine`. Its failure is
+//   still printed as the JSON error object. The guard test (tests/api-output.test.ts) lists these until they move.
+// - internal: `update-step`, which `rig update` runs as a child and reads as text. It owns its stdout and exit code and
+//   is outside the JSON contract.
+export type CommandOutcome =
+	| { kind: "json"; result: ApiResult<JsonValue> }
+	| { kind: "legacy"; result: Result<void> }
+	| { kind: "internal"; exitCode: number };
+
+export type CommandContext = {
+	runtime: RuntimePorts;
+	// Text lines of a legacy command; goes to stdout.
+	writeLine: (line: string) => void;
+	// Progress of a long-running command; goes to stderr as JSON lines, never to stdout (see src/output.ts).
+	writeProgress: (event: ProgressEvent) => void;
+};
+
+const ignoreProgress = (): void => {};
+
+// Every command, keyed by name. `satisfies` keeps it equal to the `Command` union, so the guard test can enumerate commands from it.
+const COMMAND_NAMES = {
+	"help": true,
+	"install": true,
+	"apply": true,
+	"feature-list": true,
+	"feature-change": true,
+	"update": true,
+	"status": true,
+	"check": true,
+	"language": true,
+	"info": true,
+	"update-step": true,
+} satisfies Record<Command["name"], true>;
+
+export const commandNames: readonly string[] = Object.keys(COMMAND_NAMES);
 
 export const runCli = async (
 	args: string[],
 	writeLine: (line: string) => void,
 	suppliedRuntime?: RuntimePorts,
 	factory: RuntimeFactory = realRuntimeFactory,
+	writeProgress: (event: ProgressEvent) => void = ignoreProgress,
 ): Promise<number> => {
 	const source: RuntimeFactory = suppliedRuntime === undefined
 		? factory
 		: { readLanguage: async () => suppliedRuntime.language, create: async () => ok(suppliedRuntime) };
 	const parsed = parseCommand(args);
-	if (!parsed.ok || parsed.command.name === "help") {
+	if (!parsed.ok) {
 		const messages = messagesFor(await source.readLanguage());
-		writeLine(parsed.ok ? messages.cli.help() : parsed.error(messages));
-		return parsed.ok ? SUCCESS_EXIT_CODE : FAILURE_EXIT_CODE;
+		writeLine(renderFailure({ code: ERROR_CODE_USAGE, message: parsed.error(messages) }));
+		return FAILURE_EXIT_CODE;
+	}
+	const { command } = parsed;
+	if (command.name === "help") {
+		writeLine(renderSuccess(HELP));
+		return SUCCESS_EXIT_CODE;
 	}
 	// The runtime reads the language from state.json once, when it is built, and carries it; nothing below reads it again.
 	// If the runtime cannot be built, the error is printed in the default language.
 	const runtimeResult = await source.create();
 	if (!runtimeResult.ok) {
-		writeLine(messagesFor(DEFAULT_LANGUAGE).cli.rigError(runtimeResult.error));
-		return FAILURE_EXIT_CODE;
+		return reportFailure(command, DEFAULT_LANGUAGE, { code: ERROR_CODE_RUNTIME, message: runtimeResult.error }, writeLine);
 	}
+	const runtime = runtimeResult.value;
 	try {
-		return await execute(parsed.command, runtimeResult.value, writeLine);
+		const outcome = await execute(command, { runtime, writeLine, writeProgress });
+		if (outcome.kind === "internal") return outcome.exitCode;
+		if (outcome.kind === "legacy") {
+			return outcome.result.ok
+				? SUCCESS_EXIT_CODE
+				: reportFailure(command, runtime.language, { code: ERROR_CODE_FAILED, message: outcome.result.error }, writeLine);
+		}
+		if (!outcome.result.ok) return reportFailure(command, runtime.language, outcome.result.error, writeLine);
+		writeLine(renderSuccess(outcome.result.value));
+		return SUCCESS_EXIT_CODE;
 	} catch (error) {
-		writeLine(messagesFor(runtimeResult.value.language).cli.rigError(error instanceof Error ? error.message : String(error)));
-		return FAILURE_EXIT_CODE;
+		return reportFailure(command, runtime.language, { code: ERROR_CODE_INTERNAL, message: error instanceof Error ? error.message : String(error) }, writeLine);
 	}
 };
 
-const execute = async (command: Command, runtime: RuntimePorts, writeLine: (line: string) => void): Promise<number> => {
-	const messages = messagesFor(runtime.language);
-	if (command.name === "help") {
-		writeLine(messages.cli.help());
-		return SUCCESS_EXIT_CODE;
-	}
-	if (command.name === "install") return report(await installRig(runtime, command.dev, writeLine), messages, writeLine);
-	if (command.name === "apply") return report(await applyCommand(runtime, writeLine), messages, writeLine);
-	if (command.name === "feature-list") {
-		const result = await listFeatureViews(runtime);
-		if (!result.ok) return report(result, messages, writeLine);
-		if (command.json) writeLine(JSON.stringify(result.value));
-		else for (const feature of result.value) writeLine(messages.cli.featureLine(feature.name, feature.enabled, feature.platformAllowed, feature.description));
-		return SUCCESS_EXIT_CODE;
-	}
-	if (command.name === "feature-change") return report(await changeFeature(runtime, command.feature, command.action, writeLine), messages, writeLine);
-	if (command.name === "update") return report(await updateRig(runtime, command.pending, writeLine), messages, writeLine);
-	if (command.name === "status") {
-		const result = await readStatus(runtime);
-		if (!result.ok) return report(result, messages, writeLine);
-		if (command.json) writeLine(JSON.stringify(result.value));
-		else for (const line of formatStatus(result.value, runtime.language)) writeLine(line);
-		return SUCCESS_EXIT_CODE;
-	}
-	if (command.name === "language") {
-		const result = command.value === null
-			? await showLanguage(runtime, command.json, writeLine)
-			: await setLanguage(runtime, command.value, command.json, writeLine);
-		return report(result, messages, writeLine);
-	}
-	if (command.name === "info") return report(await infoCommand(runtime, command.session, writeLine), messages, writeLine);
-	if (command.name === "update-step") return runUpdateStep(runtime, command.step, command.owner, writeLine);
-	const checked = await checkRig(runtime);
-	if (!checked.ok) return report(checked, messages, writeLine);
-	writeLine(messages.cli.checksPassed());
-	return SUCCESS_EXIT_CODE;
-};
-
-const report = (result: Result<void>, messages: Messages, writeLine: (line: string) => void): number => {
-	if (result.ok) return SUCCESS_EXIT_CODE;
-	writeLine(messages.cli.rigError(result.error));
+// A failure is the JSON error object on stdout and a nonzero exit code. The internal `update-step` keeps its text line:
+// its parent prints whatever the child says.
+const reportFailure = (command: Command, language: Language, error: ApiError, writeLine: (line: string) => void): number => {
+	writeLine(command.name === "update-step" ? messagesFor(language).cli.rigError(error.message) : renderFailure(error));
 	return FAILURE_EXIT_CODE;
 };
 
+const legacy = (result: Result<void>): CommandOutcome => ({ kind: "legacy", result });
+
+const execute = async (command: Command, context: CommandContext): Promise<CommandOutcome> => {
+	const { runtime, writeLine } = context;
+	const messages = messagesFor(runtime.language);
+	switch (command.name) {
+		case "help":
+			return { kind: "json", result: apiOk(HELP) };
+		case "install":
+			return legacy(await installRig(runtime, command.dev, writeLine));
+		case "apply":
+			return legacy(await applyCommand(runtime, writeLine));
+		case "feature-list":
+			return legacy(await listFeatures(runtime, command.json, messages, writeLine));
+		case "feature-change":
+			return legacy(await changeFeature(runtime, command.feature, command.action, writeLine));
+		case "update":
+			return legacy(await updateRig(runtime, command.pending, writeLine));
+		case "status":
+			return legacy(await showStatus(runtime, command.json, writeLine));
+		case "language":
+			return legacy(command.value === null
+				? await showLanguage(runtime, command.json, writeLine)
+				: await setLanguage(runtime, command.value, command.json, writeLine));
+		case "info":
+			return { kind: "json", result: await infoCommand(runtime, command.session) };
+		case "update-step":
+			return { kind: "internal", exitCode: await runUpdateStep(runtime, command.step, command.owner, writeLine) };
+		case "check": {
+			const checked = await checkRig(runtime);
+			if (checked.ok) writeLine(messages.cli.checksPassed());
+			return legacy(checked);
+		}
+	}
+};
+
+const listFeatures = async (runtime: RuntimePorts, json: boolean, messages: Messages, writeLine: (line: string) => void): Promise<Result<void>> => {
+	const result = await listFeatureViews(runtime);
+	if (!result.ok) return result;
+	if (json) writeLine(JSON.stringify(result.value));
+	else for (const feature of result.value) writeLine(messages.cli.featureLine(feature.name, feature.enabled, feature.platformAllowed, feature.description));
+	return ok(undefined);
+};
+
+const showStatus = async (runtime: RuntimePorts, json: boolean, writeLine: (line: string) => void): Promise<Result<void>> => {
+	const result = await readStatus(runtime);
+	if (!result.ok) return result;
+	if (json) writeLine(JSON.stringify(result.value));
+	else for (const line of formatStatus(result.value, runtime.language)) writeLine(line);
+	return ok(undefined);
+};
+
 if (import.meta.main) {
-	const exitCode = await runCli(Bun.argv.slice(2), (line) => console.log(line));
+	// Stdout is only the final JSON object; progress goes to stderr (src/output.ts).
+	const exitCode = await runCli(Bun.argv.slice(2), (line) => console.log(line), undefined, undefined, (event) => console.error(renderProgress(event)));
 	process.exitCode = exitCode;
 }

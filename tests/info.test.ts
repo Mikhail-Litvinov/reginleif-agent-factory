@@ -7,6 +7,7 @@ import { describe, expect, test } from "bun:test";
 
 import { runCli } from "../src/cli.js";
 import { TAIL_BLOCK_BYTES, parseRolloutLimits } from "../src/codex-rollout.js";
+import { messagesFor } from "../src/messages.js";
 import { PROCESS_FAILURE_EXIT_CODE, PROCESS_SUCCESS_EXIT_CODE } from "../src/ports.js";
 import { err, ok } from "../src/result.js";
 import { createMemoryRuntime } from "./fakes/memory-runtime.js";
@@ -31,6 +32,7 @@ const OTHER_ACCOUNT_ID = "33333333-cccc";
 const OWN_DIRECTORY = "/cfg/1-own";
 const SAME_ACCOUNT_DIRECTORY = "/cfg/1-twin";
 const OTHER_ACCOUNT_DIRECTORY = "/cfg/2-other";
+const SINGLE_OUTPUT_LINE = 1;
 
 type Harness = ReturnType<typeof createMemoryRuntime>;
 type Tool = { accounts: Record<string, number | null>; allowed: Record<string, boolean>; volunteers: (options?: ProcessOptions) => Result<ProcessOutput> };
@@ -88,11 +90,22 @@ const tool = (overrides: Partial<Tool> = {}): Tool => ({
 	...overrides,
 });
 
-const run = async (runtime: RuntimePorts, args: string[]): Promise<{ code: number; output: string[] }> => {
+type Run = { code: number; output: string[] };
+
+const run = async (runtime: RuntimePorts, args: string[]): Promise<Run> => {
 	const output: string[] = [];
 	const code = await runCli(args, (line) => output.push(line), runtime);
 	return { code, output };
 };
+
+// The one JSON object a command prints; fails the test when stdout is anything else.
+const printed = (result: Run): unknown => {
+	expect(result.output).toHaveLength(SINGLE_OUTPUT_LINE);
+	return JSON.parse(result.output[0]);
+};
+
+const failure = (code: string, message: string): { code: number; body: unknown } => ({ code: FAILURE_EXIT_CODE, body: { error: { code, message } } });
+const failed = (result: Run): { code: number; body: unknown } => ({ code: result.code, body: printed(result) });
 
 const rolloutLine = (at: number, primary: unknown, secondary: unknown): string => JSON.stringify({
 	timestamp: iso(at),
@@ -114,8 +127,14 @@ const baseHarness = (features: Record<string, boolean>): Harness => {
 	return harness;
 };
 
+const infoOf = async (runtime: RuntimePorts): Promise<unknown> => {
+	const result = await run(runtime, ["info", "--session", OWN_ID]);
+	expect(result.code).toBe(PROCESS_SUCCESS_EXIT_CODE);
+	return printed(result);
+};
+
 describe("rig info", () => {
-	test("prints every block in the hub's order: freshest same-account Claude limits, Codex, volunteers, context", async () => {
+	test("prints the raw readings of every block: freshest same-account Claude limits, Codex, volunteers, context", async () => {
 		const harness = baseHarness({ codex: true, volunteers: true });
 		seedSession(harness, OWN_ID, OWN_DIRECTORY, claudeUsage(NOW - 10 * MINUTE, 10, 40, NOW + 150 * MINUTE, NOW + 3 * DAY));
 		seedSession(harness, SAME_ACCOUNT_ID, SAME_ACCOUNT_DIRECTORY, claudeUsage(NOW - 2 * MINUTE, 25.5, 41, NOW + HOUR, NOW + 3 * DAY));
@@ -138,39 +157,52 @@ describe("rig info", () => {
 		const result = await run(withTool(harness, tool({ volunteers })), ["info", "--session", OWN_ID]);
 
 		expect(result.code).toBe(PROCESS_SUCCESS_EXIT_CODE);
-		expect(result.output.join("\n")).toBe([
-			"**Claude limits**",
-			"5 hours: 25.5% (resets in 1 h)",
-			"Week: 41% (resets in 3 d)",
-			"",
-			"**Codex limits** (data 1 h old)",
-			"5 hours: 12% (resets in 30 min)",
-			"Week: 0%",
-			"",
-			"**Volunteer limits** (data 6 min old)",
-			"Day: 42% (resets in 1 h 54 min)",
-			"OpenRouter: 3/10",
-			"custom: 2/5",
-			"",
-			"**Context**",
-			"120/300k",
-		].join("\n"));
+		const body = printed(result);
+		expect(body).toEqual({
+			session: OWN_ID,
+			account: 1,
+			claude: {
+				at: iso(NOW - 2 * MINUTE),
+				sessionId: SAME_ACCOUNT_ID,
+				limits: [
+					{ kind: "seven_day", percentUsed: 41, resetsAt: iso(NOW + 3 * DAY) },
+					{ kind: "five_hour", percentUsed: 25.5, resetsAt: iso(NOW + HOUR) },
+				],
+			},
+			codex: {
+				at: iso(NOW - HOUR),
+				limits: [
+					{ windowMinutes: 300, usedPercent: 12.4, resetsAt: iso(NOW + 30 * MINUTE) },
+					{ windowMinutes: 10080, usedPercent: 50, resetsAt: iso(NOW - HOUR) },
+				],
+			},
+			volunteers: {
+				at: iso(NOW - 6 * MINUTE),
+				source: "proxy",
+				dayPercent: 42.4,
+				used: null,
+				cap: null,
+				resetsAt: iso(NOW - 6 * MINUTE + 7200 * SECONDS),
+				providers: { openrouter: { used: 3, cap: 10 }, groq: { used: 1, cap: null }, custom: { used: 2, cap: 5 } },
+			},
+			context: { at: iso(NOW - 10 * MINUTE), tokens: 120000, window: null, threshold: 300000, autocompact: true },
+		});
+		expect(Object.keys(body ?? {})).toEqual(["session", "account", "claude", "codex", "volunteers", "context"]);
 		const volunteerCall = harness.processCalls.find((call) => call.args.some((argument) => argument.endsWith("volunteer-models.py")));
 		expect(volunteerCall?.args).toEqual(["-I", `${TOOLS_DIRECTORY}/volunteer-models.py`, "limits", "--json"]);
 	});
 
-	test("Codex and volunteer blocks are absent when the feature is off or the account is not allowed", async () => {
+	test("the codex and volunteers keys are absent when the feature is off or the account is not allowed", async () => {
 		const usage = claudeUsage(NOW, 10, 40, NOW + HOUR, NOW + DAY);
-		const expected = ["**Claude limits**", "5 hours: 10% (resets in 1 h)", "Week: 40% (resets in 1 d)", "", "**Context**", "120/300k"].join("\n");
+		const keys = ["session", "account", "claude", "context"];
 
 		const featureOff = baseHarness({ codex: false, volunteers: false });
 		seedSession(featureOff, OWN_ID, OWN_DIRECTORY, usage);
-		expect((await run(withTool(featureOff, tool()), ["info", "--session", OWN_ID])).output.join("\n")).toBe(expected);
+		expect(Object.keys(await infoOf(withTool(featureOff, tool())) ?? {})).toEqual(keys);
 
 		const refused = baseHarness({ codex: true, volunteers: true });
 		seedSession(refused, OWN_ID, OWN_DIRECTORY, usage);
-		const text = (await run(withTool(refused, tool({ allowed: { codex: false, volunteers: false } })), ["info", "--session", OWN_ID])).output.join("\n");
-		expect(text).toBe(expected);
+		expect(Object.keys(await infoOf(withTool(refused, tool({ allowed: { codex: false, volunteers: false } }))) ?? {})).toEqual(keys);
 		const check = refused.processCalls.find((call) => call.args[2] === "check");
 		expect(check?.args).toEqual(["-I", `${REPO}/base/tools/account-allowlist.py`, "check", "codex", "--config-dir", OWN_DIRECTORY]);
 	});
@@ -180,119 +212,124 @@ describe("rig info", () => {
 		seedSession(harness, OWN_ID, OWN_DIRECTORY, claudeUsage(NOW - 20 * MINUTE, 10, 40, NOW + HOUR, NOW + DAY));
 		seedSession(harness, SAME_ACCOUNT_ID, SAME_ACCOUNT_DIRECTORY, claudeUsage(NOW, 77, 78, NOW + HOUR, NOW + DAY));
 
-		const text = (await run(withTool(harness, tool({ accounts: {} })), ["info", "--session", OWN_ID])).output.join("\n");
+		const body = await infoOf(withTool(harness, tool({ accounts: {} })));
 
-		expect(text).toContain("**Claude limits** (data 20 min old)\n5 hours: 10% (resets in 1 h)");
-		expect(text).not.toContain("77");
+		expect(body).toMatchObject({ account: null, claude: { at: iso(NOW - 20 * MINUTE), sessionId: OWN_ID, limits: [{ kind: "seven_day", percentUsed: 40 }, { kind: "five_hour", percentUsed: 10 }] } });
 	});
 
-	test("the data age appears from 5 minutes and not before", async () => {
-		const fresh = baseHarness({});
-		seedSession(fresh, OWN_ID, OWN_DIRECTORY, claudeUsage(NOW - 5 * MINUTE + 1, 10, 40, NOW + HOUR, NOW + DAY));
-		expect((await run(withTool(fresh, tool()), ["info", "--session", OWN_ID])).output[0]).toMatch(/^\*\*Claude limits\*\*\n/);
+	test("carries no ages, durations or display names: only times, numbers and codes", async () => {
+		const harness = baseHarness({ volunteers: true });
+		seedSession(harness, OWN_ID, OWN_DIRECTORY, claudeUsage(NOW - 5 * MINUTE, 10, 40, NOW + HOUR, NOW + DAY));
+		seedVolunteerScript(harness);
+		const volunteers = (): Result<ProcessOutput> => stdout({ source: "proxy", checked_at: iso(NOW), day_percent: 1, reset_in_s: 60, providers: { openrouter: { used: 1, cap: 2 } } });
 
-		const stale = baseHarness({});
-		seedSession(stale, OWN_ID, OWN_DIRECTORY, claudeUsage(NOW - 5 * MINUTE, 10, 40, NOW + HOUR, NOW + DAY));
-		expect((await run(withTool(stale, tool()), ["info", "--session", OWN_ID])).output[0]).toMatch(/^\*\*Claude limits\*\* \(data 5 min old\)\n/);
+		const result = await run(withTool(harness, tool({ volunteers })), ["info", "--session", OWN_ID]);
+
+		expect(result.output.join("\n")).not.toMatch(/\bold\b|resets in|OpenRouter|\bago\b/);
 	});
 
-	test("a session without data prints the no-data lines and still succeeds", async () => {
+	test("a session without data fills each available block with its failure and still succeeds", async () => {
 		const harness = baseHarness({ codex: true, volunteers: true });
 		seedSession(harness, OWN_ID, OWN_DIRECTORY);
+		const messages = messagesFor("en");
 
 		const result = await run(withTool(harness, tool()), ["info", "--session", OWN_ID]);
 
 		expect(result.code).toBe(PROCESS_SUCCESS_EXIT_CODE);
-		expect(result.output.join("\n")).toBe([
-			"Claude limits: no data, they appear after the model's first reply",
-			"",
-			"Codex limits: no data, no Codex rollout with limits yet",
-			"",
-			"Volunteer limits: no data, volunteer-models.py not found",
-			"",
-			"**Context**",
-			"no data",
-		].join("\n"));
+		expect(printed(result)).toEqual({
+			session: OWN_ID,
+			account: 1,
+			claude: { error: { code: "no-data", message: messages.info.claudeNoData() } },
+			codex: { error: { code: "no-rollout", message: messages.info.noCodexRollout() } },
+			volunteers: { error: { code: "script-missing", message: messages.info.scriptMissing() } },
+			context: { error: { code: "no-data", message: messages.info.noContextData() } },
+		});
 	});
 
-	test("a failing volunteer script becomes a reason line", async () => {
-		const cases: Array<[() => Result<ProcessOutput>, string]> = [
-			[() => ok({ stdout: "", stderr: "boom\n", exitCode: SCRIPT_FAILURE_CODE }), "Volunteer limits: no data, script exited with code 2: boom"],
-			[() => ok({ stdout: "", stderr: "", exitCode: SCRIPT_FAILURE_CODE }), "Volunteer limits: no data, script exited with code 2: no stderr"],
-			[() => ok({ stdout: "not json", stderr: "", exitCode: PROCESS_SUCCESS_EXIT_CODE }), "Volunteer limits: no data, bad JSON from script"],
-			[() => stdout({ source: "none", error: "proxy is down" }), "Volunteer limits: no data, proxy is down"],
-			[() => stdout({ source: "none", error: null }), "Volunteer limits: no data, no data source"],
+	test("a failing volunteer script becomes an error block with a code and a reason", async () => {
+		const cases: Array<[() => Result<ProcessOutput>, string, string]> = [
+			[() => ok({ stdout: "", stderr: "boom\n", exitCode: SCRIPT_FAILURE_CODE }), "script-failed", "script exited with code 2: boom"],
+			[() => ok({ stdout: "", stderr: "", exitCode: SCRIPT_FAILURE_CODE }), "script-failed", "script exited with code 2: no stderr"],
+			[() => ok({ stdout: "not json", stderr: "", exitCode: PROCESS_SUCCESS_EXIT_CODE }), "bad-output", "bad JSON from script"],
+			[() => stdout({ source: "none", error: "proxy is down" }), "no-source", "proxy is down"],
+			[() => stdout({ source: "none", error: null }), "no-source", "no data source"],
 		];
-		for (const [volunteers, line] of cases) {
+		for (const [volunteers, code, message] of cases) {
 			const harness = baseHarness({ volunteers: true });
 			seedSession(harness, OWN_ID, OWN_DIRECTORY);
 			seedVolunteerScript(harness);
-			const result = await run(withTool(harness, tool({ volunteers })), ["info", "--session", OWN_ID]);
-			expect(result.code).toBe(PROCESS_SUCCESS_EXIT_CODE);
-			expect(result.output.join("\n")).toContain(line);
+			expect(await infoOf(withTool(harness, tool({ volunteers })))).toMatchObject({ volunteers: { error: { code, message } } });
 		}
 	});
 
-	test("the volunteer day line reads 0% once its reset has passed", async () => {
+	test("the volunteer reading is raw: the day percent as reported and the reset as a time, even when it has passed", async () => {
 		const harness = baseHarness({ volunteers: true });
 		seedSession(harness, OWN_ID, OWN_DIRECTORY);
 		seedVolunteerScript(harness);
 		const volunteers = (): Result<ProcessOutput> => stdout({ source: "quota-file", checked_at: iso(NOW - HOUR), day_percent: 80, reset_in_s: 60, providers: {} });
 
-		const text = (await run(withTool(harness, tool({ volunteers })), ["info", "--session", OWN_ID])).output.join("\n");
+		const body = await infoOf(withTool(harness, tool({ volunteers })));
 
-		expect(text).toContain("**Volunteer limits** (data 1 h old)\nDay: 0%\n\n**Context**");
+		expect(body).toMatchObject({ volunteers: { at: iso(NOW - HOUR), source: "quota-file", dayPercent: 80, resetsAt: iso(NOW - HOUR + 60 * SECONDS), providers: {} } });
 	});
 
-	test("context shows an estimate mark and the plain token count without auto-compact", async () => {
+	test("context carries the exact count, or the estimate marked as such, with the window and the auto-compact threshold when known", async () => {
 		const estimated = baseHarness({});
 		seedSession(estimated, OWN_ID, OWN_DIRECTORY, claudeUsage(NOW, 1, 2, NOW + HOUR, NOW + HOUR, { breakdown: { totalTokens: 90400, autoCompactThreshold: 300000, isAutoCompactEnabled: true } }));
-		expect((await run(withTool(estimated, tool()), ["info", "--session", OWN_ID])).output.join("\n")).toEndWith("**Context**\n≈90/300k");
+		expect(await infoOf(withTool(estimated, tool()))).toMatchObject({
+			context: { at: iso(NOW), tokens: 90400, window: null, threshold: 300000, autocompact: true, estimated: true },
+		});
 
 		const plain = baseHarness({});
 		seedSession(plain, OWN_ID, OWN_DIRECTORY, claudeUsage(NOW, 1, 2, NOW + HOUR, NOW + HOUR, { breakdown: { totalTokens: 1_540_000, isAutoCompactEnabled: false } }));
-		expect((await run(withTool(plain, tool()), ["info", "--session", OWN_ID])).output.join("\n")).toEndWith("**Context**\n≈1.5M");
+		expect(await infoOf(withTool(plain, tool()))).toMatchObject({
+			context: { at: iso(NOW), tokens: 1_540_000, window: null, autocompact: false, estimated: true },
+		});
 
 		const exact = baseHarness({});
-		seedSession(exact, OWN_ID, OWN_DIRECTORY, claudeUsage(NOW, 1, 2, NOW + HOUR, NOW + HOUR, { tokens: 45600 }));
-		expect((await run(withTool(exact, tool()), ["info", "--session", OWN_ID])).output.join("\n")).toEndWith("**Context**\n46k");
+		seedSession(exact, OWN_ID, OWN_DIRECTORY, claudeUsage(NOW, 1, 2, NOW + HOUR, NOW + HOUR, { tokens: 45600, window: 200000 }));
+		expect(await infoOf(withTool(exact, tool()))).toMatchObject({ context: { at: iso(NOW), tokens: 45600, window: 200000 } });
+		expect(await infoOf(withTool(exact, tool()))).not.toMatchObject({ context: { estimated: true } });
 	});
 
-	test("the text is Russian when rig's language is Russian", async () => {
+	test("block failure messages are in rig's language, the codes are not", async () => {
 		const harness = baseHarness({ codex: true });
-		seedSession(harness, OWN_ID, OWN_DIRECTORY, claudeUsage(NOW - 10 * MINUTE, 10, 40, NOW + 90 * MINUTE, NOW + 2 * DAY + 5 * HOUR));
+		seedSession(harness, OWN_ID, OWN_DIRECTORY);
+		const messages = messagesFor("ru");
 
-		const text = (await run(withTool(harness, tool(), "ru"), ["info", "--session", OWN_ID])).output.join("\n");
+		const body = await infoOf(withTool(harness, tool(), "ru"));
 
-		expect(text).toBe([
-			"**\u041b\u0438\u043c\u0438\u0442\u044b Claude** (\u0434\u0430\u043d\u043d\u044b\u0435 10 \u043c\u0438\u043d \u043d\u0430\u0437\u0430\u0434)",
-			"5 \u0447\u0430\u0441\u043e\u0432: 10% (\u0441\u0431\u0440\u043e\u0441 \u0447\u0435\u0440\u0435\u0437 1 \u0447 30 \u043c\u0438\u043d)",
-			"\u041d\u0435\u0434\u0435\u043b\u044f: 40% (\u0441\u0431\u0440\u043e\u0441 \u0447\u0435\u0440\u0435\u0437 2 \u0434 5 \u0447)",
-			"",
-			"\u041b\u0438\u043c\u0438\u0442\u044b Codex: \u043d\u0435\u0442 \u0434\u0430\u043d\u043d\u044b\u0445 — \u0432 \u0441\u0435\u0441\u0441\u0438\u044f\u0445 Codex \u0435\u0449\u0451 \u043d\u0435\u0442 \u043b\u0438\u043c\u0438\u0442\u043e\u0432",
-			"",
-			"**\u041a\u043e\u043d\u0442\u0435\u043a\u0441\u0442**",
-			"120/300k",
-		].join("\n"));
+		expect(body).toMatchObject({
+			claude: { error: { code: "no-data", message: messages.info.claudeNoData() } },
+			codex: { error: { code: "no-rollout", message: messages.info.noCodexRollout() } },
+		});
 	});
 
-	test("a bad or unknown session id is an error exit with a clear message", async () => {
+	test("a bad or unknown session id fails with a JSON error and exit code 1", async () => {
 		const harness = baseHarness({});
 		seedSession(harness, OWN_ID, OWN_DIRECTORY);
 		const runtime = withTool(harness, tool());
 
 		for (const id of ["../x", "a/b", "a\\b", ".hidden", "a..b", " "]) {
-			const result = await run(runtime, ["info", "--session", id]);
-			expect(result).toEqual({ code: FAILURE_EXIT_CODE, output: [`rig error: Not a valid session id: ${id}`] });
+			expect(failed(await run(runtime, ["info", "--session", id]))).toEqual(failure("bad-session", `Not a valid session id: ${id}`));
 		}
-		expect(await run(runtime, ["info", "--session", "missing-id"])).toEqual({ code: FAILURE_EXIT_CODE, output: ["rig error: Unknown session: missing-id"] });
-		expect(await run(runtime, ["info"])).toEqual({ code: FAILURE_EXIT_CODE, output: ["Usage: rig info --session <id>"] });
-		expect(await run(runtime, ["info", "--session"])).toEqual({ code: FAILURE_EXIT_CODE, output: ["Usage: rig info --session <id>"] });
+		expect(failed(await run(runtime, ["info", "--session", "missing-id"]))).toEqual(failure("unknown-session", "Unknown session: missing-id"));
+		expect(failed(await run(runtime, ["info"]))).toEqual(failure("usage", "Usage: rig info --session <id>"));
+		expect(failed(await run(runtime, ["info", "--session"]))).toEqual(failure("usage", "Usage: rig info --session <id>"));
+	});
+
+	test("unreadable rig state fails the command with its own code", async () => {
+		const harness = createMemoryRuntime();
+
+		const result = await run(withTool(harness, tool()), ["info", "--session", OWN_ID]);
+
+		expect(result.code).toBe(FAILURE_EXIT_CODE);
+		expect(printed(result)).toMatchObject({ error: { code: "state-unreadable" } });
 	});
 });
 
 describe("rig info source limits", () => {
-	test("a hung volunteer script is bounded by a timeout and becomes a reason line; the command still exits 0", async () => {
+	test("a hung volunteer script is bounded by a timeout and becomes an error block; the command still exits 0", async () => {
 		const harness = baseHarness({ volunteers: true });
 		seedSession(harness, OWN_ID, OWN_DIRECTORY);
 		seedVolunteerScript(harness);
@@ -300,10 +337,9 @@ describe("rig info source limits", () => {
 		const volunteers = (options?: ProcessOptions): Result<ProcessOutput> =>
 			options?.timeoutMs === VOLUNTEER_TIMEOUT_MS ? err("python3 did not finish within 5 seconds and was killed.") : noVolunteers();
 
-		const result = await run(withTool(harness, tool({ volunteers })), ["info", "--session", OWN_ID]);
+		const body = await infoOf(withTool(harness, tool({ volunteers })));
 
-		expect(result.code).toBe(PROCESS_SUCCESS_EXIT_CODE);
-		expect(result.output.join("\n")).toContain("Volunteer limits: no data, python3 did not finish within 5 seconds and was killed.");
+		expect(body).toMatchObject({ volunteers: { error: { code: "script-failed", message: "python3 did not finish within 5 seconds and was killed." } } });
 	});
 
 	test("every python helper call carries a timeout", async () => {
@@ -324,10 +360,9 @@ describe("rig info source limits", () => {
 		harness.fs.seed("/custom/codex/sessions/2026/10/29/rollout-a.jsonl", `${rolloutLine(NOW - HOUR, { used_percent: 61, window_minutes: 300 }, null)}\n`);
 		seedRollout(harness, "rollout-b.jsonl", `${rolloutLine(NOW - HOUR, { used_percent: 9, window_minutes: 300 }, null)}\n`);
 
-		const text = (await run(withTool(harness, tool()), ["info", "--session", OWN_ID])).output.join("\n");
+		const body = await infoOf(withTool(harness, tool()));
 
-		expect(text).toContain("5 hours: 61%");
-		expect(text).not.toContain("9%");
+		expect(body).toMatchObject({ codex: { limits: [{ windowMinutes: 300, usedPercent: 61 }] } });
 	});
 
 	test("the newest file by mtime wins over the newest name within a date directory", async () => {
@@ -338,9 +373,9 @@ describe("rig info source limits", () => {
 		harness.fs.mtimes.set(`${ROLLOUT_DIRECTORY}/rollout-2026-10-29T20-00-00-late-name.jsonl`, NOW - 2 * HOUR);
 		harness.fs.mtimes.set(`${ROLLOUT_DIRECTORY}/rollout-2026-10-29T08-00-00-early-name.jsonl`, NOW - HOUR);
 
-		const text = (await run(withTool(harness, tool()), ["info", "--session", OWN_ID])).output.join("\n");
+		const body = await infoOf(withTool(harness, tool()));
 
-		expect(text).toContain("5 hours: 77%");
+		expect(body).toMatchObject({ codex: { limits: [{ usedPercent: 77 }] } });
 	});
 
 	test("the last rate-limit line is found across a block boundary without reading the whole file", async () => {
@@ -349,7 +384,7 @@ describe("rig info source limits", () => {
 		const wanted = JSON.stringify({
 			timestamp: iso(NOW - HOUR),
 			type: "event_msg",
-			note: "\u00e9".repeat(TAIL_BLOCK_BYTES / 8),
+			note: "é".repeat(TAIL_BLOCK_BYTES / 8),
 			payload: { type: "token_count", rate_limits: { limit_id: "codex", primary: { used_percent: 42, window_minutes: 300 }, secondary: null } },
 		});
 		const older = rolloutLine(NOW - 5 * HOUR, { used_percent: 1, window_minutes: 300 }, null);
@@ -362,9 +397,9 @@ describe("rig info source limits", () => {
 		seedRollout(harness, "rollout-big.jsonl", text);
 		const size = new TextEncoder().encode(text).length;
 
-		const output = (await run(withTool(harness, tool()), ["info", "--session", OWN_ID])).output.join("\n");
+		const body = await infoOf(withTool(harness, tool()));
 
-		expect(output).toContain("5 hours: 42%");
+		expect(body).toMatchObject({ codex: { limits: [{ usedPercent: 42 }] } });
 		expect(harness.fs.textReads).not.toContain(path);
 		const reads = harness.fs.rangeReads.filter((read) => read.path === path);
 		expect(reads.length).toBeGreaterThanOrEqual(3);
@@ -377,15 +412,15 @@ describe("rig info source limits", () => {
 		const path = `${ROLLOUT_DIRECTORY}/rollout-small.jsonl`;
 		seedRollout(harness, "rollout-small.jsonl", `${"y".repeat(3 * TAIL_BLOCK_BYTES)}\n${rolloutLine(NOW - HOUR, { used_percent: 5, window_minutes: 300 }, null)}\n`);
 
-		const output = (await run(withTool(harness, tool()), ["info", "--session", OWN_ID])).output.join("\n");
+		const body = await infoOf(withTool(harness, tool()));
 
-		expect(output).toContain("5 hours: 5%");
+		expect(body).toMatchObject({ codex: { limits: [{ usedPercent: 5 }] } });
 		expect(harness.fs.rangeReads.filter((read) => read.path === path)).toHaveLength(1);
 	});
 });
 
 describe("Codex rollout parsing", () => {
-	test("takes the last rate-limit event and maps window minutes to kinds", () => {
+	test("takes the last rate-limit event and keeps each window's minutes, percent and reset time as reported", () => {
 		const text = [
 			rolloutLine(NOW - HOUR, { used_percent: 5, window_minutes: 300 }, null),
 			"{\"broken\": \"rate_limits\"",
@@ -394,8 +429,11 @@ describe("Codex rollout parsing", () => {
 		].join("\n");
 
 		expect(parseRolloutLimits(text)).toEqual({
-			at: NOW,
-			limits: [{ kind: "90m", percent: 7, resetsAt: 1_000_000 }, { kind: "seven_day", percent: 9, resetsAt: null }],
+			at: iso(NOW),
+			limits: [
+				{ windowMinutes: 90, usedPercent: 7, resetsAt: iso(1_000_000) },
+				{ windowMinutes: 10080, usedPercent: 9, resetsAt: null },
+			],
 		});
 	});
 
@@ -410,8 +448,8 @@ describe("Codex rollout parsing", () => {
 		seedRollout(harness, "rollout-2026-10-29T09-00-00-old.jsonl", `${rolloutLine(NOW - 2 * HOUR, { used_percent: 33, window_minutes: 300, resets_at: (NOW + HOUR) / SECONDS }, null)}\n`);
 		seedRollout(harness, "rollout-2026-10-29T11-00-00-new.jsonl", "{\"type\":\"session_meta\"}\n");
 
-		const text = (await run(withTool(harness, tool()), ["info", "--session", OWN_ID])).output.join("\n");
+		const body = await infoOf(withTool(harness, tool()));
 
-		expect(text).toContain("**Codex limits** (data 2 h old)\n5 hours: 33% (resets in 1 h)");
+		expect(body).toMatchObject({ codex: { at: iso(NOW - 2 * HOUR), limits: [{ windowMinutes: 300, usedPercent: 33, resetsAt: iso(NOW + HOUR) }] } });
 	});
 });

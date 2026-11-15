@@ -60,40 +60,50 @@ response, no removal.
 
 ## `rig info --session <id>`
 
-Prints the finished text of the hub's `/info` for one session, in rig's language; the hub shows it unchanged. One
-`writeLine` call, blocks separated by one empty line, only the headers in **bold**:
+Prints the raw data of the hub's `/info` for one session as one JSON object (the contract is in `agent-rig-design.md`,
+"API output"). rig formats nothing: no texts, no names of limits, no ages or durations, no rounding. The client (the
+hub) decides the language, the display names, "5 hours" or "Week", "resets in 1 h", "data 10 min old" and whether
+old data is shown at all. Every time is an ISO-8601 UTC string (`2026-11-15T11:50:00.000Z`); every percent is the number
+as the source gave it.
 
-```
-**Claude limits** (data 10 min old)
-5 hours: 25.5% (resets in 1 h)
-Week: 41% (resets in 3 d)
-
-**Codex limits** (data 1 h old)
-5 hours: 12% (resets in 30 min)
-Week: 0%
-
-**Volunteer limits** (data 6 min old)
-Day: 42% (resets in 1 h 54 min)
-OpenRouter: 3/10
-
-**Context**
-120/300k
+```json
+{
+  "session": "213aedea-5ca6-40b7-bf06-3fb2e2c0a698",
+  "account": 1,
+  "claude": { "at": "...", "sessionId": "...", "limits": [{ "kind": "five_hour", "percentUsed": 10, "resetsAt": "..." }] },
+  "codex": { "at": "...", "limits": [{ "windowMinutes": 300, "usedPercent": 6, "resetsAt": "..." }] },
+  "volunteers": { "at": "...", "source": "...", "dayPercent": 42, "used": 4, "cap": 10, "resetsAt": "...", "providers": { "openrouter": { "used": 3, "cap": 10 } } },
+  "context": { "at": "...", "tokens": 35243, "window": 1000000, "threshold": 300000, "autocompact": true }
+}
 ```
 
-- Claude limits: the freshest `usage.json` `rateLimits` among the sessions whose config dir has the same cswap account
-  (`account-allowlist.py account --config-dir <dir>`). An account that cannot be determined means only the session's own.
-- Codex block: only when the feature `codex` is on in rig state and `account-allowlist.py check codex --config-dir <dir>`
-  allows it. Limits come from `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-*.jsonl` (`~/.codex` when `CODEX_HOME` is unset or
-  empty): date directories newest first, at most 20 files, ordered by modification time (then name). Each file is
-  read backwards in 64 KiB blocks (stat plus ranged reads, never the whole file) until the last rate-limit event; a window
-  whose reset has passed reads 0%.
-- Volunteer block: the same gate with the feature `volunteers`; data from `volunteer-models.py limits --json`. The script
-  and the allowlist tool calls are each bounded by a 5 s timeout (the process tree is killed); a timeout gives the
-  `no data, <reason>` line and the command still exits 0.
-- Context: this session's `usage.json` context (`120/300k`, `≈` when estimated, `1.5M` without auto-compact).
-- "(data N old)" appears when the data is 5 minutes old or more.
-- A block without data is one line: `<Name>: no data, <reason>`. A failing source never fails the command.
-- Exit codes: 0 on success (also with no-data blocks); 1 for a malformed session id, an unknown session or wrong usage.
+Key order is `session`, `account`, `claude`, `codex`, `volunteers`, `context`.
+
+- `session`: the id asked for. `account`: the cswap account number of the session's config dir, `null` when it cannot
+  be determined.
+- `claude`: the freshest `usage.json` `rateLimits` among the sessions whose config dir has the same cswap account
+  (`account-allowlist.py account --config-dir <dir>`); an account that cannot be determined means only the session's own.
+  `at` is the time of that reading, `sessionId` the session it came from, `limits` keep the source order (`kind` is the
+  source's own name, e.g. `five_hour`, `seven_day`); `resetsAt` is `null` when the source has none.
+- `codex`: the key is absent unless the feature `codex` is on in rig state and `account-allowlist.py check codex
+  --config-dir <dir>` allows it. Limits come from `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-*.jsonl` (`~/.codex` when
+  `CODEX_HOME` is unset or empty): date directories newest first, at most 20 files, ordered by modification time (then
+  name). Each file is read backwards in 64 KiB blocks (stat plus ranged reads, never the whole file) until the last
+  rate-limit event. `at` is the event's time; `windowMinutes` and `usedPercent` are the event's values, a window whose
+  reset has passed is **not** zeroed (the client knows `resetsAt` and the clock).
+- `volunteers`: the key is absent unless the feature `volunteers` is on and the same allowlist gate allows it. The value
+  is the reading of `volunteer-models.py limits --json` with its fields in camelCase and its times as ISO strings: `at`,
+  `source`, `dayPercent`, `used`, `cap`, `resetsAt` (each of the last three may be `null`) and `providers` (name to
+  `{used, cap}`). The script and the allowlist tool calls are each bounded by a 5 s timeout (the process tree is killed).
+- `context`: this session's `usage.json` context: `at`, `tokens`, `window` (`at` and `window` may be `null`);
+  `threshold`, `autocompact` and `estimated` only when `usage.json` carries them.
+- A block that cannot be read is `{"error":{"code","message"}}` in the place of its data; a failing source never fails
+  the command. Block codes: `no-data` (nothing recorded yet), `no-rollout` (no Codex rollout with a rate-limit event),
+  `script-missing`, `script-failed`, `bad-output` (volunteer script), `no-source`. `message` is an English text for
+  logs, not for display.
+- A block the session may not use is absent, not an error.
+- Command failure (nothing else on stdout, exit code 1): `bad-session` (a malformed session id), `unknown-session`,
+  `state-unreadable`, `usage` (wrong arguments).
 
 ## Reload
 

@@ -289,7 +289,7 @@ Commands that change something take one lock. If it is taken, the command waits 
 also when the process holding it crashes, otherwise the wait would be eternal (`src/lock.ts`). The lock file is created
 exclusively, with the owner's PID and start time. A stale lock is taken over by whoever exclusively created the file
 `<lock>.takeover`: under it the lock is read again and deleted. If the owner's start time cannot be found out, the lock is
-considered taken. When a command starts waiting for the lock, it immediately, before waiting, prints one line `Another rig command is running, waiting for it to finish.` (the message `lock.waiting` in the catalog `src/messages.ts`). The line goes to standard output at once, not at the end of the command. It is printed by `rig update` (without `--pending`), `rig apply`, `rig feature <name> enable|disable`, `rig language en|ru` and `rig install`. If the lock is free or a stale one is taken at once, there is no line. `rig update --pending` does not wait for the lock: if it is taken it exits at once and prints no waiting line. Exit code 0 is success, 1 is failure. The output is plain text; `--json` on `rig feature`, `rig status` and `rig language` is for the hub.
+considered taken. When a command starts waiting for the lock, it immediately, before waiting, prints one line `Another rig command is running, waiting for it to finish.` (the message `lock.waiting` in the catalog `src/messages.ts`). The line goes to standard output at once, not at the end of the command. It is printed by `rig update` (without `--pending`), `rig apply`, `rig feature <name> enable|disable`, `rig language en|ru` and `rig install`. If the lock is free or a stale one is taken at once, there is no line. `rig update --pending` does not wait for the lock: if it is taken it exits at once and prints no waiting line. Exit code 0 is success, 1 is failure. The output contract is in "API output": rig is an API for the hub, and a command that is migrated prints only JSON. Until a command is migrated, its success output stays text (and `--json` on `rig feature`, `rig status` and `rig language` is what the hub parses).
 
 External commands (`git`, `claude plugin`, `systemctl`) go through the common process runner
 (`src/commands/process-runner.ts`): after 15 minutes they are stopped together with the whole process tree and counted as
@@ -320,6 +320,54 @@ failed; `git` never asks for a login (`GIT_TERMINAL_PROMPT=0`). The `systemctl -
   "not running", the check asks it twice more, with a pause of one systemd restart (2 s) plus a 1 s margin: a hub that is
   just restarting is not taken for stopped. On Windows `bash` is taken from Git Bash (`C:/Program Files/Git/bin/bash.exe`),
   otherwise the check fails with a clear message.
+- `rig info --session <id>`: raw JSON readings of limits and context for one session, see `rig-sessions-design.md`.
+- `rig help`: `{"usage":[...]}`, the list of command forms.
+
+## API output
+
+`rig` is an API. The client (the telegram hub) owns formatting, language and display; `rig` returns raw data. There is no
+`--json` switch for the new contract: JSON is the only output of a migrated command. Text in rig's language remains
+only in the `message` of an error and in the generated agent rules.
+
+- **Success.** Exactly one JSON object on one line on standard output, exit code 0. Times are ISO-8601 UTC strings,
+  percents are raw numbers, there are no ages and no display names. A block that a session may not use is absent from the
+  object, not `null`. A block that could not be read is `{"error":{"code","message"}}` inside the object, and the command
+  still succeeds.
+- **Failure.** Exactly one line `{"error":{"code","message"}}` on standard output, exit code 1. Codes shared by every
+  command: `usage` (arguments the parser refuses), `runtime-unavailable` (no home directory or no runtime),
+  `internal-error` (an exception that escaped), `command-failed` (a command that is not migrated and failed; its
+  `message` is its text). A migrated command adds its own codes (`rig info`: `bad-session`, `unknown-session`,
+  `state-unreadable`). The `message` is for people in the logs; a client branches on `code`.
+- **Progress.** A command that runs long may report steps. Progress goes to standard error as JSON Lines, one
+  `{"progress":{"code","data"?}}` per line, rendered by `renderProgress` in `src/output.ts`; standard output carries only
+  the final object, so a client that reads it as one JSON value never sees a progress line. A command that has nothing to
+  report prints nothing on standard error (`rig info` reports no progress).
+- **`--json`** is still parsed by `rig feature`, `rig status` and `rig language` because their legacy handlers and the
+  hub use it. It is ignored by the output contract and goes away when those commands migrate.
+- **Not yet migrated.** A command in the table below with status "text" still prints text on success; only its failures
+  are JSON. The lock-wait line (`lock.waiting`) stays on standard output until the commands that take the lock migrate;
+  then it becomes a progress event.
+- **Internal protocol.** `rig update-step` is run as a child by `rig update`, which reads its standard output and exit
+  code as text (`runUpdateStepProcess`). It is not part of the API, keeps text failures and is exempt from the contract.
+- **Guard.** `tests/api-output.test.ts` enumerates the commands from the dispatcher (`commandNames` in `src/cli.ts`):
+  a command without a fixture fails it. Every command but the internal one must print the JSON error object for a
+  failure and for malformed arguments; every migrated command must print one JSON object on success. The commands not
+  yet migrated are in `PENDING_COMMANDS`; the test fails for a listed command that already prints JSON, so the list
+  shrinks with each migration and cannot rot.
+
+| Command | Success output now | What the hub parses today | Status |
+| --- | --- | --- | --- |
+| `rig help` | `{"usage":[...]}` | nothing | JSON |
+| `rig info --session <id>` | `InfoData` object (`src/info-data.ts`) | nothing yet | JSON |
+| `rig status [--json]` | text, or the `--json` object (`schemaVersion: 1`) | `status --json`, strict schema | text |
+| `rig feature [--json]` | text, or the `--json` array | `feature --json`, strict schema | text |
+| `rig language [en\|ru] [--json]` | text, or `{"language"}` | `language --json`, strict schema; `language <x>` as text for Telegram | text |
+| `rig feature <name> enable\|disable` | text | text, shown to the user in Telegram | text |
+| `rig update [--pending]` | text | text, shown to the user in Telegram | text |
+| `rig install [--dev]` | text | nothing | text |
+| `rig apply` | text | nothing | text |
+| `rig check` | text | nothing | text |
+| `rig update-step` | text | parsed as text by the parent `rig update` | internal |
 
 ## Language
 

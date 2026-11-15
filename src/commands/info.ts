@@ -1,15 +1,15 @@
-import type { ClaudeLimits, ContextReading, Limit, Source, VolunteerReading } from "../info-text.js";
+import type { BlockError, ClaudeLimit, ClaudeReading, CodexReading, ContextReading, InfoData, VolunteerProvider, VolunteerReading } from "../info-data.js";
 import type { Messages } from "../messages.js";
+import type { ApiResult } from "../output.js";
 import type { RigState } from "../state.js";
-import type { Result } from "../result.js";
 import type { RuntimePorts } from "../ports.js";
 
 import { readCodexLimits } from "../codex-rollout.js";
 import { joinPath, toSlashPath } from "../file-system.js";
-import { formatInfo } from "../info-text.js";
+import { isoOrNull } from "../info-data.js";
 import { messagesFor } from "../messages.js";
+import { apiFail, apiOk } from "../output.js";
 import { PROCESS_SUCCESS_EXIT_CODE } from "../ports.js";
-import { err, ok } from "../result.js";
 import { readRigState } from "./shared.js";
 
 const SAFE_SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
@@ -20,18 +20,25 @@ const CODEX_HOME_VARIABLE = "CODEX_HOME";
 const ACCOUNT_SCRIPT = "base/tools/account-allowlist.py";
 const VOLUNTEER_TOOLS_DIRECTORY = "features/volunteers/tools";
 const VOLUNTEER_SCRIPT = "volunteer-models.py";
-const PROVIDER_NAMES: Readonly<Record<string, string>> = {
-	openrouter: "OpenRouter",
-	requesty: "Requesty",
-	groq: "Groq",
-	zhipu: "Zhipu",
-};
+
+// Failure codes of `rig info`: a command-level failure fails the whole command, a block-level one fills only its block.
+export const INFO_ERROR_BAD_SESSION = "bad-session";
+export const INFO_ERROR_UNKNOWN_SESSION = "unknown-session";
+export const INFO_ERROR_STATE_UNREADABLE = "state-unreadable";
+const BLOCK_NO_DATA = "no-data";
+const BLOCK_NO_ROLLOUT = "no-rollout";
+const BLOCK_SCRIPT_MISSING = "script-missing";
+const BLOCK_SCRIPT_FAILED = "script-failed";
+const BLOCK_BAD_OUTPUT = "bad-output";
+const BLOCK_NO_SOURCE = "no-source";
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
 
 const numberOrUndefined = (value: unknown): number | undefined =>
 	typeof value === "number" && Number.isFinite(value) ? value : undefined;
+
+const numberOrNull = (value: unknown): number | null => numberOrUndefined(value) ?? null;
 
 const parseJson = (text: string): unknown => {
 	try {
@@ -41,38 +48,53 @@ const parseJson = (text: string): unknown => {
 	}
 };
 
-type Usage = { at: number | null; limits: Limit[]; context: ContextReading };
+const blockError = (code: string, message: string): BlockError => ({ error: { code, message } });
 
-const parseLimit = (value: unknown): Limit | null => {
+const isoText = (value: unknown): string | null => {
+	if (typeof value !== "string") return null;
+	const milliseconds = Date.parse(value);
+	return Number.isFinite(milliseconds) ? isoOrNull(milliseconds) : null;
+};
+
+// One usage.json, as the output carries it.
+type Usage = { at: string | null; limits: ClaudeLimit[]; context: ContextReading | null };
+
+const parseLimit = (value: unknown): ClaudeLimit | null => {
 	if (!isRecord(value) || typeof value.kind !== "string") return null;
-	const percent = numberOrUndefined(value.percentUsed);
-	if (percent === undefined) return null;
-	const resetsAt = typeof value.resetsAt === "string" ? Date.parse(value.resetsAt) : Number.NaN;
-	return { kind: value.kind, percent, resetsAt: Number.isFinite(resetsAt) ? resetsAt : null };
+	const percentUsed = numberOrUndefined(value.percentUsed);
+	if (percentUsed === undefined) return null;
+	return { kind: value.kind, percentUsed, resetsAt: isoText(value.resetsAt) };
+};
+
+// `tokens` is the exact count; without it the breakdown's total is an estimate.
+const parseContext = (value: Record<string, unknown>, at: string | null): ContextReading | null => {
+	const context = isRecord(value.context) ? value.context : {};
+	const breakdown = isRecord(context.breakdown) ? context.breakdown : {};
+	const exact = numberOrUndefined(context.tokens);
+	const tokens = exact ?? numberOrUndefined(breakdown.totalTokens);
+	if (tokens === undefined) return null;
+	const threshold = numberOrUndefined(breakdown.autoCompactThreshold);
+	return {
+		at,
+		tokens,
+		window: numberOrNull(context.window),
+		...(threshold === undefined ? {} : { threshold }),
+		...(typeof breakdown.isAutoCompactEnabled === "boolean" ? { autocompact: breakdown.isAutoCompactEnabled } : {}),
+		...(exact === undefined ? { estimated: true as const } : {}),
+	};
 };
 
 const parseUsage = (text: string): Usage | null => {
 	const value = parseJson(text);
 	if (!isRecord(value)) return null;
-	const at = typeof value.at === "string" ? Date.parse(value.at) : Number.NaN;
+	const at = isoText(value.at);
 	const limits = Array.isArray(value.rateLimits)
 		? value.rateLimits.flatMap((entry: unknown) => {
 			const limit = parseLimit(entry);
 			return limit === null ? [] : [limit];
 		})
 		: [];
-	const context = isRecord(value.context) ? value.context : {};
-	const breakdown = isRecord(context.breakdown) ? context.breakdown : {};
-	return {
-		at: Number.isFinite(at) ? at : null,
-		limits,
-		context: {
-			tokens: numberOrUndefined(context.tokens),
-			totalTokens: numberOrUndefined(breakdown.totalTokens),
-			autoCompactEnabled: breakdown.isAutoCompactEnabled === true,
-			autoCompactThreshold: numberOrUndefined(breakdown.autoCompactThreshold),
-		},
-	};
+	return { at, limits, context: parseContext(value, at) };
 };
 
 const readOptionalText = async (runtime: RuntimePorts, path: string): Promise<string | null> => {
@@ -118,17 +140,19 @@ const sessionIdsWithRecords = async (runtime: RuntimePorts): Promise<string[]> =
 	}
 };
 
-// The hub's rule: the limits belong to the account, so the freshest reading among the sessions of the same account
-// wins. An account that cannot be determined means only this session's own reading.
+const readingTime = (usage: Usage): number => usage.at === null ? Number.NEGATIVE_INFINITY : Date.parse(usage.at);
+
+// The limits belong to the account, so the freshest reading among the sessions of the same account wins. An account
+// that cannot be determined means only this session's own reading.
 const freshestClaudeLimits = async (
 	runtime: RuntimePorts,
 	state: RigState,
 	sessionId: string,
 	configDir: string,
+	account: number | null,
 	own: Usage | null,
-): Promise<ClaudeLimits | null> => {
-	const candidates: Usage[] = own === null ? [] : [own];
-	const account = await accountOf(runtime, state, configDir);
+): Promise<ClaudeReading | null> => {
+	const candidates: Array<{ sessionId: string; usage: Usage }> = own === null ? [] : [{ sessionId, usage: own }];
 	if (account !== null) {
 		const accountByDirectory = new Map<string, number | null>([[configDir, account]]);
 		for (const id of await sessionIdsWithRecords(runtime)) {
@@ -140,45 +164,55 @@ const freshestClaudeLimits = async (
 			const record = recordText === null ? undefined : parseJson(recordText);
 			const otherDirectory = isRecord(record) && typeof record.config_dir === "string" ? record.config_dir : "";
 			if (!accountByDirectory.has(otherDirectory)) accountByDirectory.set(otherDirectory, await accountOf(runtime, state, otherDirectory));
-			if (accountByDirectory.get(otherDirectory) === account) candidates.push(usage);
+			if (accountByDirectory.get(otherDirectory) === account) candidates.push({ sessionId: id, usage });
 		}
 	}
-	let best: Usage | null = null;
-	for (const usage of candidates) {
-		if (usage.limits.length === 0) continue;
-		if (best === null || (usage.at ?? Number.NEGATIVE_INFINITY) > (best.at ?? Number.NEGATIVE_INFINITY)) best = usage;
+	let best: { sessionId: string; usage: Usage } | null = null;
+	for (const candidate of candidates) {
+		if (candidate.usage.limits.length === 0) continue;
+		if (best === null || readingTime(candidate.usage) > readingTime(best.usage)) best = candidate;
 	}
-	return best === null ? null : { at: best.at, limits: best.limits };
+	return best === null ? null : { at: best.usage.at, sessionId: best.sessionId, limits: best.usage.limits };
 };
 
-const codexSource = async (runtime: RuntimePorts, messages: Messages): Promise<Source<{ at: number; limits: Limit[] }>> => {
+const codexBlock = async (runtime: RuntimePorts, messages: Messages): Promise<CodexReading | BlockError> => {
 	const codexHome = runtime.environment.get(CODEX_HOME_VARIABLE);
 	const reading = await readCodexLimits(runtime.fs, codexHome === undefined || codexHome === "" ? joinPath(runtime.home, ".codex") : toSlashPath(codexHome));
-	return reading === null ? { kind: "error", reason: messages.info.noCodexRollout() } : { kind: "ok", value: reading };
+	return reading === null ? blockError(BLOCK_NO_ROLLOUT, messages.info.noCodexRollout()) : reading;
 };
 
-const parseVolunteerOutput = (value: unknown, messages: Messages): Source<VolunteerReading> => {
-	if (!isRecord(value)) return { kind: "error", reason: messages.info.scriptBadJson() };
+const parseProviders = (value: unknown): Record<string, VolunteerProvider> => {
+	const providers: Record<string, VolunteerProvider> = {};
+	if (!isRecord(value)) return providers;
+	for (const [name, entry] of Object.entries(value)) {
+		if (!isRecord(entry)) continue;
+		const used = numberOrUndefined(entry.used);
+		if (used !== undefined) providers[name] = { used, cap: numberOrNull(entry.cap) };
+	}
+	return providers;
+};
+
+const parseVolunteerOutput = (value: unknown, messages: Messages): VolunteerReading | BlockError => {
+	if (!isRecord(value)) return blockError(BLOCK_BAD_OUTPUT, messages.info.scriptBadJson());
 	if (value.source === "none") {
-		return { kind: "error", reason: typeof value.error === "string" && value.error !== "" ? value.error : messages.info.noSource() };
+		return blockError(BLOCK_NO_SOURCE, typeof value.error === "string" && value.error !== "" ? value.error : messages.info.noSource());
 	}
-	const at = typeof value.checked_at === "string" ? Date.parse(value.checked_at) : Number.NaN;
+	const at = isoText(value.checked_at);
 	const dayPercent = numberOrUndefined(value.day_percent);
-	if (!Number.isFinite(at) || dayPercent === undefined) return { kind: "error", reason: messages.info.scriptBadJson() };
+	if (at === null || dayPercent === undefined || typeof value.source !== "string") return blockError(BLOCK_BAD_OUTPUT, messages.info.scriptBadJson());
 	const resetIn = numberOrUndefined(value.reset_in_s);
-	const providers: VolunteerReading["providers"] = [];
-	if (isRecord(value.providers)) {
-		for (const [key, entry] of Object.entries(value.providers)) {
-			if (!isRecord(entry)) continue;
-			const used = numberOrUndefined(entry.used);
-			const cap = numberOrUndefined(entry.cap);
-			if (used !== undefined && cap !== undefined) providers.push({ name: PROVIDER_NAMES[key] ?? key, used, cap });
-		}
-	}
-	return { kind: "ok", value: { at, dayPercent, resetsAt: resetIn === undefined ? null : at + resetIn * MS_PER_SECOND, providers } };
+	return {
+		at,
+		source: value.source,
+		dayPercent,
+		used: numberOrNull(value.used),
+		cap: numberOrNull(value.cap),
+		resetsAt: resetIn === undefined ? null : isoOrNull(Date.parse(at) + resetIn * MS_PER_SECOND),
+		providers: parseProviders(value.providers),
+	};
 };
 
-const volunteerSource = async (runtime: RuntimePorts, state: RigState, messages: Messages): Promise<Source<VolunteerReading>> => {
+const volunteerBlock = async (runtime: RuntimePorts, state: RigState, messages: Messages): Promise<VolunteerReading | BlockError> => {
 	const toolsDirectory = joinPath(state.paths.repo, VOLUNTEER_TOOLS_DIRECTORY);
 	let present = false;
 	try {
@@ -186,34 +220,39 @@ const volunteerSource = async (runtime: RuntimePorts, state: RigState, messages:
 	} catch {
 		present = false;
 	}
-	if (!present) return { kind: "error", reason: messages.info.scriptMissing() };
+	if (!present) return blockError(BLOCK_SCRIPT_MISSING, messages.info.scriptMissing());
 	const result = await runtime.process.run(runtime.pythonCommand, ["-I", joinPath(toolsDirectory, VOLUNTEER_SCRIPT), "limits", "--json"], { timeoutMs: HELPER_TIMEOUT_MS });
-	if (!result.ok) return { kind: "error", reason: result.error };
+	if (!result.ok) return blockError(BLOCK_SCRIPT_FAILED, result.error);
 	if (result.value.exitCode !== PROCESS_SUCCESS_EXIT_CODE) {
-		return { kind: "error", reason: messages.info.scriptExit(result.value.exitCode, result.value.stderr.trim()) };
+		return blockError(BLOCK_SCRIPT_FAILED, messages.info.scriptExit(result.value.exitCode, result.value.stderr.trim()));
 	}
-	const parsed = parseJson(result.value.stdout);
-	return parseVolunteerOutput(parsed, messages);
+	return parseVolunteerOutput(parseJson(result.value.stdout), messages);
 };
 
-// `rig info --session <id>`: the finished text of the hub's /info, in rig's language. Every source is read on its own
-// and a failing one only turns its block into a "no data" line; only an unknown session fails the command.
-export const infoCommand = async (runtime: RuntimePorts, sessionId: string, writeLine: (line: string) => void): Promise<Result<void>> => {
+// `rig info --session <id>`: the raw readings behind the hub's /info. Every source is read on its own and a failing one
+// only fills its block with an error; only a bad or unknown session, or unreadable rig state, fails the command.
+export const infoCommand = async (runtime: RuntimePorts, sessionId: string): Promise<ApiResult<InfoData>> => {
 	const messages = messagesFor(runtime.language);
-	if (!SAFE_SESSION_ID.test(sessionId) || sessionId.includes("..")) return err(messages.info.badSession(sessionId));
+	if (!SAFE_SESSION_ID.test(sessionId) || sessionId.includes("..")) return apiFail(INFO_ERROR_BAD_SESSION, messages.info.badSession(sessionId));
 	const stateResult = await readRigState(runtime);
-	if (!stateResult.ok) return stateResult;
+	if (!stateResult.ok) return apiFail(INFO_ERROR_STATE_UNREADABLE, stateResult.error);
 	const state = stateResult.value;
 	const recordText = await readOptionalText(runtime, joinPath(sessionsDirectory(runtime), `${sessionId}.json`));
-	if (recordText === null) return err(messages.info.unknownSession(sessionId));
-	const record = parseJson(recordText);
-	if (!isRecord(record)) return err(messages.info.unknownSession(sessionId));
+	const record = recordText === null ? undefined : parseJson(recordText);
+	if (!isRecord(record)) return apiFail(INFO_ERROR_UNKNOWN_SESSION, messages.info.unknownSession(sessionId));
 	const configDir = typeof record.config_dir === "string" ? record.config_dir : "";
 	const usageText = await readOptionalText(runtime, joinPath(sessionsDirectory(runtime), sessionId, "usage.json"));
 	const own = usageText === null ? null : parseUsage(usageText);
-	const claude = await freshestClaudeLimits(runtime, state, sessionId, configDir, own);
-	const codex = await categoryShown(runtime, state, "codex", configDir) ? await codexSource(runtime, messages) : null;
-	const volunteers = await categoryShown(runtime, state, "volunteers", configDir) ? await volunteerSource(runtime, state, messages) : null;
-	writeLine(formatInfo({ claude, codex, volunteers, context: own === null ? null : own.context }, runtime.clock.now().getTime(), messages));
-	return ok(undefined);
+	const account = await accountOf(runtime, state, configDir);
+	const claude = await freshestClaudeLimits(runtime, state, sessionId, configDir, account, own);
+	const codex = await categoryShown(runtime, state, "codex", configDir) ? await codexBlock(runtime, messages) : null;
+	const volunteers = await categoryShown(runtime, state, "volunteers", configDir) ? await volunteerBlock(runtime, state, messages) : null;
+	return apiOk({
+		session: sessionId,
+		account,
+		claude: claude ?? blockError(BLOCK_NO_DATA, messages.info.claudeNoData()),
+		...(codex === null ? {} : { codex }),
+		...(volunteers === null ? {} : { volunteers }),
+		context: own?.context ?? blockError(BLOCK_NO_DATA, messages.info.noContextData()),
+	});
 };

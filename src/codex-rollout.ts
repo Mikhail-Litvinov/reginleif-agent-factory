@@ -1,7 +1,8 @@
 import type { FileSystem } from "./file-system.js";
-import type { CodexReading, Limit } from "./info-text.js";
+import type { CodexLimit, CodexReading } from "./info-data.js";
 
 import { joinPath } from "./file-system.js";
+import { isoOrNull } from "./info-data.js";
 
 // Codex writes `<codex home>/sessions/YYYY/MM/DD/rollout-*.jsonl`; the newest rollout with a rate-limit event wins.
 // Same limits as the hub's reader: at most this many files, looked at from the newest date directory down.
@@ -11,8 +12,6 @@ export const TAIL_BLOCK_BYTES = 64 * 1024;
 const NEWLINE_BYTE = 0x0a;
 const NO_NEWLINE = -1;
 const MS_PER_SECOND = 1000;
-const FIVE_HOUR_MINUTES = 300;
-const SEVEN_DAY_MINUTES = 10_080;
 const DATE_PARTS = [/^\d{4}$/, /^\d{2}$/, /^\d{2}$/];
 const ROLLOUT_NAME = /^rollout-.*\.jsonl$/;
 const RATE_LIMITS_MARKER = "\"rate_limits\"";
@@ -20,14 +19,13 @@ const RATE_LIMITS_MARKER = "\"rate_limits\"";
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
 
-const toLimit = (window: unknown): Limit | null => {
+const toLimit = (window: unknown): CodexLimit | null => {
 	if (!isRecord(window)) return null;
 	const { used_percent: used, window_minutes: minutes, resets_at: resets } = window;
 	if (typeof used !== "number" || !(used >= 0)) return null;
 	if (typeof minutes !== "number" || !Number.isInteger(minutes) || minutes <= 0) return null;
 	if (resets !== undefined && (typeof resets !== "number" || !Number.isFinite(resets))) return null;
-	const kind = minutes === FIVE_HOUR_MINUTES ? "five_hour" : minutes === SEVEN_DAY_MINUTES ? "seven_day" : `${minutes}m`;
-	return { kind, percent: used, resetsAt: resets === undefined ? null : resets * MS_PER_SECOND };
+	return { windowMinutes: minutes, usedPercent: used, resetsAt: resets === undefined ? null : isoOrNull(resets * MS_PER_SECOND) };
 };
 
 const parseLine = (line: string): CodexReading | null => {
@@ -48,7 +46,8 @@ const parseLine = (line: string): CodexReading | null => {
 		const limit = toLimit(window);
 		return limit === null ? [] : [limit];
 	});
-	return limits.length === 0 ? null : { at, limits };
+	const iso = isoOrNull(at);
+	return limits.length === 0 || iso === null ? null : { at: iso, limits };
 };
 
 // The last parsable rate-limit event of a rollout, or null.

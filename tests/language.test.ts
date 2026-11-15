@@ -3,6 +3,7 @@ import type { MemoryRuntimeHarness } from "./fakes/memory-runtime.js";
 import { describe, expect, test } from "bun:test";
 
 import { runCli } from "../src/cli.js";
+import { renderFailure } from "../src/output.js";
 import { messagesFor } from "../src/messages.js";
 import { readStoredLanguage } from "../src/state.js";
 import { baseManifest, createMemoryRuntime, featureManifest, seedFeature } from "./fakes/memory-runtime.js";
@@ -16,6 +17,8 @@ const SUCCESS_EXIT_CODE = 0;
 const FAILURE_EXIT_CODE = 1;
 
 type Run = { code: number; output: string[] };
+
+const failure = (code: string, message: string): string => renderFailure({ code, message });
 
 const setup = (language?: "en" | "ru"): MemoryRuntimeHarness => {
 	const harness = createMemoryRuntime();
@@ -125,7 +128,7 @@ describe("rig language", () => {
 
 		for (const args of [["language", "de"], ["language", "en", "ru"], ["language", "--yaml"]]) {
 			const result = await run(harness, args);
-			expect(result).toEqual({ code: FAILURE_EXIT_CODE, output: ["Usage: rig language [en|ru] [--json]"] });
+			expect(result).toEqual({ code: FAILURE_EXIT_CODE, output: [failure("usage", "Usage: rig language [en|ru] [--json]")] });
 		}
 		expect(harness.fs.files.get(STATE_PATH)).toBe(stateBefore);
 		expect(harness.fs.files.has(EVENTS_PATH)).toBe(false);
@@ -244,26 +247,28 @@ describe("output follows the stored language", () => {
 		const english = setup();
 		const englishRun = await run(english, ["update"]);
 		expect(englishRun.code).not.toBe(SUCCESS_EXIT_CODE);
-		expect(englishRun.output.join("\n")).toContain("rig error: Update is not available in dev mode.");
+		expect(englishRun.output).toEqual([failure("command-failed", messagesFor("en").update.devUnavailable())]);
 
 		const russian = setup("ru");
 		const russianRun = await run(russian, ["update"]);
-		expect(russianRun.output.join("\n")).toContain("Ошибка rig: Обновление недоступно в режиме dev.");
+		expect(russianRun.output).toEqual([failure("command-failed", messagesFor("ru").update.devUnavailable())]);
+		expect(messagesFor("ru").update.devUnavailable()).not.toBe(messagesFor("en").update.devUnavailable());
 	});
 
 	test("errors are printed in the stored language", async () => {
 		const english = setup();
 		const englishRun = await run(english, ["feature", "missing", "enable"]);
-		expect(englishRun.output.join("\n")).toContain("rig error: Unknown feature missing.");
+		expect(englishRun.output).toEqual([failure("command-failed", messagesFor("en").feature.unknown("missing"))]);
 
 		const russian = setup("ru");
 		const russianRun = await run(russian, ["feature", "missing", "enable"]);
-		expect(russianRun.output.join("\n")).toContain("Ошибка rig: Неизвестная фича missing.");
+		expect(russianRun.output).toEqual([failure("command-failed", messagesFor("ru").feature.unknown("missing"))]);
+		expect(messagesFor("ru").feature.unknown("missing")).not.toBe(messagesFor("en").feature.unknown("missing"));
 	});
 
 	test("an unknown command is reported in English when the state has no language, in Russian when it says ru", async () => {
-		expect((await run(setup(), ["nonsense"])).output).toEqual(["Unknown command or arguments: nonsense"]);
-		expect((await run(setup("ru"), ["nonsense"])).output).toEqual(["Неизвестная команда или аргументы: nonsense"]);
+		expect((await run(setup(), ["nonsense"])).output).toEqual([failure("usage", messagesFor("en").cli.unknownCommand("nonsense"))]);
+		expect((await run(setup("ru"), ["nonsense"])).output).toEqual([failure("usage", messagesFor("ru").cli.unknownCommand("nonsense"))]);
 	});
 
 	test("an unsupported language value in state.json is read as English by every command and changes nothing", async () => {
@@ -315,7 +320,7 @@ describe("output follows the stored language", () => {
 				const code = await runCli(args, (line) => output.push(line), harness.runtime);
 
 				const messages = messagesFor(language);
-				expect({ args, code, output }).toEqual({ args, code: FAILURE_EXIT_CODE, output: [messages.cli.rigError(messages.language.notInstalled())] });
+				expect({ args, code, output }).toEqual({ args, code: FAILURE_EXIT_CODE, output: [failure("command-failed", messages.language.notInstalled())] });
 				expect(harness.fs.files.has(STATE_PATH)).toBe(false);
 				expect(harness.fs.files.has(EVENTS_PATH)).toBe(false);
 			}
@@ -349,9 +354,10 @@ describe("output follows the stored language", () => {
 		const badCode = await runCli(["nonsense"], (line) => bad.push(line), undefined, factory);
 
 		expect(helpCode).toBe(SUCCESS_EXIT_CODE);
-		expect(help).toEqual([messagesFor("ru").cli.help()]);
+		expect(help).toHaveLength(1);
+		expect(JSON.parse(help[0])).toHaveProperty("usage");
 		expect(badCode).toBe(FAILURE_EXIT_CODE);
-		expect(bad).toEqual(["Неизвестная команда или аргументы: nonsense"]);
+		expect(bad).toEqual([failure("usage", messagesFor("ru").cli.unknownCommand("nonsense"))]);
 		expect(built).toBe(0);
 	});
 });
