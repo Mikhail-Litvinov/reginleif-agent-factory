@@ -117,7 +117,8 @@ export const runSession = async (runtime: RuntimePorts, session: SessionRecord, 
 		let record: unknown;
 		try { record = JSON.parse(await runtime.fs.readText(joinPath(runtime.home, ".agent-rig", "sessions", `${session.id}.json`))); } catch { record = null; }
 		const account = await accountOf(runtime, state.value, object(record) && typeof record.config_dir === "string" ? record.config_dir : "");
-		accountText = account === null ? "" : String(account);
+		if (!account.ok) return invalid(account.error);
+		accountText = account.value === null ? "" : String(account.value);
 	}
 	if (accountText !== "" && !/^\d+$/.test(accountText)) return invalid(messagesFor(runtime.language).session.accountNumber());
 	const command = await prepareLaunch(runtime, session, accountText, mode, accountOverride !== null);

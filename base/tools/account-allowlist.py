@@ -132,24 +132,34 @@ def build_parser():
     query.add_argument("category", choices=CATEGORIES)
     query.add_argument("--config-dir", default="",
                        help="the CLAUDE_CONFIG_DIR of the session; empty or omitted is the main login")
-    account = commands.add_parser("account", help="print the cswap account of a Claude config dir")
-    account.add_argument("--config-dir", default="",
-                         help="the CLAUDE_CONFIG_DIR of the session; empty or omitted is the main login")
+    batch =commands.add_parser("batch", help="query accounts and categories in one process")
+    batch.add_argument("--config-dir", action="append", required=True)
+    batch.add_argument("--category", action="append", choices=CATEGORIES, default=[])
     return parser
 
 
 def main(argv=None):
     """`check <category> --config-dir <dir>`: one line of JSON {"allowed", "reason"}, exit 0 in both cases.
-    `account --config-dir <dir>`: one line of JSON {"present", "account"} (account is null when unknown).
+    `batch --config-dir <dir>... [--category <name>...]`: one line of JSON {"accounts", "categories"}; accounts maps
+    each dir to {"present", "account"} (account is null when unknown).
 
     The process's own CLAUDE_CONFIG_DIR is ignored: --config-dir alone names the session's config dir.
     """
     args = build_parser().parse_args(argv)
-    env = {"CLAUDE_CONFIG_DIR": args.config_dir} if args.config_dir else {}
-    if args.command == "account":
-        present, number = current_account(env)
-        print(json.dumps({"present": present, "account": number}, ensure_ascii=True))
+    if args.command == "batch":
+        accounts = {}
+        for directory in args.config_dir:
+            env = {"CLAUDE_CONFIG_DIR": directory} if directory else {}
+            present, number = current_account(env)
+            accounts[directory] = {"present": present, "account": number}
+        env = {"CLAUDE_CONFIG_DIR": args.config_dir[0]} if args.config_dir[0] else {}
+        categories = {}
+        for category in args.category:
+            allowed, reason = check(category, env)
+            categories[category] = {"allowed": allowed, "reason": reason}
+        print(json.dumps({"accounts": accounts, "categories": categories}, ensure_ascii=True))
         return 0
+    env = {"CLAUDE_CONFIG_DIR": args.config_dir} if args.config_dir else {}
     allowed, reason = check(args.category, env)
     print(json.dumps({"allowed": allowed, "reason": reason}, ensure_ascii=True))
     return 0

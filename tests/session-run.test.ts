@@ -34,11 +34,23 @@ describe("session run and mode", () => {
 		const h = setup();
 		h.fs.seed(`${ROOT}/state.json`, JSON.stringify({ mode: "dev", paths: { repo: "/repo", hub: "/hub" }, features: {}, records: {}, badPairs: [], pendingHubRestart: null }));
 		const calls: string[][] = [];
-		h.runtime.process.run = async (_command, args) => { calls.push([...args]); return ok({ stdout: '{"account":12}', stderr: "", exitCode: 0 }); };
+		h.runtime.process.run = async (_command, args) => { calls.push([...args]); return ok({ stdout: '{"accounts":{"/cfg/1-test":{"present":true,"account":12}},"categories":{}}', stderr: "", exitCode: 0 }); };
 		await runSession(h.runtime, session, "plan", null, async () => apiOk(null));
 		expect(calls.length).toBe(1);
-		expect(calls[0]).toContain("account");
+		expect(calls[0]).toContain("batch");
+		expect(calls[0]).toContain("/cfg/1-test");
 		expect(h.fs.textReads.some((path) => path.endsWith("/usage.json"))).toBe(false);
+	});
+	test("account helper failures prevent launch", async () => {
+		const h = setup();
+		h.fs.seed(`${ROOT}/state.json`, JSON.stringify({ mode: "dev", paths: { repo: "/repo", hub: "/hub" }, features: {}, records: {}, badPairs: [], pendingHubRestart: null }));
+		for (const output of [ok({ stdout: "", stderr: "broken", exitCode: 2 }), ok({ stdout: "garbage", stderr: "", exitCode: 0 })]) {
+			h.runtime.process.run = async () => output;
+			let launched = false;
+			const result = await runSession(h.runtime, session, "plan", null, async () => { launched = true; return apiOk(null); });
+			expect(code(result)).toBe("launch-invalid");
+			expect(launched).toBe(false);
+		}
 	});
 	test("uses catalogue errors in both languages", async () => {
 		for (const language of ["en", "ru"] as const) {

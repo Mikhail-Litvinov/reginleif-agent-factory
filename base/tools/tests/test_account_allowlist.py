@@ -307,37 +307,33 @@ class CliTest(CliRunner):
             self.assertEqual(proc.stdout, "", argv)
 
 
-class AccountCliTest(CliRunner):
-    """`account --config-dir <dir>` prints {"present", "account"} as one JSON line."""
+class BatchCliTest(CliRunner):
+    """`batch --config-dir <dir>...` prints {"accounts", "categories"} as one JSON line."""
 
-    def account(self, home, config_dir=None):
-        argv = ["account"]
-        if config_dir is not None:
-            argv += ["--config-dir", config_dir]
-        proc = self.run_cli(home, argv)
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual(len(proc.stdout.splitlines()), 1, proc.stdout)
-        return json.loads(proc.stdout)
-
-    def test_side_profile_prints_its_number(self):
-        home = Home(self)
-        home.sequence()
-        self.assertEqual(self.account(home, home.side_dir("2-x")), {"present": True, "account": 2})
-
-    def test_empty_or_omitted_config_dir_is_the_active_main_login(self):
+    def test_batch_queries_directories_and_categories(self):
         home = Home(self)
         home.sequence(active=3)
-        self.assertEqual(self.account(home, ""), {"present": True, "account": 3})
-        self.assertEqual(self.account(home), {"present": True, "account": 3})
+        home.config({"codex": [3], "volunteers": []})
+        side = home.side_dir("2-x")
+        proc = self.run_cli(home, ["batch", "--config-dir", "", "--config-dir", side,
+                                   "--config-dir", side, "--category", "codex", "--category", "volunteers"])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        result = json.loads(proc.stdout)
+        self.assertEqual(result["accounts"], {"": {"present": True, "account": 3},
+                                              side: {"present": True, "account": 2}})
+        self.assertTrue(result["categories"]["codex"]["allowed"])
+        self.assertFalse(result["categories"]["volunteers"]["allowed"])
 
-    def test_undeterminable_dir_prints_null_account(self):
+    def test_batch_without_cswap_or_known_account(self):
         home = Home(self)
+        side = home.side_dir("odd")
+        proc = self.run_cli(home, ["batch", "--config-dir", side, "--config-dir", ""])
+        accounts = json.loads(proc.stdout)["accounts"]
+        self.assertEqual(accounts[side], {"present": False, "account": None})
+        self.assertEqual(accounts[""], {"present": False, "account": None})
         home.sequence()
-        self.assertEqual(self.account(home, home.side_dir("odd")), {"present": True, "account": None})
-
-    def test_no_cswap_prints_not_present(self):
-        home = Home(self)
-        self.assertEqual(self.account(home, ""), {"present": False, "account": None})
+        proc = self.run_cli(home, ["batch", "--config-dir", side])
+        self.assertEqual(json.loads(proc.stdout)["accounts"][side], {"present": True, "account": None})
 
 
 if __name__ == "__main__":

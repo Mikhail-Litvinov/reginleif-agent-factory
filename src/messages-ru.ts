@@ -26,6 +26,11 @@ export const ru: Messages = {
 		scriptExit: (code: number, stderr: string): string => `скрипт завершился с кодом ${code}: ${stderr === "" ? "stderr пуст" : stderr}`,
 		scriptBadJson: (): string => "скрипт вернул неверный JSON",
 		noSource: (): string => "нет источника данных",
+		allowlistFailed: (detail: string): string => `Не удалось выполнить вспомогательный скрипт списка аккаунтов: ${detail}`,
+		allowlistExit: (code: number, stderr: string): string => `Вспомогательный скрипт списка аккаунтов завершился с кодом ${code}: ${stderr}`,
+		allowlistBadJson: (): string => "Вспомогательный скрипт списка аккаунтов вернул неверный JSON",
+		allowlistBadAccount: (): string => "Вспомогательный скрипт списка аккаунтов вернул некорректный ответ об аккаунте",
+		allowlistBadCategory: (category: string): string => `Вспомогательный скрипт списка аккаунтов вернул некорректный ответ для ${category}`,
 	},
 	exec: {
 		usage: (): string => "Использование: rig exec start <pwsh|cmd|bash> --cwd <dir> | status <id> [--from <offset>] | stop <id> | list",

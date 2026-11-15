@@ -102,13 +102,13 @@ as the source gave it.
 Key order is `session`, `account`, `claude`, `codex`, `volunteers`, `context`.
 
 - `session`: the id asked for. `account`: the cswap account number of the session's config dir, `null` when it cannot
-  be determined.
+  be determined; it is `null` also when the allowlist helper failed (then `claude` carries the failure).
 - `claude`: the freshest `usage.json` `rateLimits` among the sessions whose config dir has the same cswap account
-  (`account-allowlist.py account --config-dir <dir>`); an account that cannot be determined means only the session's own.
+  (`account-allowlist.py batch`); an account that cannot be determined means only the session's own. A failed helper makes this block a `script-failed` error.
   `at` is the time of that reading, `sessionId` the session it came from, `limits` keep the source order (`kind` is the
   source's own name, e.g. `five_hour`, `seven_day`); `resetsAt` is `null` when the source has none.
-- `codex`: the key is absent unless the feature `codex` is on in rig state and `account-allowlist.py check codex
-  --config-dir <dir>` allows it. Limits come from `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-*.jsonl` (`~/.codex` when
+- `codex`: the key is absent unless the feature `codex` is on in rig state and the `batch` answer (see below) allows
+  `codex` for the session's config dir. Limits come from `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-*.jsonl` (`~/.codex` when
   `CODEX_HOME` is unset or empty): date directories newest first, at most 20 files, ordered by modification time (then
   name). Each file is read backwards in 64 KiB blocks (stat plus ranged reads, never the whole file) until the last
   rate-limit event. `at` is the event's time; `windowMinutes` and `usedPercent` are the event's values, a window whose
@@ -116,13 +116,18 @@ Key order is `session`, `account`, `claude`, `codex`, `volunteers`, `context`.
 - `volunteers`: the key is absent unless the feature `volunteers` is on and the same allowlist gate allows it. The value
   is the reading of `volunteer-models.py limits --json` with its fields in camelCase and its times as ISO strings: `at`,
   `source`, `dayPercent`, `used`, `cap`, `resetsAt` (each of the last three may be `null`) and `providers` (name to
-  `{used, cap}`). The script and the allowlist tool calls are each bounded by a 5 s timeout (the process tree is killed).
+  `{used, cap}`). The script and the allowlist tool call is bounded by a 5 s timeout (the process tree is killed).
 - `context`: this session's `usage.json` context: `at`, `tokens`, `window` (`at` and `window` may be `null`);
   `threshold`, `autocompact` and `estimated` only when `usage.json` carries them.
+- One helper process per pass: `account-allowlist.py batch --config-dir <dir>... --category <name>...` answers the accounts of every
+  session directory and the category checks (only the features that are on) in one JSON object
+  `{accounts: {dir: {present, account}}, categories: {name: {allowed, reason}}}`. A helper that fails (spawn error,
+  timeout, non-zero exit, bad JSON) makes `claude`, `codex` and `volunteers` (the last two only when their feature is on)
+  `script-failed` block errors naming the reason; never an absent block. `allowed: false` still omits the block.
 - A block that cannot be read is `{"error":{"code","message"}}` in the place of its data; a failing source never fails
   the command. Block codes: `no-data` (nothing recorded yet), `no-rollout` (no Codex rollout with a rate-limit event),
-  `script-missing`, `script-failed`, `bad-output` (volunteer script), `no-source`. `message` is an English text for
-  logs, not for display.
+  `script-missing`, `script-failed`, `bad-output` (volunteer script), `no-source`. `message` is written in the rig
+  language (`rig language`), from the catalogue in `src/messages.ts`.
 - A block the session may not use is absent, not an error.
 - Command failure (nothing else on stdout, exit code 1): `bad-session` (a malformed session id), `unknown-session`,
   `state-unreadable`, `usage` (wrong arguments).

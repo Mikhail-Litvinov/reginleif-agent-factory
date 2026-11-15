@@ -39,6 +39,11 @@ export const en = {
 		scriptExit: (code: number, stderr: string): string => `script exited with code ${code}: ${stderr === "" ? "no stderr" : stderr}`,
 		scriptBadJson: (): string => "bad JSON from script",
 		noSource: (): string => "no data source",
+		allowlistFailed: (detail: string): string => `Account allowlist helper failed: ${detail}`,
+		allowlistExit: (code: number, stderr: string): string => `Account allowlist helper exited with code ${code}: ${stderr}`,
+		allowlistBadJson: (): string => "Account allowlist helper returned invalid JSON output",
+		allowlistBadAccount: (): string => "Account allowlist helper returned an invalid account answer",
+		allowlistBadCategory: (category: string): string => `Account allowlist helper returned an invalid ${category} answer`,
 	},
 	exec: {
 		usage: (): string => "Usage: rig exec start <pwsh|cmd|bash> --cwd <dir> | status <id> [--from <offset>] | stop <id> | list",

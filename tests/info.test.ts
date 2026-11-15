@@ -35,7 +35,7 @@ const OTHER_ACCOUNT_DIRECTORY = "/cfg/2-other";
 const SINGLE_OUTPUT_LINE = 1;
 
 type Harness = ReturnType<typeof createMemoryRuntime>;
-type Tool = { accounts: Record<string, number | null>; allowed: Record<string, boolean>; volunteers: (options?: ProcessOptions) => Result<ProcessOutput> };
+type Tool = { accounts: Record<string, number | null>; allowed: Record<string, boolean>; volunteers: (options?: ProcessOptions) => Result<ProcessOutput>; failure?: Result<ProcessOutput> };
 
 const iso = (ms: number): string => new Date(ms).toISOString();
 
@@ -68,9 +68,17 @@ const withTool = (harness: Harness, tool: Tool, language: RuntimePorts["language
 		...harness.runtime.process,
 		run: async (command, args, options) => {
 			harness.processCalls.push({ command, args, options });
-			const [, script, subcommand, third, fourth] = args;
-			if (script.endsWith("account-allowlist.py") && subcommand === "account") {
-				return stdout({ present: true, account: tool.accounts[fourth] ?? null });
+			const [, script, subcommand, third] = args;
+			if (script.endsWith("account-allowlist.py") && subcommand === "batch") {
+				if (tool.failure) return tool.failure;
+				const accounts: Record<string, unknown> = {};
+				const categories: Record<string, unknown> = {};
+				for (let index = 3; index < args.length; index += 2) {
+					const name = args[index + 1];
+					if (args[index] === "--config-dir") accounts[name] = { present: true, account: tool.accounts[name] ?? null };
+					if (args[index] === "--category") categories[name] = { allowed: tool.allowed[name] === true, reason: "" };
+				}
+				return stdout({ accounts, categories });
 			}
 			if (script.endsWith("account-allowlist.py") && subcommand === "check") {
 				return stdout({ allowed: tool.allowed[third] === true, reason: "" });
@@ -203,8 +211,36 @@ describe("rig info", () => {
 		const refused = baseHarness({ codex: true, volunteers: true });
 		seedSession(refused, OWN_ID, OWN_DIRECTORY, usage);
 		expect(Object.keys(await infoOf(withTool(refused, tool({ allowed: { codex: false, volunteers: false } }))) ?? {})).toEqual(keys);
-		const check = refused.processCalls.find((call) => call.args[2] === "check");
-		expect(check?.args).toEqual(["-I", `${REPO}/base/tools/account-allowlist.py`, "check", "codex", "--config-dir", OWN_DIRECTORY]);
+		expect(refused.processCalls.filter((call) => call.args[2] === "batch")).toHaveLength(1);
+	});
+
+	test("failed allowlist processes make every dependent block an error", async () => {
+		const failures: Array<[Result<ProcessOutput>, string]> = [
+			[err("spawn failed"), "spawn failed"],
+			[err("timed out"), "timed out"],
+			[ok({ stdout: "", stderr: "diagnostic", exitCode: SCRIPT_FAILURE_CODE }), "code 2: diagnostic"],
+			[ok({ stdout: "garbage", stderr: "", exitCode: PROCESS_SUCCESS_EXIT_CODE }), "invalid JSON"],
+			[stdout({ accounts: {}, categories: {} }), "invalid"],
+		];
+		for (const [failure, message] of failures) {
+			const harness = baseHarness({ codex: true, volunteers: true });
+			seedSession(harness, OWN_ID, OWN_DIRECTORY);
+			const body = await infoOf(withTool(harness, tool({ failure })));
+			const text = JSON.stringify(body);
+			for (const name of ["claude", "codex", "volunteers"]) expect(text).toContain(`"${name}":{"error"`);
+			expect(text).toContain(message);
+		}
+	});
+
+	test("one allowlist process covers all session directories and categories", async () => {
+		const harness = baseHarness({ codex: true, volunteers: true });
+		for (const [id, directory] of [[OWN_ID, OWN_DIRECTORY], [SAME_ACCOUNT_ID, SAME_ACCOUNT_DIRECTORY], [OTHER_ACCOUNT_ID, OTHER_ACCOUNT_DIRECTORY]]) {
+			seedSession(harness, id, directory, claudeUsage(NOW, 1, 2, NOW + HOUR, NOW + DAY));
+		}
+		await infoOf(withTool(harness, tool()));
+		const calls = harness.processCalls.filter((call) => call.args.some((arg) => arg.endsWith("account-allowlist.py")));
+		expect(calls).toHaveLength(1);
+		for (const directory of [OWN_DIRECTORY, SAME_ACCOUNT_DIRECTORY, OTHER_ACCOUNT_DIRECTORY]) expect(calls[0].args).toContain(directory);
 	});
 
 	test("an account that cannot be determined uses only the session's own Claude limits", async () => {

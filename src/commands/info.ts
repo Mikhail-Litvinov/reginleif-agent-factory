@@ -3,6 +3,7 @@ import type { Messages } from "../messages.js";
 import type { ApiResult } from "../output.js";
 import type { RigState } from "../state.js";
 import type { RuntimePorts } from "../ports.js";
+import type { Result } from "../result.js";
 
 import { readCodexLimits } from "../codex-rollout.js";
 import { joinPath, toSlashPath } from "../file-system.js";
@@ -10,6 +11,7 @@ import { isoOrNull } from "../info-data.js";
 import { messagesFor } from "../messages.js";
 import { apiFail, apiOk } from "../output.js";
 import { PROCESS_SUCCESS_EXIT_CODE } from "../ports.js";
+import { err, ok } from "../result.js";
 import { readRigState } from "./shared.js";
 
 const SAFE_SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
@@ -20,6 +22,8 @@ const CODEX_HOME_VARIABLE = "CODEX_HOME";
 const ACCOUNT_SCRIPT = "base/tools/account-allowlist.py";
 const VOLUNTEER_TOOLS_DIRECTORY = "features/volunteers/tools";
 const VOLUNTEER_SCRIPT = "volunteer-models.py";
+// Bound diagnostics from an external process, as for launch stderr.
+const STDERR_HEAD_LIMIT = 1000;
 
 // Failure codes of `rig info`: a command-level failure fails the whole command, a block-level one fills only its block.
 export const INFO_ERROR_BAD_SESSION = "bad-session";
@@ -105,25 +109,38 @@ const readOptionalText = async (runtime: RuntimePorts, path: string): Promise<st
 	}
 };
 
-// Runs a subcommand of the shared allowlist tool and returns its one JSON line; null on any failure.
-const runAllowlistTool = async (runtime: RuntimePorts, state: RigState, args: readonly string[]): Promise<Record<string, unknown> | null> => {
+const runAllowlistTool = async (runtime: RuntimePorts, state: RigState, messages: Messages, args: readonly string[]): Promise<Result<Record<string, unknown>>> => {
 	const result = await runtime.process.run(runtime.pythonCommand, ["-I", joinPath(state.paths.repo, ACCOUNT_SCRIPT), ...args], { timeoutMs: HELPER_TIMEOUT_MS });
-	if (!result.ok || result.value.exitCode !== PROCESS_SUCCESS_EXIT_CODE) return null;
+	if (!result.ok) return err(messages.info.allowlistFailed(result.error));
+	if (result.value.exitCode !== PROCESS_SUCCESS_EXIT_CODE) return err(messages.info.allowlistExit(result.value.exitCode, result.value.stderr.trim().slice(0, STDERR_HEAD_LIMIT)));
 	const parsed = parseJson(result.value.stdout.trim());
-	return isRecord(parsed) ? parsed : null;
+	return isRecord(parsed) ? ok(parsed) : err(messages.info.allowlistBadJson());
 };
 
-export const accountOf = async (runtime: RuntimePorts, state: RigState, configDir: string): Promise<number | null> => {
-	const answer = await runAllowlistTool(runtime, state, ["account", "--config-dir", configDir]);
-	const account = answer?.account;
-	return typeof account === "number" ? account : null;
+const parseAccount = (answer: unknown, messages: Messages): Result<number | null> => {
+	if (!isRecord(answer) || typeof answer.present !== "boolean" || !(answer.account === null || (typeof answer.account === "number" && Number.isSafeInteger(answer.account)))) return err(messages.info.allowlistBadAccount());
+	return ok(answer.account);
 };
 
-// The feature must be on in rig state and the allowlist must accept this session's account. A check that cannot run hides the block.
-const categoryShown = async (runtime: RuntimePorts, state: RigState, category: "codex" | "volunteers", configDir: string): Promise<boolean> => {
-	if (state.features[category] !== true) return false;
-	const answer = await runAllowlistTool(runtime, state, ["check", category, "--config-dir", configDir]);
-	return answer?.allowed === true;
+// The account of one config dir, read from a `batch` answer (`accounts[configDir]`).
+const accountInAnswer = (answer: Result<Record<string, unknown>>, configDir: string, messages: Messages): Result<number | null> => {
+	if (!answer.ok) return answer;
+	const accounts = isRecord(answer.value.accounts) ? answer.value.accounts : {};
+	return parseAccount(accounts[configDir], messages);
+};
+
+export const accountOf = async (runtime: RuntimePorts, state: RigState, configDir: string): Promise<Result<number | null>> => {
+	const messages = messagesFor(runtime.language);
+	const answer = await runAllowlistTool(runtime, state, messages, ["batch", "--config-dir", configDir]);
+	return accountInAnswer(answer, configDir, messages);
+};
+
+const categoryShown = (state: RigState, category: "codex" | "volunteers", answer: Result<Record<string, unknown>>, messages: Messages): Result<boolean> => {
+	if (state.features[category] !== true) return ok(false);
+	if (!answer.ok) return answer;
+	const categories = answer.value.categories;
+	const entry = isRecord(categories) ? categories[category] : undefined;
+	return isRecord(entry) && typeof entry.allowed === "boolean" ? ok(entry.allowed) : err(messages.info.allowlistBadCategory(category));
 };
 
 const sessionsDirectory = (runtime: RuntimePorts): string => joinPath(runtime.home, ".agent-rig", "sessions");
@@ -144,27 +161,20 @@ const readingTime = (usage: Usage): number => usage.at === null ? Number.NEGATIV
 
 // The limits belong to the account, so the freshest reading among the sessions of the same account wins. An account
 // that cannot be determined means only this session's own reading.
-const freshestClaudeLimits = async (
-	runtime: RuntimePorts,
-	state: RigState,
+const freshestClaudeLimits = (
 	sessionId: string,
-	configDir: string,
 	account: number | null,
 	own: Usage | null,
-): Promise<ClaudeReading | null> => {
+	others: Array<{ sessionId: string; directory: string; usage: Usage }>,
+	accounts: Record<string, unknown>,
+	messages: Messages,
+): Result<ClaudeReading | null> => {
 	const candidates: Array<{ sessionId: string; usage: Usage }> = own === null ? [] : [{ sessionId, usage: own }];
 	if (account !== null) {
-		const accountByDirectory = new Map<string, number | null>([[configDir, account]]);
-		for (const id of await sessionIdsWithRecords(runtime)) {
-			if (id === sessionId) continue;
-			const usageText = await readOptionalText(runtime, joinPath(sessionsDirectory(runtime), id, "usage.json"));
-			const usage = usageText === null ? null : parseUsage(usageText);
-			if (usage === null || usage.limits.length === 0) continue;
-			const recordText = await readOptionalText(runtime, joinPath(sessionsDirectory(runtime), `${id}.json`));
-			const record = recordText === null ? undefined : parseJson(recordText);
-			const otherDirectory = isRecord(record) && typeof record.config_dir === "string" ? record.config_dir : "";
-			if (!accountByDirectory.has(otherDirectory)) accountByDirectory.set(otherDirectory, await accountOf(runtime, state, otherDirectory));
-			if (accountByDirectory.get(otherDirectory) === account) candidates.push({ sessionId: id, usage });
+		for (const other of others) {
+			const otherAccount = parseAccount(accounts[other.directory], messages);
+			if (!otherAccount.ok) return otherAccount;
+			if (otherAccount.value === account) candidates.push(other);
 		}
 	}
 	let best: { sessionId: string; usage: Usage } | null = null;
@@ -172,7 +182,7 @@ const freshestClaudeLimits = async (
 		if (candidate.usage.limits.length === 0) continue;
 		if (best === null || readingTime(candidate.usage) > readingTime(best.usage)) best = candidate;
 	}
-	return best === null ? null : { at: best.usage.at, sessionId: best.sessionId, limits: best.usage.limits };
+	return ok(best === null ? null : { at: best.usage.at, sessionId: best.sessionId, limits: best.usage.limits });
 };
 
 const codexBlock = async (runtime: RuntimePorts, messages: Messages): Promise<CodexReading | BlockError> => {
@@ -243,14 +253,30 @@ export const infoCommand = async (runtime: RuntimePorts, sessionId: string): Pro
 	const configDir = typeof record.config_dir === "string" ? record.config_dir : "";
 	const usageText = await readOptionalText(runtime, joinPath(sessionsDirectory(runtime), sessionId, "usage.json"));
 	const own = usageText === null ? null : parseUsage(usageText);
-	const account = await accountOf(runtime, state, configDir);
-	const claude = await freshestClaudeLimits(runtime, state, sessionId, configDir, account, own);
-	const codex = await categoryShown(runtime, state, "codex", configDir) ? await codexBlock(runtime, messages) : null;
-	const volunteers = await categoryShown(runtime, state, "volunteers", configDir) ? await volunteerBlock(runtime, state, messages) : null;
+	const others: Array<{ sessionId: string; directory: string; usage: Usage }> = [];
+	for (const id of await sessionIdsWithRecords(runtime)) {
+		if (id === sessionId) continue;
+		const text = await readOptionalText(runtime, joinPath(sessionsDirectory(runtime), id, "usage.json"));
+		const usage = text === null ? null : parseUsage(text);
+		if (usage === null || usage.limits.length === 0) continue;
+		const otherText = await readOptionalText(runtime, joinPath(sessionsDirectory(runtime), `${id}.json`));
+		const other = otherText === null ? undefined : parseJson(otherText);
+		others.push({ sessionId: id, directory: isRecord(other) && typeof other.config_dir === "string" ? other.config_dir : "", usage });
+	}
+	const directories = [...new Set([configDir, ...others.map((other) => other.directory)])];
+	const categories = (["codex", "volunteers"] as const).filter((category) => state.features[category] === true);
+	const answer = await runAllowlistTool(runtime, state, messages, ["batch", ...directories.flatMap((directory) => ["--config-dir", directory]), ...categories.flatMap((category) => ["--category", category])]);
+	const accounts = answer.ok && isRecord(answer.value.accounts) ? answer.value.accounts : {};
+	const account = accountInAnswer(answer, configDir, messages);
+	const claude = account.ok ? freshestClaudeLimits(sessionId, account.value, own, others, accounts, messages) : account;
+	const codexCheck = categoryShown(state, "codex", answer, messages);
+	const volunteerCheck = categoryShown(state, "volunteers", answer, messages);
+	const codex = !codexCheck.ok ? blockError(BLOCK_SCRIPT_FAILED, codexCheck.error) : codexCheck.value ? await codexBlock(runtime, messages) : null;
+	const volunteers = !volunteerCheck.ok ? blockError(BLOCK_SCRIPT_FAILED, volunteerCheck.error) : volunteerCheck.value ? await volunteerBlock(runtime, state, messages) : null;
 	return apiOk({
 		session: sessionId,
-		account,
-		claude: claude ?? blockError(BLOCK_NO_DATA, messages.info.claudeNoData()),
+		account: account.ok ? account.value : null,
+		claude: claude.ok ? claude.value ?? blockError(BLOCK_NO_DATA, messages.info.claudeNoData()) : blockError(BLOCK_SCRIPT_FAILED, claude.error),
 		...(codex === null ? {} : { codex }),
 		...(volunteers === null ? {} : { volunteers }),
 		context: own?.context ?? blockError(BLOCK_NO_DATA, messages.info.noContextData()),
