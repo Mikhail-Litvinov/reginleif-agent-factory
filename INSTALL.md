@@ -39,7 +39,7 @@ Check `sudo -n true`. Exit code 0: run the command yourself. Otherwise you canno
 
 What the script does: installs packages, starts `cron`, enables linger (user services work without an open SSH session) and writes `/etc/claude-code/managed-settings.json`. The script can be run again.
 
-The `managed-settings.json` file allows only the `telegram-hub` plugin from channels and applies to all users of the server. Without it Claude Code asks to confirm the channel on every session start. The hub starts the session in a detached tmux, where nobody can answer, so a session from a topic would not connect. If the file already exists and does not contain this permission, the script changes nothing and prints the keys that are needed: ask the human to add them and run the script again.
+The `managed-settings.json` file allows only the `telegram-hub` plugin from channels and applies to all users of the server. Without it Claude Code asks to confirm the channel on every session start. Rig starts a session from a topic on a server in a detached tmux (there is no display), where nobody can answer, so a session from a topic would not connect. If the file already exists and does not contain this permission, the script changes nothing and prints the keys that are needed: ask the human to add them and run the script again.
 
 Why each package is needed:
 
@@ -47,7 +47,7 @@ Why each package is needed:
 - `python3`: the hooks of the features `base`, `reflection`, `codex` run through python; `rig check` requires the `python3` interpreter.
 - `bash`: the feature `base` checks it; `rig check` runs `base/hooks/project-tmp.sh`.
 - `cron`: on a server `rig install` puts entries into `crontab` and stops without it. On Linux `rig check` verifies it is present.
-- `tmux`: needed by the hub (Claude Code sessions); on Linux `rig check` verifies it is present.
+- `tmux`: on a server without a display `rig session run` (and so the hub's session start from a topic) starts Claude in a detached tmux; without `tmux` it fails with `launch-unavailable`. On Linux `rig check` verifies it is present.
 - `unzip`, `curl`, `ca-certificates`: the Bun installer and HTTPS downloads.
 - `nodejs`: Codex installed through Bun starts as `#!/usr/bin/env node`; without `node` the `codex` command does not work (`/usr/bin/env: 'node': No such file or directory`). Version 18 from the Ubuntu 24.04 repository is enough.
 
@@ -111,13 +111,9 @@ All hub files are in `~/.claude/channels/telegram-hub/`.
 
 **7.1. Directory.** `mkdir -p "$HOME/.claude/channels/telegram-hub"`. You do not need to install the hub dependencies by hand: before every start the service runs `bun install --frozen-lockfile` itself.
 
-**7.2. Starting sessions from a topic.** Create `config.json` with a `launch` section. This is plain Claude; the hub fills in `{session}`, `{cwd}` and `{mode}` itself:
+**7.2. Starting sessions from a topic.** There is nothing to configure: the hub calls `rig session run`, and rig itself builds the Claude command and chooses the terminal (on this server, tmux). Do not create a `launch` section in `config.json`; the hub ignores it. `config.json` is created in step 9.2.
 
-`python3 -c 'import json,os;p=os.path.expanduser("~/.claude/channels/telegram-hub/config.json");json.dump({"launch":{"command":["tmux","new-session","-d","-s","claude-{session}","-c","{cwd}","--","claude","--channels","plugin:telegram-hub@telegram-hub","--resume","{session}","{mode}"],"timeoutSec":90}},open(p,"w"),indent=2)'`
-
-The part of the plugin name after `@` (`telegram-hub`) must match `name` in `~/.agent-rig/hub/.claude-plugin/marketplace.json`. Check: `grep -m1 '"name"' ~/.agent-rig/hub/.claude-plugin/marketplace.json` prints `"name": "telegram-hub"`.
-
-Success criterion: `test -s "$HOME/.claude/channels/telegram-hub/config.json"`.
+Success criterion: `command -v tmux` finds the program.
 
 ### Step 8. List for the human
 
@@ -159,13 +155,13 @@ Success criteria: `systemctl --user is-active telegram-hub.service` prints `acti
 
 The line looks like this: `ignored update from chat -100… (supergroup "GROUP_TITLE"), sender 123…: …`. The number after `chat` is the group ID, the number after `sender` is the human's ID. They are not secret. Write them down, substituting the numbers for `GROUP_ID` and `USER_ID`:
 
-`python3 -c 'import json,os,sys;p=os.path.expanduser("~/.claude/channels/telegram-hub/config.json");c=json.load(open(p));c["groupId"]=sys.argv[1];c["allowFrom"]=[sys.argv[2]];json.dump(c,open(p,"w"),indent=2)' GROUP_ID USER_ID`
+`python3 -c 'import json,os,sys;p=os.path.expanduser("~/.claude/channels/telegram-hub/config.json");c=json.load(open(p)) if os.path.exists(p) else {};c["groupId"]=sys.argv[1];c["allowFrom"]=[sys.argv[2]];json.dump(c,open(p,"w"),indent=2)' GROUP_ID USER_ID`
 
 The hub rereads `config.json` on every message, so the service does not need a restart.
 
 If there is no suitable line, look at all of them: `grep "ignored update from chat" ~/.claude/channels/telegram-hub/hub.log | tail -5`. The value in parentheses is not `supergroup`: Topics are not enabled in the group, ask the human to enable them and write again. A different title: do not use other people's lines, ask the human to check the group title and write again. No lines at all: Telegram does not deliver the group's messages to the bot; the bot must be an administrator of the group (or in @BotFather `/setprivacy` → the bot → `Disable`, then remove the bot from the group and add it again).
 
-If the log has `delivery to session … is blocked`, the bot has no right to write to the group or `config.json` has the wrong `groupId`. If the session does not connect within `timeoutSec` afterwards (90 seconds in step 7.2), the topic reports it and names the attach command. See what is written in tmux: `tmux attach -t claude-<session id>`.
+If the log has `delivery to session … is blocked`, the bot has no right to write to the group or `config.json` has the wrong `groupId`. If the session does not connect within 90 seconds afterwards, the topic reports "Session did not start in time". See what is written in tmux: `tmux ls`, then `tmux attach -t <name from the list>` (rig starts the tmux session without a name of its own). If the topic says "No terminal available: checked x-terminal-emulator with DISPLAY or WAYLAND_DISPLAY, and tmux", `tmux` is not installed: run step 1 again.
 
 ### Step 10. Check
 
@@ -216,6 +212,8 @@ A hook failed. The line "The hook <feature>/<event> exited with code …". Check
 "The telegram-hub service is not running." This is expected until step 9 is done (`rig install` does not run the check, and only step 9 installs the service). If the step is done, see `systemctl --user status telegram-hub.service`, `journalctl --user -u telegram-hub.service -n 50` and `~/.claude/channels/telegram-hub/hub.log`; the reading of log lines (`no TELEGRAM_BOT_TOKEN`, `bot token rejected` and others) is given in step 9.1.
 
 A rig error. Any error is printed as "rig error: …", exit code 1.
+
+A long rig command that must survive its caller (for example an update started from an agent's session) is run as `rig exec start rig -- update`; read the run with `rig exec status <id> --from 0 --wait 30000`. Run records are in `~/.agent-rig/exec`.
 
 Where the logs and events are:
 

@@ -4,20 +4,22 @@
 
 The repository is for anyone who works with Claude Code and Codex on several machines and wants their settings to match and to update themselves. Your personal rules stay yours.
 
-`rig` does not keep a background process. It is a command on Bun and TypeScript with no runtime dependencies (`package.json` has only dev packages for type checking). All paths and settings live in `~/.agent-rig/`.
+`rig` does not keep a background process. It is a command on Bun and TypeScript with no runtime dependencies (`package.json` has only dev packages: type checking and one test guard (`typescript-api`, TypeScript 5 under another name)). All paths and settings live in `~/.agent-rig/`.
 
 `rig session list` lists recorded Claude Code sessions with their liveness and module availability.
 `rig session compact <id> [--instructions <text>]` compacts a live session and returns raw token counts or a hook skip.
 `rig session rename <id> <name...>` renames a live session and returns the name reported by its window.
 `rig session stop <id>` compacts a large context if needed and stops the session.
 `rig session cleanup <id>` compacts, stops, and clears remembered skills from the transcript.
-`rig session run <id> [--mode <mode>] [--account <n>]` resumes a stopped session in a new terminal using a platform-specific command built by rig.
+`rig session autocompact <id> <N|auto>` sets the session's auto-compact window, as `/autocompact` does in its terminal.
+`rig session run <id> [--mode <mode>] [--account <n>]` resumes a stopped session in a new terminal using a command built by rig for the platform: Windows Terminal (`wt.exe`, with `cswap` if found) on Windows, Terminal.app on macOS, `x-terminal-emulator` on Linux when `DISPLAY` or `WAYLAND_DISPLAY` is set, otherwise a detached `tmux` (install it on a server). With none of these the error is `launch-unavailable`. There is no launch template to configure.
 `rig session mode <id> <mode>` changes a session's permission mode, restarting it when needed.
 `rig exec start <shell> --cwd <dir>` starts the command read from stdin in a detached runner.
 `rig exec start rig -- <rig arguments>` runs one of rig's own commands (`update`, `feature`, `language`, ...) the same way, so the run outlives the caller; `exec`, `exec-runner` and `update-step` are refused.
 `rig exec status <id> [--from <byte offset> [--wait <ms>]]` reads a bounded log chunk and the run's state; for a rig run that has ended it also returns `result`, the JSON object rig printed. With `--wait` the call returns as soon as the log has new bytes past the offset or the run has ended, and at the latest after `<ms>`.
 `rig exec stop <id>` stops a run and its process tree.
 `rig exec list` lists runs newest first.
+Runs are stored in `~/.agent-rig/exec`. On Windows a detached start leaves the job of the caller (for example the hub's Scheduled Task): first with `CREATE_BREAKAWAY_FROM_JOB`, and when the job forbids it, through a broker that `powershell` starts with WMI `Win32_Process.Create`. Nothing needs to be installed or configured for this.
 
 Installing on a server is described in [INSTALL.md](INSTALL.md). Agent, you were asked to deploy this here: read `INSTALL.md` and follow its section "What the agent does".
 
