@@ -7,7 +7,7 @@ import { readFeature } from "../feature.js";
 import { joinPath } from "../file-system.js";
 import { buildLaunchCommand } from "../launch-command.js";
 import { messagesFor } from "../messages.js";
-import { apiFail, apiOk, ERROR_CODE_USAGE, LAUNCH_FAILED, LAUNCH_INVALID, LAUNCH_UNAVAILABLE, LAUNCH_TIMEOUT, SESSION_RUNNING } from "../output.js";
+import { apiFail, apiOk, ERROR_CODE_USAGE, LAUNCH_FAILED, LAUNCH_ACCOUNT_LOOKUP, LAUNCH_INVALID, LAUNCH_UNAVAILABLE, LAUNCH_TIMEOUT, SESSION_RUNNING } from "../output.js";
 import { errorText } from "../result.js";
 import { lookupSession, lookupSessionForCommand, sessionLive, SESSION_POLL_MS } from "../session-core.js";
 import { accountOf, INFO_ERROR_STATE_UNREADABLE } from "./info.js";
@@ -32,7 +32,7 @@ const object = (value: unknown): value is Record<string, unknown> => typeof valu
 const validMode = (value: string): boolean => MODES.some((mode) => mode === value);
 const invalid = (message: string): ApiResult<never> => apiFail(LAUNCH_INVALID, message);
 
-export const prepareLaunch = async (runtime: RuntimePorts, session: SessionRecord, account: string, mode: string | null, requestedAccount: boolean): Promise<ApiResult<string[]>> => {
+export const prepareLaunch = async (runtime: RuntimePorts, session: SessionRecord, account: string, mode: string | null): Promise<ApiResult<string[]>> => {
 	const m = messagesFor(runtime.language).session;
 	if (!SESSION_ID.test(session.id)) return invalid(m.launchSessionId());
 	if (account !== "" && !ACCOUNT.test(account)) return invalid(m.launchAccount());
@@ -55,7 +55,7 @@ export const prepareLaunch = async (runtime: RuntimePorts, session: SessionRecor
 		}
 	}
 	const cswap = await runtime.process.isAvailable("cswap");
-	if (!cswap && requestedAccount) return invalid(m.launchNoCswap());
+	if (!cswap && account !== "") return invalid(m.launchNoCswap());
 	const display = Boolean(runtime.environment.get("DISPLAY") || runtime.environment.get("WAYLAND_DISPLAY"));
 	const terminal = runtime.platform === "linux" && display && await runtime.process.isAvailable("x-terminal-emulator");
 	const tmux = runtime.platform === "linux" && !terminal && await runtime.process.isAvailable("tmux");
@@ -106,10 +106,12 @@ const spawnLaunch = async (runtime: RuntimePorts, command: string[]): Promise<Ap
 	return !result.value.exited || result.value.exitCode === 0 ? apiOk(null) : apiFail(LAUNCH_FAILED, messagesFor(runtime.language).session.launchExited(result.value.exitCode, result.value.stderr));
 };
 
-export const runSession = async (runtime: RuntimePorts, session: SessionRecord, mode: string | null, accountOverride: string | null, spawnCommand: SpawnLaunch = (command) => spawnLaunch(runtime, command)): Promise<ApiResult<LaunchResult>> => {
-	const live = await sessionLive(runtime, session);
-	if (!live.ok) return live;
-	if (live.value) return apiFail(SESSION_RUNNING, messagesFor(runtime.language).session.alreadyRunning());
+type ResolvedLaunch = { command: string[]; account: string };
+
+// The whole launch, account included, resolved into a Result before any destructive step. A failed account lookup
+// matters only where cswap could use the account; without cswap the session starts as before 0.7.0, without one.
+export const resolveLaunch = async (runtime: RuntimePorts, session: SessionRecord, mode: string | null, accountOverride: string | null): Promise<ApiResult<ResolvedLaunch>> => {
+	const m = messagesFor(runtime.language);
 	let accountText = accountOverride ?? "";
 	if (accountOverride === null) {
 		const state = await readRigState(runtime);
@@ -117,13 +119,22 @@ export const runSession = async (runtime: RuntimePorts, session: SessionRecord, 
 		let record: unknown;
 		try { record = JSON.parse(await runtime.fs.readText(joinPath(runtime.home, ".agent-rig", "sessions", `${session.id}.json`))); } catch { record = null; }
 		const account = await accountOf(runtime, state.value, object(record) && typeof record.config_dir === "string" ? record.config_dir : "");
-		if (!account.ok) return invalid(account.error);
-		accountText = account.value === null ? "" : String(account.value);
+		if (account.ok) accountText = account.value === null ? "" : String(account.value);
+		else if (await runtime.process.isAvailable("cswap")) return apiFail(LAUNCH_ACCOUNT_LOOKUP, m.session.launchAccountLookup(account.error));
 	}
-	if (accountText !== "" && !/^\d+$/.test(accountText)) return invalid(messagesFor(runtime.language).session.accountNumber());
-	const command = await prepareLaunch(runtime, session, accountText, mode, accountOverride !== null);
-	if (!command.ok) return command;
-	const spawned = await spawnCommand(command.value);
+	if (accountText !== "" && !/^\d+$/.test(accountText)) return invalid(m.session.accountNumber());
+	const command = await prepareLaunch(runtime, session, accountText, mode);
+	return command.ok ? apiOk({ command: command.value, account: accountText }) : command;
+};
+
+export const runSession = async (runtime: RuntimePorts, session: SessionRecord, mode: string | null, accountOverride: string | null, spawnCommand: SpawnLaunch = (command) => spawnLaunch(runtime, command)): Promise<ApiResult<LaunchResult>> => {
+	const live = await sessionLive(runtime, session);
+	if (!live.ok) return live;
+	if (live.value) return apiFail(SESSION_RUNNING, messagesFor(runtime.language).session.alreadyRunning());
+	const launch = await resolveLaunch(runtime, session, mode, accountOverride);
+	if (!launch.ok) return launch;
+	const accountText = launch.value.account;
+	const spawned = await spawnCommand(launch.value.command);
 	if (!spawned.ok) return spawned;
 	const deadline = runtime.clock.now().getTime() + DEFAULT_TIMEOUT_SEC * MS_PER_SECOND;
 	for (;;) {
@@ -163,10 +174,10 @@ export const modeCommand = async (runtime: RuntimePorts, args: readonly string[]
 	const session = await lookupSessionForCommand(runtime, id, false);
 	if (!session.ok) return session;
 	if (await transcriptMode(runtime, session.value.transcriptPath) === mode) return apiOk({ session: id, mode, changed: false });
-	const checked = await prepareLaunch(runtime, session.value, "", mode, false);
-	if (!checked.ok) return checked;
+	const launch = await resolveLaunch(runtime, session.value, mode, null);
+	if (!launch.ok) return launch;
 	const stopped = await stopSession(runtime, session.value, progress);
 	if (!stopped.ok) return stopped;
-	const result = await runSession(runtime, session.value, mode, null);
+	const result = await runSession(runtime, session.value, mode, launch.value.account);
 	return result.ok ? apiOk({ session: id, mode, pid: result.value.pid }) : result;
 };

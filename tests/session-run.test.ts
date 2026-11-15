@@ -41,22 +41,56 @@ describe("session run and mode", () => {
 		expect(calls[0]).toContain("/cfg/1-test");
 		expect(h.fs.textReads.some((path) => path.endsWith("/usage.json"))).toBe(false);
 	});
-	test("account helper failures prevent launch", async () => {
+	test("account helper failure with cswap present returns its own code carrying the reason", async () => {
 		const h = setup();
-		h.fs.seed(`${ROOT}/state.json`, JSON.stringify({ mode: "dev", paths: { repo: "/repo", hub: "/hub" }, features: {}, records: {}, badPairs: [], pendingHubRestart: null }));
 		for (const output of [ok({ stdout: "", stderr: "broken", exitCode: 2 }), ok({ stdout: "garbage", stderr: "", exitCode: 0 })]) {
 			h.runtime.process.run = async () => output;
 			let launched = false;
 			const result = await runSession(h.runtime, session, "plan", null, async () => { launched = true; return apiOk(null); });
-			expect(code(result)).toBe("launch-invalid");
+			expect(code(result)).toBe("launch-account-lookup");
 			expect(launched).toBe(false);
 		}
+		h.runtime.process.run = async () => ok({ stdout: "", stderr: "broken", exitCode: 2 });
+		const failed = await runSession(h.runtime, session, "plan", null, async () => apiOk(null));
+		expect(failed.ok ? "ok" : failed.error.message).toContain("broken");
+	});
+	test("account helper failure with cswap absent still launches without an account", async () => {
+		const h = setup();
+		h.unavailableCommands.add("cswap");
+		h.runtime.process.run = async () => ok({ stdout: "", stderr: "broken", exitCode: 2 });
+		let launched = false;
+		h.runtime.process.createdAt = async () => ok({ "43": CREATED });
+		const result = await runSession(h.runtime, session, "plan", null, async () => { launched = true; h.fs.seed(`${ROOT}/sessions/${ID}.json`, JSON.stringify({ ...raw, pid: 43, ended_at: null })); return apiOk(null); });
+		expect(launched).toBe(true);
+		expect(result).toEqual(apiOk({ session: ID, pid: 43, mode: "plan", account: null }));
+	});
+	test("a recorded account without cswap is refused like a requested one", async () => {
+		const h = setup();
+		h.unavailableCommands.add("cswap");
+		h.runtime.process.run = async () => ok({ stdout: '{"accounts":{"/cfg/1-test":{"present":true,"account":12}},"categories":{}}', stderr: "", exitCode: 0 });
+		let launched = false;
+		const result = await runSession(h.runtime, session, "plan", null, async () => { launched = true; return apiOk(null); });
+		expect(code(result)).toBe("launch-invalid");
+		expect(result.ok ? "" : result.error.message).toBe(messagesFor("en").session.launchNoCswap());
+		expect(launched).toBe(false);
+	});
+	test("mode resolves the new launch before stopping the session", async () => {
+		const h = setup();
+		h.fs.seed("/transcript", JSON.stringify({ type: "permission-mode", permissionMode: "plan" }));
+		h.fs.seed(`${ROOT}/sessions/${ID}.json`, JSON.stringify({ ...raw, ended_at: null }));
+		h.runtime.process.createdAt = async () => ok({ "42": CREATED });
+		h.runtime.process.run = async () => ok({ stdout: "", stderr: "broken", exitCode: 2 });
+		const killed: number[] = [];
+		h.runtime.process.killTree = async (pid) => { killed.push(pid); return ok(undefined); };
+		const result = await modeCommand(h.runtime, [ID, "auto"], () => {});
+		expect(code(result)).toBe("launch-account-lookup");
+		expect(killed).toEqual([]);
 	});
 	test("uses catalogue errors in both languages", async () => {
 		for (const language of ["en", "ru"] as const) {
 			const h = setup();
 			h.runtime.language = language;
-			const result = await prepareLaunch(h.runtime, session, "1", "unknown", true);
+			const result = await prepareLaunch(h.runtime, session, "1", "unknown");
 			expect(result.ok ? "ok" : result.error.message).toBe(messagesFor(language).session.launchMode());
 		}
 	});
@@ -70,12 +104,12 @@ describe("session run and mode", () => {
 		expect(buildLaunchCommand({ ...facts, platform: "linux", plugins: [], display: true, terminal: true })).toEqual(["x-terminal-emulator", "-e", "sh", "-c", 'cd -- "$1" && shift && exec "$@"', "sh", "/work", "cswap", "run", "12", "--share-history", "--", "--resume", ID, "--permission-mode", "plan"]);
 		expect(buildLaunchCommand({ ...facts, platform: "linux", plugins: [], tmux: true })).toEqual(["tmux", "new-session", "-d", "-c", "/work", "cswap", "run", "12", "--share-history", "--", "--resume", ID, "--permission-mode", "plan"]);
 		expect(buildLaunchCommand({ ...facts, platform: "linux", plugins: [] })).toBeNull();
-		for (const [account, mode] of [["bad&", "plan"], ["1", "unknown"]]) expect(code(await prepareLaunch(h.runtime, session, account, mode, true))).toBe("launch-invalid");
+		for (const [account, mode] of [["bad&", "plan"], ["1", "unknown"]]) expect(code(await prepareLaunch(h.runtime, session, account, mode))).toBe("launch-invalid");
 		const windows = createMemoryRuntime("windows");
-		for (const character of ['"', "%", "&", "|", "<", ">", "^"]) expect(code(await prepareLaunch(windows.runtime, { ...session, cwd: `C:/bad${character}dir` }, "1", "plan", true))).toBe("launch-invalid");
+		for (const character of ['"', "%", "&", "|", "<", ">", "^"]) expect(code(await prepareLaunch(windows.runtime, { ...session, cwd: `C:/bad${character}dir` }, "1", "plan"))).toBe("launch-invalid");
 		h.runtime.process.isAvailable = async () => false;
-		expect(code(await prepareLaunch(h.runtime, session, "1", null, true))).toBe("launch-invalid");
-		expect(code(await prepareLaunch(h.runtime, session, "", null, false))).toBe("launch-unavailable");
+		expect(code(await prepareLaunch(h.runtime, session, "1", null))).toBe("launch-invalid");
+		expect(code(await prepareLaunch(h.runtime, session, "", null))).toBe("launch-unavailable");
 	});
 	test("reads last transcript mode including default and malformed records", async () => {
 		const h = setup();
@@ -88,22 +122,22 @@ describe("session run and mode", () => {
 		h.fs.seed(`${ROOT}/state.json`, JSON.stringify({ mode: "dev", paths: { repo: "/repo", hub: "/hub" }, features: { telegram: true }, records: {}, badPairs: [], pendingHubRestart: null }));
 		seedFeature(h.fs, "/repo", { ...baseManifest(), name: "telegram", plugins: ["test-channel"] });
 		seedHubManifest(h.fs, "/hub", "test-market");
-		const result = await prepareLaunch(h.runtime, session, "", null, false);
+		const result = await prepareLaunch(h.runtime, session, "", null);
 		expect(result.ok && result.value).toContain("plugin:test-channel@test-market");
 	});
 	test("selects display terminal or tmux from runtime facts", async () => {
 		const h = setup();
 		h.environment.set("WAYLAND_DISPLAY", "wayland-1");
-		let result = await prepareLaunch(h.runtime, session, "", null, false);
+		let result = await prepareLaunch(h.runtime, session, "", null);
 		expect(result.ok && result.value[0]).toBe("x-terminal-emulator");
 		h.unavailableCommands.add("x-terminal-emulator");
-		result = await prepareLaunch(h.runtime, session, "", null, false);
+		result = await prepareLaunch(h.runtime, session, "", null);
 		expect(result.ok && result.value[0]).toBe("tmux");
 		h.unavailableCommands.add("tmux");
-		expect(code(await prepareLaunch(h.runtime, session, "", null, false))).toBe("launch-unavailable");
+		expect(code(await prepareLaunch(h.runtime, session, "", null))).toBe("launch-unavailable");
 		h.unavailableCommands.delete("tmux");
 		h.unavailableCommands.add("cswap");
-		result = await prepareLaunch(h.runtime, session, "12", null, false);
+		result = await prepareLaunch(h.runtime, session, "", null);
 		expect(result.ok && result.value).toEqual(["tmux", "new-session", "-d", "-c", "/work", "claude", "--resume", ID]);
 	});
 	test("reports spawn failure and timeout", async () => {

@@ -84,6 +84,7 @@ export const en = {
 		launchTimeout: (): string => "Session did not start in time",
 		launchExited: (code: number | null, stderr: string): string => `Launch exited ${code}: ${stderr}`,
 		launchNoCswap: (): string => "An account requires cswap",
+		launchAccountLookup: (reason: string): string => `The session account could not be determined: ${reason}`,
 		launchUnavailable: (): string => "No terminal available: checked x-terminal-emulator with DISPLAY or WAYLAND_DISPLAY, and tmux",
 		transcriptPath: (): string => "Invalid transcript path",
 		transcriptMissing: (): string => "Transcript does not exist",

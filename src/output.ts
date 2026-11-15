@@ -29,6 +29,7 @@ export const SESSION_BAD_RESPONSE = "session-bad-response";
 export const SESSION_STOP_TIMEOUT = "session-stop-timeout";
 export const SESSION_CLEANUP_NOT_COMPACTED = "session-cleanup-not-compacted";
 export const LAUNCH_INVALID = "launch-invalid";
+export const LAUNCH_ACCOUNT_LOOKUP = "launch-account-lookup";
 export const LAUNCH_FAILED = "launch-failed";
 export const LAUNCH_TIMEOUT = "launch-timeout";
 export const SESSION_RUNNING = "session-running";
