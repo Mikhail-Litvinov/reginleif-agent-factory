@@ -47,7 +47,7 @@ export const en = {
 		allowlistItemFailed: (detail: string): string => `Account allowlist helper could not check one item: ${detail}`,
 	},
 	exec: {
-		usage: (): string => "Usage: rig exec start <pwsh|cmd|bash> --cwd <dir> | start rig -- <rig arguments> | status <id> [--from <offset>] | stop <id> | list",
+		usage: (): string => "Usage: rig exec start <pwsh|cmd|bash> --cwd <dir> | start rig -- <rig arguments> | status <id> [--from <offset> [--wait <ms>]] | stop <id> | list",
 		badId: (): string => "Invalid exec id",
 		unknown: (): string => "Unknown exec run",
 		invalid: (): string => "Invalid exec record or arguments",

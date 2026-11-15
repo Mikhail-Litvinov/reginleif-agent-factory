@@ -357,7 +357,7 @@ error, in event texts and in the generated agent rules.
 | `rig session list` | `{sessions: [{id, cwd, transcriptPath, pid, startedAt, live, module}]}` | nothing yet | JSON |
 | `rig exec start <shell> --cwd <dir>` | `{id, shell, cwd, pid, startedAt}`; command on stdin | nothing yet | JSON |
 | `rig exec start rig -- <arg…>` | `{id, shell: "rig", pid, startedAt}`; rig's own command as a detached run | nothing yet | JSON |
-| `rig exec status <id> [--from <offset>]` | `{id, shell, cwd, state, startedAt, end?, result?, log}`; a rig run has `args` instead of `cwd` | nothing yet | JSON |
+| `rig exec status <id> [--from <offset> [--wait <ms>]]` | `{id, shell, cwd, state, startedAt, end?, result?, log}`; a rig run has `args` instead of `cwd` | nothing yet | JSON |
 | `rig exec stop <id>` | `{id, stopping: true}` or `{id, state: "ended"}` | nothing yet | JSON |
 | `rig exec list` | `{runs: [...]}` | nothing yet | JSON |
 | `rig session compact <id> [--instructions <text>]` | `{session, tokensBefore, tokensAfter}` or `{session, skip}`; failure codes `usage` and common session errors; progress `session-waiting` | compact result | JSON |

@@ -34,7 +34,7 @@ export const ru: Messages = {
 		allowlistItemFailed: (detail: string): string => `Вспомогательный скрипт списка аккаунтов не смог проверить один элемент: ${detail}`,
 	},
 	exec: {
-		usage: (): string => "Использование: rig exec start <pwsh|cmd|bash> --cwd <dir> | status <id> [--from <offset>] | stop <id> | list",
+		usage: (): string => "Использование: rig exec start <pwsh|cmd|bash> --cwd <dir> | status <id> [--from <offset> [--wait <ms>]] | stop <id> | list",
 		badId: (): string => "Недопустимый идентификатор запуска",
 		unknown: (): string => "Запуск не найден",
 		invalid: (): string => "Недопустимая запись или аргументы запуска",

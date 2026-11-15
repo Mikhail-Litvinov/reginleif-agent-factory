@@ -15,6 +15,10 @@ export const EXEC_STALE_MS = 3 * EXEC_HEARTBEAT_MS;
 export const EXEC_MAX_RUNS = 50;
 // The hub reads at most 64 KiB for a log tail; use the same bound per API response.
 export const EXEC_LOG_CHUNK_BYTES = 64 * 1024;
+// How often a status call with `--wait` checks the log and the end. New output reaches the caller at most this late; each
+// check reads the heartbeat and stats the log (and reads its bytes). 250 ms bounds the delay under a quarter second against
+// about four small checks a second per waiting call, which a poll of 20 to 30 seconds does not notice.
+export const EXEC_WAIT_POLL_MS = 250;
 // Keep startup diagnostics bounded to the same 64 KiB diagnostic budget independently of log paging.
 const EXEC_RUNNER_STDERR_LIMIT = 64 * 1024;
 // How often the runner checks whether a run still holds a process after its command has exited. The wait for the last
@@ -208,11 +212,11 @@ const start = async (r: RuntimePorts, target: StartTarget): Promise<ApiResult<Js
 	} catch (error) { return io(r, error); }
 };
 
-const status = async (r: RuntimePorts, id: string, from: number): Promise<ApiResult<JsonValue>> => {
-	if (!Number.isSafeInteger(from) || from < 0) return apiFail(EXEC_INVALID, messagesFor(r.language).exec.invalid());
-	const record = await load(r, id);
-	if (!record.ok) return record;
-	const state = await summary(r, record.value);
+// The status object at this moment, and whether a waiting call may answer with it: the run has ended, or the log holds
+// bytes past `from` (a partial UTF-8 character alone is not an answer; the wait goes on until it completes).
+type Snapshot = { value: JsonValue; ready: boolean };
+const snapshot = async (r: RuntimePorts, id: string, record: RecordData, from: number): Promise<ApiResult<Snapshot>> => {
+	const state = await summary(r, record);
 	if (!state.ok) return state;
 	try {
 		const path = file(r, id, "log");
@@ -221,13 +225,30 @@ const status = async (r: RuntimePorts, id: string, from: number): Promise<ApiRes
 		const start = Math.min(from, size);
 		const bytes = info === null ? new Uint8Array() : await r.fs.readRange(path, start, Math.min(EXEC_LOG_CHUNK_BYTES, size - start));
 		const length = state.value.state === "running" || start + bytes.length < size ? completeUtf8Length(bytes) : bytes.length;
-			const log = { from: start, to: start + length, size, text: new TextDecoder().decode(bytes.subarray(0, length)) };
-		if (record.value.shell !== "rig" || state.value.state !== "ended" || state.value.end === undefined) return apiOk({ ...state.value, log });
+		const log = { from: start, to: start + length, size, text: new TextDecoder().decode(bytes.subarray(0, length)) };
+		const ready = state.value.state === "ended" || start + length > from;
+		if (record.shell !== "rig" || state.value.state !== "ended" || state.value.end === undefined) return apiOk({ value: { ...state.value, log }, ready });
 		const outcome = await rigResult(r, id);
-		if (outcome.result !== undefined) return apiOk({ ...state.value, result: outcome.result, log });
+		if (outcome.result !== undefined) return apiOk({ value: { ...state.value, result: outcome.result, log }, ready });
 		const end = state.value.end.kind === "exit" && state.value.end.reason === undefined ? { ...state.value.end, reason: outcome.reason } : state.value.end;
-		return apiOk({ ...state.value, end, log });
+		return apiOk({ value: { ...state.value, end, log }, ready });
 	} catch (error) { return io(r, error); }
+};
+
+// Without a wait (`waitMs` 0) this is the plain status. With a wait it answers as soon as the snapshot is ready, or once
+// `waitMs` has passed, whichever comes first; the sleep is cut to the time left, and both times come from the injected clock.
+const status = async (r: RuntimePorts, id: string, from: number, waitMs = 0): Promise<ApiResult<JsonValue>> => {
+	if (!Number.isSafeInteger(from) || from < 0 || !Number.isSafeInteger(waitMs) || waitMs < 0) return apiFail(EXEC_INVALID, messagesFor(r.language).exec.invalid());
+	const record = await load(r, id);
+	if (!record.ok) return record;
+	const deadline = r.clock.now().getTime() + waitMs;
+	for (;;) {
+		const answer = await snapshot(r, id, record.value, from);
+		if (!answer.ok) return answer;
+		const remaining = deadline - r.clock.now().getTime();
+		if (answer.value.ready || remaining <= 0) return apiOk(answer.value.value);
+		await r.clock.sleep(Math.min(EXEC_WAIT_POLL_MS, remaining));
+	}
 };
 
 // The stdout of a rig run is its one JSON object; anything else is no result, with the reason.

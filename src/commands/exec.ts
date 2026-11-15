@@ -17,8 +17,12 @@ export const runExecCommand = async (runtime: RuntimePorts, name: string, args: 
 	if (name === "stop") return args.length === 1 ? stopExec(runtime, args[0]) : usage();
 	if (name === "status") {
 		if (args.length === 1) return statusExec(runtime, args[0], 0);
-		if (args.length !== 3 || args[1] !== "--from" || !/^\d+$/.test(args[2])) return usage();
-		return statusExec(runtime, args[0], Number(args[2]));
+		// `--wait` follows `--from`; its value is digits only and must be a safe integer, so it is exact in milliseconds.
+		const [id, fromFlag, from, waitFlag, wait] = args;
+		if (fromFlag !== "--from" || !/^\d+$/.test(from)) return usage();
+		if (args.length === 3) return statusExec(runtime, id, Number(from));
+		if (args.length !== 5 || waitFlag !== "--wait" || !/^\d+$/.test(wait) || !Number.isSafeInteger(Number(wait))) return usage();
+		return statusExec(runtime, id, Number(from), Number(wait));
 	}
 	return usage();
 };

@@ -5,12 +5,16 @@
 | Command | Success |
 | --- | --- |
 | `rig exec start <pwsh\|cmd\|bash> --cwd <dir>` | `{id, shell, cwd, pid, startedAt}` |
-| `rig exec status <id> [--from <byte offset>]` | `{id, shell, cwd, state, startedAt, end?, log: {from, to, size, text}}`; for a rig run `args` replaces `cwd` and an ended run adds `result?` |
+| `rig exec status <id> [--from <byte offset> [--wait <ms>]]` | `{id, shell, cwd, state, startedAt, end?, log: {from, to, size, text}}`; for a rig run `args` replaces `cwd` and an ended run adds `result?` |
 | `rig exec start rig -- <arg…>` | `{id, shell: "rig", pid, startedAt}`; no `cwd` key |
 | `rig exec stop <id>` | `{id, stopping: true}` or `{id, state: "ended"}` |
 | `rig exec list` | `{runs: [{id, shell, cwd, state, startedAt, end?}]}`, newest first; a rig run shows `shell: "rig"` and `args` instead of `cwd` |
 
-The offset is a nonnegative byte offset; the next poll uses `log.to`. A response reads at most 64 KiB, the hub's `TAIL_BYTES` in `plugin/src/hub/exec.ts`. A partial UTF-8 character at a chunk boundary waits for the next poll. `pwsh` and `cmd` require their respective feature enabled and Windows; `bash` is available on supported platforms.
+The offset is a nonnegative byte offset; the next poll uses `log.to`. A response reads at most 64 KiB, the hub's `TAIL_BYTES` in `plugin/src/hub/exec.ts`. A partial UTF-8 character at a chunk boundary waits for the next poll.
+
+`--wait <ms>` (only after `--from`) makes status a long poll. `<ms>` is a nonnegative integer of decimal digits no larger than `Number.MAX_SAFE_INTEGER`; any other value is `usage`. The call answers at once when the run has ended (including a `lost` end just recorded) or the log holds complete bytes past the offset (`size` past `from`, a partial UTF-8 tail not counting, so the answer is never empty while the caller waits); otherwise it re-checks every `EXEC_WAIT_POLL_MS` (250 ms, from the injected clock) and answers at the latest when `<ms>` has passed. The answer is the same JSON as a plain status, computed at the moment of the answer. A timeout is not an error. Without `--wait` the status is answered at once, as before. The hub polls every 20 to 30 seconds with `--wait`, so output reaches it within the poll interval plus at most one check.
+
+`pwsh` and `cmd` require their respective feature enabled and Windows; `bash` is available on supported platforms.
 
 Each run has a filename-safe id and a directory `~/.agent-rig/exec/<id>/`. `record.json` holds its shell, command, working directory and start time. `identity.json` holds the runner PID and its creation time. `log` holds raw combined stdout and stderr bytes. `heartbeat` holds the last heartbeat timestamp, `exit.json` the end, `stop-request` records a stop in progress (it holds the time of the request), `run-empty` holds the time at which the runner saw the run hold no process but itself, and `runner-stderr` captures internal runner startup errors. Shell-specific script files also live in the run directory. Files that hold a whole content (scripts, `record.json`, `identity.json`, `result`) are written whole and replace any earlier content; only `log` is appended to. The environment is built in the runner and never stored in a file.
 
