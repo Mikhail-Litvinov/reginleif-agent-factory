@@ -371,6 +371,25 @@ describe("exec core", () => {
 		expect(h.fs.directories.has(`${ROOT}/invalid`)).toBe(false);
 	});
 
+	test("a record-less directory survives a concurrent start until it is a stale window old", async () => {
+		const h = seed();
+		const now = Date.parse(NOW);
+		const fresh = `${ROOT}/fresh`;
+		const young = `${ROOT}/young`;
+		const old = `${ROOT}/old`;
+		// A start creates its directory and then its record within moments: a younger record-less directory may be in progress.
+		await h.fs.ensureDirectory(fresh);
+		h.fs.mtimes.set(fresh, now);
+		await h.fs.ensureDirectory(young);
+		h.fs.mtimes.set(young, now - EXEC_STALE_MS + 1);
+		await h.fs.ensureDirectory(old);
+		h.fs.mtimes.set(old, now - EXEC_STALE_MS);
+		expect((await startExec(h.runtime, "bash", "/work", "echo hi")).ok).toBe(true);
+		expect(h.fs.directories.has(fresh)).toBe(true);
+		expect(h.fs.directories.has(young)).toBe(true);
+		expect(h.fs.directories.has(old)).toBe(false);
+	});
+
 	test("invalid heartbeat and unreadable end are reported as lost", async () => {
 		const h = seed();
 		for (const id of ["invalid-beat", "unreadable-end"]) {

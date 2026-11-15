@@ -43,6 +43,7 @@ class MemoryFileSystem implements FileSystem {
 	async modeOf(): Promise<number | null> { return null; }
 	async writeDurable(path: string, value: string): Promise<void> { this.files.set(path, value); }
 	async stat(): Promise<FileStat | null> { return null; }
+	async modifiedAt(): Promise<number | null> { return null; }
 	async readRange(): Promise<Uint8Array> { return new Uint8Array(0); }
 	async listDirectory(): Promise<Array<{ name: string; directory: boolean }>> { return []; }
 	uniqueSuffix(): string { this.sequence += 1; return String(this.sequence); }

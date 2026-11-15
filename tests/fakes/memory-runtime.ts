@@ -30,7 +30,7 @@ export class MemoryFileSystem implements FileSystem {
 	readonly binaries = new Map<string, Uint8Array>();
 	readonly executables = new Set<string>();
 	readonly operations: string[] = [];
-	// Modification times set by tests (files without one report 0), and the reads the code under test made.
+	// Modification times set by tests (files and directories without one report 0), and the reads the code under test made.
 	readonly mtimes = new Map<string, number>();
 	readonly textReads: string[] = [];
 	readonly rangeReads: Array<{ path: string; start: number; length: number }> = [];
@@ -52,6 +52,11 @@ export class MemoryFileSystem implements FileSystem {
 	async stat(path: string): Promise<FileStat | null> {
 		const value = this.files.get(path);
 		return value === undefined ? null : { size: this.binaries.get(path)?.length ?? new TextEncoder().encode(value).length, mtimeMs: this.mtimes.get(path) ?? 0 };
+	}
+
+	async modifiedAt(path: string): Promise<number | null> {
+		if (!this.files.has(path) && !this.directories.has(path)) return null;
+		return this.mtimes.get(path) ?? 0;
 	}
 
 	async readRange(path: string, start: number, length: number): Promise<Uint8Array> {

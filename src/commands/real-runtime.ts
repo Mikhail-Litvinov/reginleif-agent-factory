@@ -210,6 +210,14 @@ export const createFileSystem = (hostKind: HostPlatform = hostPlatform() === "wi
 			throw error;
 		}
 	},
+	modifiedAt: async (path) => {
+		try {
+			return (await fs.stat(path)).mtimeMs;
+		} catch (error) {
+			if (isMissingPath(error)) return null;
+			throw error;
+		}
+	},
 	readRange: async (path, start, length) => {
 		const handle = await fs.open(path, "r");
 		try {

@@ -170,6 +170,9 @@ const start = async (r: RuntimePorts, target: StartTarget): Promise<ApiResult<Js
 	if (!listed.ok) return listed;
 	try {
 		for (const id of listed.value.broken) {
+			// A start creates the directory and writes its record within moments, so a younger record-less directory may be a start in progress; the stale window is the age that rules that out.
+			const modified = await r.fs.modifiedAt(dir(r, id));
+			if (modified === null || r.clock.now().getTime() - modified < EXEC_STALE_MS) continue;
 			try { await r.fs.removeDirectoryTree(dir(r, id)); } catch (error) { if (!missing(error)) throw error; }
 		}
 		let excess = Math.max(0, listed.value.runs.length - (EXEC_MAX_RUNS - 1));
