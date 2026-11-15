@@ -27,6 +27,17 @@ export const ru: Messages = {
 		scriptBadJson: (): string => "скрипт вернул неверный JSON",
 		noSource: (): string => "нет источника данных",
 	},
+	session: {
+		usage: (): string => "Использование: rig session list",
+		badId: (id: string): string => `Некорректный id сессии: ${id}`,
+		unknown: (id: string): string => `Неизвестная сессия: ${id}`,
+		invalid: (id: string): string => `Некорректная запись сессии: ${id}`,
+		io: (detail: string): string => `Ошибка доступа к сессии: ${detail}`,
+		ended: (): string => "Процесс сессии завершился.",
+		noModule: (): string => "В сессии нет модуля rig; перезапусти сессию.",
+		timeout: (): string => "Сессия не ответила вовремя.",
+		badResponse: (): string => "Сессия вернула некорректный ответ.",
+	},
 	lock: {
 		waiting: (): string => "Другая команда rig работает, жду её конца.",
 	},

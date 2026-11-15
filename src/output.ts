@@ -17,6 +17,16 @@ export const ERROR_CODE_RUNTIME = "runtime-unavailable";
 export const ERROR_CODE_INTERNAL = "internal-error";
 // A command that has not moved to typed results yet reports a plain failure under this code.
 export const ERROR_CODE_FAILED = "command-failed";
+export const SESSION_BAD_ID = "session-bad-id";
+export const SESSION_UNKNOWN = "session-unknown";
+export const SESSION_INVALID = "session-invalid";
+export const SESSION_IO = "session-io";
+export const SESSION_ENDED = "session-ended";
+export const SESSION_NO_MODULE = "session-no-module";
+export const SESSION_TIMEOUT = "session-timeout";
+export const SESSION_MODULE_ERROR = "session-module-error";
+export const SESSION_BAD_RESPONSE = "session-bad-response";
+export const PROGRESS_CODE_SESSION_WAITING = "session-waiting";
 
 export const SUCCESS_EXIT_CODE = 0;
 export const FAILURE_EXIT_CODE = 1;

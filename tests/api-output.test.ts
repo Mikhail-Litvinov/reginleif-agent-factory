@@ -44,6 +44,7 @@ const FIXTURES: Record<string, Fixture> = {
 	"check": { success: ["check"], failure: ["check"], failureSeeding: "none", usage: ["check", "extra"] },
 	"language": { success: ["language"], failure: ["language", "en"], failureSeeding: "none", usage: ["language", "fr"] },
 	"info": { success: ["info", "--session", SESSION_ID], failure: ["info", "--session", "missing-session"], failureSeeding: "installed", usage: ["info"] },
+	"session": { success: ["session", "list"], failure: null, failureSeeding: "none", usage: ["session", "unknown"] },
 	"update-step": { success: ["update-step", "apply", "10", "20"], failure: ["update-step", "apply", "10", "20"], failureSeeding: "installed", usage: ["update-step", "rollback", "10", "20"] },
 };
 
@@ -63,7 +64,7 @@ const seed = (seeding: Seeding): MemoryRuntimeHarness => {
 	seedFeature(harness.fs, REPO, featureManifest("demo"));
 	const state = { mode: "dev", paths: { repo: REPO, hub: HUB }, features: { demo: false }, records: {}, badPairs: [], pendingHubRestart: null };
 	harness.fs.seed(STATE_PATH, `${JSON.stringify(state, null, 2)}\n`);
-	harness.fs.seed(`${SESSIONS}/${SESSION_ID}.json`, JSON.stringify({ session_id: SESSION_ID, config_dir: "/cfg/1-own" }));
+	harness.fs.seed(`${SESSIONS}/${SESSION_ID}.json`, JSON.stringify({ session_id: SESSION_ID, config_dir: "/cfg/1-own", cwd: null, transcript_path: null, pid: null, pid_created: null, started_at: "2026-01-01T00:00:00Z", ended_at: null }));
 	harness.fs.seed(`${HOME}/.codex/AGENTS.md`, RULE_BLOCK);
 	harness.fs.seed(`${HOME}/.agent-rig/generated/CLAUDE.md`, "");
 	harness.fs.seed(`${HOME}/.claude/CLAUDE.md`, "@../.codex/AGENTS.md\n@../.agent-rig/generated/CLAUDE.md\n");

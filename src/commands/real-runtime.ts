@@ -10,6 +10,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { constants, promises as fs } from "node:fs";
 import { homedir, platform as hostPlatform, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { createNodeAssetFileSystem } from "../assets/node-asset-file-system.js";
 import { atomicWrite, toSlashPath } from "../file-system.js";
@@ -231,8 +232,28 @@ export const createFileSystem = (hostKind: HostPlatform = hostPlatform() === "wi
 	uniqueSuffix: () => `${Date.now()}-${randomUUID()}`,
 });
 
-const createProcessPorts = (pathEnvironment: string) => ({
+const createProcessPorts = (pathEnvironment: string): ProcessPorts => {
+	const ports: ProcessPorts = {
 	run: (command: string, args: readonly string[], options?: ProcessOptions) => runProcess(pathEnvironment, command, args, options),
+	createdAt: async (pids: readonly number[]): Promise<Result<Record<string, string | null>>> => {
+		if (pids.length === 0) return ok({});
+		const python = hostPlatform() === "win32" ? "python" : "python3";
+		const script = fileURLToPath(new URL("../../base/hooks/session_record.py", import.meta.url));
+		const result = await ports.run(python, ["-I", script, "created-at", ...pids.map(String)]);
+		if (!result.ok) return result;
+		if (result.value.exitCode !== PROCESS_SUCCESS_EXIT_CODE) return err(result.value.stderr || "Process table query failed");
+		try {
+			const value: unknown = JSON.parse(result.value.stdout);
+			if (typeof value !== "object" || value === null || Array.isArray(value)) return err("Invalid process table response");
+			const times: Record<string, string | null> = {};
+			for (const [key, time] of Object.entries(value)) {
+				if (time !== null && typeof time !== "string") return err("Invalid process table response");
+				times[key] = time;
+			}
+			if (pids.some((pid) => !Object.hasOwn(times, String(pid)))) return err("Incomplete process table response");
+			return ok(times);
+		} catch { return err("Invalid process table response"); }
+	},
 	isAvailable: async (command: string): Promise<boolean> => {
 		if (command.includes("/") || command.includes("\\")) {
 			try {
@@ -248,7 +269,9 @@ const createProcessPorts = (pathEnvironment: string) => ({
 			: await runProcess(pathEnvironment, "sh", ["-c", "command -v -- \"$1\"", "rig-command-lookup", command]);
 		return lookup.ok && lookup.value.exitCode === PROCESS_SUCCESS_EXIT_CODE;
 	},
-});
+	};
+	return ports;
+};
 
 // ok(number): start time of the running process; ok(null): no such process; err: the answer could not be obtained, which
 // the lock treats as "still running".

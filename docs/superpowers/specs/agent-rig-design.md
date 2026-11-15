@@ -354,6 +354,7 @@ error, in event texts and in the generated agent rules.
 | --- | --- | --- | --- |
 | `rig help` | `{"usage":[...]}` | nothing | JSON |
 | `rig info --session <id>` | `InfoData` object (`src/info-data.ts`) | nothing yet | JSON |
+| `rig session list` | `{sessions: [{id, cwd, transcriptPath, pid, startedAt, live, module}]}` | nothing yet | JSON |
 | `rig status` | the `StatusView` object (`schemaVersion: 1`, `mode`, `versions`, `releases`, `features`, `lastUpdate`, `pendingHubRestart`, `errors`; times as recorded in `events.jsonl`); failures `state-unreadable`, `features-unreadable` | `status --json`, strict schema (unchanged fields) | JSON |
 | `rig feature` | `{"features":[{"name","description","enabled","platformAllowed"}]}` (`description` in rig's language); failure code `feature-failed` | `feature --json`, strict schema (expects a bare array, must unwrap `features`) | JSON |
 | `rig language [en\|ru]` | `{"language"}`; setting: `{"language","changed"}`; failure codes `not-installed`, `language-failed`; progress `lock-waiting` | `language --json`, strict schema (unchanged); `language <x>` as text for Telegram | JSON |

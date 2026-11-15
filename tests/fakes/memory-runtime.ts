@@ -280,6 +280,7 @@ export const createMemoryRuntime = (platform: RuntimePorts["platform"] = "linux"
 		fs,
 		assetFs,
 		process: {
+			createdAt: async () => ok({}),
 			run: async (command, args, options) => {
 				processCalls.push({ command, args, options });
 				if (command === "claude" && args.join(" ") === "plugin marketplace list --json") {

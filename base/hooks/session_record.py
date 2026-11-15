@@ -245,6 +245,23 @@ def run_event(event, stdin_text, home, env, start_pid, load_table, now):
 
 def main(argv):
     event = argv[1] if len(argv) > 1 else ""
+    if event == "created-at":
+        try:
+            pids = [int(value) for value in argv[2:]]
+            if any(pid <= 0 for pid in pids):
+                raise ValueError("invalid process id")
+            table, error = load_process_table()
+            if table is None:
+                raise ValueError(error or "process table unavailable")
+            result = {}
+            for pid in pids:
+                process = table.get(pid)
+                result[str(pid)] = iso_micro_from_us(process.created_us) if process is not None and process.created_us is not None else None
+            print(json.dumps(result))
+            return 0
+        except Exception as error:
+            sys.stderr.write(f"session_record: {error}\n")
+            return 1
     try:
         text = sys.stdin.buffer.read().decode("utf-8")
         run_event(event, text, Path.home(), dict(os.environ), os.getppid(), load_process_table, datetime.now(timezone.utc))

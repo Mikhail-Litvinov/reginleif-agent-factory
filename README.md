@@ -6,6 +6,8 @@ The repository is for anyone who works with Claude Code and Codex on several mac
 
 `rig` does not keep a background process. It is a command on Bun and TypeScript with no runtime dependencies (`package.json` has only dev packages for type checking). All paths and settings live in `~/.agent-rig/`.
 
+`rig session list` lists recorded Claude Code sessions with their liveness and module availability.
+
 Installing on a server is described in [INSTALL.md](INSTALL.md). Agent, you were asked to deploy this here: read `INSTALL.md` and follow its section "What the agent does".
 
 ## Features

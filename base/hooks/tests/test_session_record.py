@@ -1,5 +1,6 @@
 """Tests for the session record hook: process resolution, record writes, bad input. No real sleeps; temp dirs removed."""
 import importlib.util
+import io
 import json
 import os
 import subprocess
@@ -42,6 +43,19 @@ TREE = table(
 
 def session_table(claude_pid):
     return table((1, 0, "wininit.exe"), (claude_pid, 1, "claude.exe"), (HOOK_PARENT, claude_pid, "bash.exe"))
+
+
+class CreationTimesTests(unittest.TestCase):
+    def test_mode_uses_one_table_and_reports_missing_creation_times(self):
+        processes = {**TREE, 999: Process(pid=999, parent=1, name="unknown", created_us=None)}
+        with mock.patch.object(RECORD, "load_process_table", return_value=(processes, None)) as load, mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+            self.assertEqual(RECORD.main(["session_record.py", "created-at", str(CLAUDE_INNER), "999", "998"]), 0)
+        load.assert_called_once_with()
+        self.assertEqual(json.loads(output.getvalue()), {str(CLAUDE_INNER): "2023-11-14T22:18:20.000000Z", "999": None, "998": None})
+
+    def test_mode_fails_when_process_table_cannot_be_loaded(self):
+        with mock.patch.object(RECORD, "load_process_table", return_value=(None, "query failed")), mock.patch("sys.stderr", new_callable=io.StringIO):
+            self.assertNotEqual(RECORD.main(["session_record.py", "created-at", "1"]), 0)
 
 
 class ResolveClaudeTests(unittest.TestCase):

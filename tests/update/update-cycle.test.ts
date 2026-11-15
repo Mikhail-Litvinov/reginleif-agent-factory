@@ -640,6 +640,7 @@ const runGit = (cwd: string, ...args: string[]): string => {
 };
 
 const realProcess = (): RuntimePorts["process"] => ({
+  createdAt: async () => ({ ok: true, value: {} }),
   run: async (command, args, options) => {
     const result = spawnSync(command, [...args], { cwd: options?.cwd, encoding: "utf8" });
     if (result.error !== undefined) return { ok: false, error: result.error.message };

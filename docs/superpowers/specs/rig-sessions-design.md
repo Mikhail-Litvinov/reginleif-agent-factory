@@ -8,6 +8,16 @@ The module learns the home directory (`HOME`, else `USERPROFILE`) and the sessio
 (`$.env.get`, `$.session.id`). It stays off when either is missing or the id is not a safe file name
 (`[A-Za-z0-9_-]{1,64}`); it never depends on anything outside the plugin folder.
 
+## `rig session`
+
+Rig validates session ids against the shared queue identifier pattern before using them as paths, then reads and validates the corresponding record written by the session hook. A session is live only if it has not ended and its process still has the recorded creation time; a missing PID or creation time is not live. Process lookup failures are reported rather than treated as a stopped process.
+
+The queue client checks process liveness before publishing a request and atomically publishes it. It polls for its matching response and rereads the session record using the runtime clock; an `ended_at` value ends the wait. At the deadline it checks process liveness once more, returning `session-ended` if the process is gone and `session-timeout` otherwise. It tolerates one malformed response read, removes a consumed response and removes its request when finished, including on timeout or process exit. A missing module folder requires restarting the session. After one poll it emits `session-waiting` once. Read-only operations wait three seconds (three module polls); compact and rename wait ten minutes, matching the hub's `CLEANUP_COMPACT_MS` and allowing the current turn to finish.
+
+Failures use `session-bad-id`, `session-unknown`, `session-invalid`, `session-io`, `session-ended`, `session-no-module`, `session-timeout`, `session-module-error` and `session-bad-response`. Module errors carry the module's text.
+
+`rig session list` returns `{ "sessions": [{ "id", "cwd", "transcriptPath", "pid", "startedAt", "live", "module" } | { "id", "error": { "code", "message" } }] }`. Valid entries are sorted by start time newest first; entries with errors follow them. A failed record or session lookup has its own error entry and does not prevent the other sessions from being listed. The fields are raw record data, with `module` indicating the session directory exists. Creation times are queried in one batch. An absent records directory yields an empty list.
+
 ## Files
 
 ```

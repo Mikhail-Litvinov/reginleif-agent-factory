@@ -26,6 +26,7 @@ export type ProcessOptions = {
 export type ProcessPorts = {
 	run(command: string, args: readonly string[], options?: ProcessOptions): Promise<Result<ProcessOutput>>;
 	isAvailable(command: string): Promise<boolean>;
+	createdAt(pids: readonly number[]): Promise<Result<Record<string, string | null>>>;
 };
 
 export type RuntimePorts = {

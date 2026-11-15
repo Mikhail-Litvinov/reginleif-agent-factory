@@ -40,6 +40,17 @@ export const en = {
 		scriptBadJson: (): string => "bad JSON from script",
 		noSource: (): string => "no data source",
 	},
+	session: {
+		usage: (): string => "Usage: rig session list",
+		badId: (id: string): string => `Invalid session id: ${id}`,
+		unknown: (id: string): string => `Unknown session: ${id}`,
+		invalid: (id: string): string => `Invalid session record: ${id}`,
+		io: (detail: string): string => `Session access failed: ${detail}`,
+		ended: (): string => "The session process has ended.",
+		noModule: (): string => "The session has no rig module; restart the session.",
+		timeout: (): string => "The session did not respond in time.",
+		badResponse: (): string => "The session returned an invalid response.",
+	},
 	lock: {
 		waiting: (): string => "Another rig command is running, waiting for it to finish.",
 	},

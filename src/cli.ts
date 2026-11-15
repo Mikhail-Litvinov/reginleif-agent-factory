@@ -13,6 +13,7 @@ import { installRig } from "./commands/install.js";
 import { setLanguage, showLanguage } from "./commands/language.js";
 import { createRealRuntime, readRealLanguage } from "./commands/real-runtime.js";
 import { readStatus } from "./commands/status.js";
+import { isSessionCommand, runSessionCommand } from "./commands/session.js";
 import { runUpdateStep, updateRig } from "./commands/update.js";
 import { DEFAULT_LANGUAGE, isLanguage, messagesFor } from "./messages.js";
 import {
@@ -41,6 +42,7 @@ const USAGE: string[] = [
 	"rig check",
 	"rig language [en|ru] [--json]",
 	"rig info --session <id>",
+	"rig session list",
 ];
 const HELP: JsonValue = { usage: USAGE };
 
@@ -55,6 +57,7 @@ export type Command =
 	| { name: "check" }
 	| { name: "language"; value: Language | null; json: boolean }
 	| { name: "info"; session: string }
+	| { name: "session"; subcommand: string }
 	| { name: "update-step"; step: UpdateStep; owner: LockOwner };
 // A parse error is a function of the catalog: the language is known only after the runtime is built, and parsing stays pure.
 export type ParsedCommand = { ok: true; command: Command } | { ok: false; error: (messages: Messages) => string };
@@ -77,6 +80,9 @@ export const parseCommand = (args: string[]): ParsedCommand => {
 	if (head === "info") return rest.length === 2 && rest[0] === "--session"
 		? { ok: true, command: { name: "info", session: rest[1] } }
 		: { ok: false, error: (messages) => messages.info.usage() };
+	if (head === "session") return rest.length === 1 && isSessionCommand(rest[0])
+		? { ok: true, command: { name: "session", subcommand: rest[0] } }
+		: { ok: false, error: (messages) => messages.session.usage() };
 	if (head === "update-step") return parseUpdateStep(rest) ?? { ok: false, error: (messages) => messages.cli.usageUpdateStep() };
 	return { ok: false, error: (messages) => messages.cli.unknownCommand(args.join(" ")) };
 };
@@ -142,6 +148,7 @@ const COMMAND_NAMES = {
 	"check": true,
 	"language": true,
 	"info": true,
+	"session": true,
 	"update-step": true,
 } satisfies Record<Command["name"], true>;
 
@@ -224,6 +231,8 @@ const execute = async (command: Command, context: CommandContext): Promise<Comma
 				: await setLanguage(runtime, command.value, context.writeProgress) };
 		case "info":
 			return { kind: "json", result: await infoCommand(runtime, command.session) };
+		case "session":
+			return { kind: "json", result: await runSessionCommand(runtime, command.subcommand) };
 		case "update-step":
 			return { kind: "internal", exitCode: await runUpdateStep(runtime, command.step, command.owner, writeLine) };
 		case "check":
