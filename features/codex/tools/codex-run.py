@@ -90,10 +90,24 @@ CREATE_NO_WINDOW = 0x08000000
 # Shell rule for Windows runs only: on POSIX the agent's shell is the plain system shell.
 SHELL_RULE_MARKER = "__SHELL_RULE__"
 SHELL_RULE_WINDOWS = """- Run commands directly in the shell the tool gives you (PowerShell); never hand a command string to a second
-  shell (bash -c, powershell -Command, cmd /c): quoting is lost between the layers. Read files with Get-Content
-  (-TotalCount, -Tail). Anything that needs bash, or is longer than one line, goes into a script file written with
-  apply_patch and run by path: & "C:\\Program Files\\Git\\bin\\bash.exe" path/to/script.sh arg1 arg2.
+  shell (bash -c, powershell -Command, cmd /c): quoting is lost between the layers. Anything that needs bash, or is
+  longer than one line, goes into a script file written with apply_patch and run by path:
+  & "C:\\Program Files\\Git\\bin\\bash.exe" path/to/script.sh arg1 arg2.
+- Text that may hold non-ASCII characters (Cyrillic, accents, dashes): PowerShell here reads a UTF-8 file without a BOM as
+  ANSI and prints with the OEM code page, and neither can be changed (constrained language mode), so Get-Content,
+  Select-String and every cmdlet that prints text turn such characters into `?` or garbage without any error.
+  Native programs pass bytes through unchanged: read files with
+  & "C:\\Program Files\\Git\\usr\\bin\\head.exe" -n N FILE, tail.exe -n N FILE or sed.exe -n "A,Bp" FILE from the same
+  folder, or with rg; python and git are safe (Python is set to UTF-8). Output that shows `?` or odd characters where
+  text is expected is unread: never guess the text from it.
 """
+# The environment that makes Python tools write UTF-8 to a pipe (their default is the ANSI code page); it reaches
+# the commands even in the sandbox (job probe), unlike the code page of a console codex-run could set.
+UTF8_ENV_OVERRIDE = 'shell_environment_policy.set={PYTHONUTF8="1",PYTHONIOENCODING="utf-8"}'
+# Garbled command output: the replacement character, or a C0 control character other than tab, CR, LF, ESC
+# (ESC starts the colour codes of a terminal).
+MOJIBAKE_RE = re.compile("\ufffd|[\x00-\x08\x0b\x0c\x0e-\x1a\x1c-\x1f]")
+MOJIBAKE_MAX_LISTED = 3
 
 # A shell word followed by its command-string flag: bash/sh -c, -lc; powershell/pwsh -Command; cmd /c, /k.
 _WRAPPER_RE = re.compile(
@@ -137,6 +151,20 @@ def nested_shell_commands(events):
         cmd = it.get("command") or ""
         inner = _WRAPPER_RE.sub("", cmd, count=1)
         if _NESTED_SHELL_RE.search(inner) and cmd not in found:
+            found.append(cmd)
+    return found
+
+
+def mojibake_commands(events):
+    """Commands whose output holds the replacement character or control-character noise: a byte path
+    between the program and Codex lost the encoding, and what Codex read is not what the file holds."""
+    found = []
+    for e in events:
+        it = e.get("item") or {}
+        if e.get("type") != "item.completed" or it.get("type") != "command_execution":
+            continue
+        cmd = it.get("command") or ""
+        if MOJIBAKE_RE.search(it.get("aggregated_output") or "") and cmd not in found:
             found.append(cmd)
     return found
 
@@ -287,6 +315,8 @@ class Supervisor:
                   "-c", "model_reasoning_summary=auto",
                   "-c", f"sandbox_mode={'read-only' if s['read_only'] else 'workspace-write'}",
                   "-o", str(self.dir / "last.md")]
+        if os.name == "nt":
+            common += ["-c", UTF8_ENV_OVERRIDE]
         if resume_text is None:
             return args + common + ["-"], (self.dir / "prompt.md").read_text(encoding="utf-8")
         return args + ["resume", s["session_id"]] + common + [resume_text], None
@@ -515,6 +545,11 @@ def digest(d, st, events, final):
             lines.append(f"warning: {len(nested)} command(s) passed a command string to a second shell; their output "
                          "may have lost quoting (backslashes, quotes) and be wrong: " +
                          "; ".join(short(c, 160) for c in nested[:NESTED_SHELL_MAX_LISTED]))
+        garbled = mojibake_commands(scan_events(d / "events.jsonl")[1])
+        if garbled:
+            lines.append(f"warning: {len(garbled)} command(s) printed garbled text (U+FFFD or control characters): "
+                         "the encoding was lost on the way and Codex's report on that output may be wrong: " +
+                         "; ".join(short(c, 160) for c in garbled[:MOJIBAKE_MAX_LISTED]))
         last = d / "last.md"
         if st["status"] in REPORT_STATUSES and not st.get("error") and last.exists():
             lines.append("")
