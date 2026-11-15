@@ -4,7 +4,7 @@ import type { RuntimePorts } from "./ports.js";
 import { ID_PATTERN } from "../plugins/agent-rig-window/mod/queue-protocol.js";
 import { atomicWrite, joinPath } from "./file-system.js";
 import { messagesFor } from "./messages.js";
-import { apiFail, apiOk, EXEC_BAD_ID, EXEC_INVALID, EXEC_IO, EXEC_LAUNCH, EXEC_UNAVAILABLE, EXEC_UNKNOWN } from "./output.js";
+import { apiFail, apiOk, ERROR_CODE_USAGE, EXEC_BAD_ID, EXEC_INVALID, EXEC_IO, EXEC_LAUNCH, EXEC_UNAVAILABLE, EXEC_UNKNOWN } from "./output.js";
 import { errorText } from "./result.js";
 import { readState } from "./state.js";
 
@@ -31,10 +31,14 @@ const UTF8_FOUR_BYTES = 4;
 export type ExecShell = "pwsh" | "cmd" | "bash";
 export type ShellLaunch = { argv: string[]; env: Record<string, string>; files: { path: string; bytes: Uint8Array }[]; verbatimArguments?: boolean };
 export type ShellBuilder = (runtime: RuntimePorts, shell: ExecShell, text: string, runDir: string) => Promise<ApiResult<ShellLaunch>>;
-type RecordData = { id: string; shell: ExecShell; cwd: string; text: string; startedAt: string };
+type ShellRecord = { id: string; shell: ExecShell; cwd: string; text: string; startedAt: string };
+type RigRecord = { id: string; shell: "rig"; args: string[]; startedAt: string };
+type RecordData = ShellRecord | RigRecord;
 type Identity = { pid: number; pidCreated: string };
 type End = { kind: "exit" | "stopped" | "lost"; code: number | null; at: string; reason?: string };
-type Summary = { id: string; shell: ExecShell; cwd: string; state: "running" | "ended"; startedAt: string; end?: End };
+type Summary = { id: string; shell: ExecShell; cwd: string; state: "running" | "ended"; startedAt: string; end?: End } | { id: string; shell: "rig"; args: string[]; state: "running" | "ended"; startedAt: string; end?: End };
+// Commands a `rig` run refuses: no recursion into exec, no internal commands.
+const EXEC_RIG_REFUSED = new Set(["exec", "exec-runner", "update-step"]);
 const object = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 const shellValue = (value: unknown): value is ExecShell => value === "pwsh" || value === "cmd" || value === "bash";
 const root = (r: RuntimePorts): string => joinPath(r.home, ".agent-rig", "exec");
@@ -42,7 +46,10 @@ const dir = (r: RuntimePorts, id: string): string => joinPath(root(r), id);
 const file = (r: RuntimePorts, id: string, name: string): string => joinPath(dir(r, id), name);
 const missing = (error: unknown): boolean => object(error) && (error.code === "ENOENT" || error.code === "ENOTDIR");
 const io = (r: RuntimePorts, error: unknown): ApiResult<never> => apiFail(EXEC_IO, messagesFor(r.language).exec.io(errorText(error)));
-const validRecord = (value: unknown, id: string): value is RecordData => object(value) && value.id === id && shellValue(value.shell) && typeof value.cwd === "string" && typeof value.text === "string" && typeof value.startedAt === "string";
+const validRecord = (value: unknown, id: string): value is RecordData => object(value) && value.id === id && typeof value.startedAt === "string" && (value.shell === "rig"
+	? Array.isArray(value.args) && value.args.every((arg) => typeof arg === "string")
+	: shellValue(value.shell) && typeof value.cwd === "string" && typeof value.text === "string");
+const rigHome = (r: RuntimePorts): string => joinPath(r.home, ".agent-rig");
 const validEnd = (value: unknown): value is End => object(value) && (value.kind === "exit" || value.kind === "stopped" || value.kind === "lost") && (value.code === null || (typeof value.code === "number" && Number.isInteger(value.code))) && typeof value.at === "string" && (value.reason === undefined || typeof value.reason === "string");
 const validIdentity = (value: unknown): value is Identity => object(value) && typeof value.pid === "number" && Number.isSafeInteger(value.pid) && value.pid > 0 && typeof value.pidCreated === "string" && value.pidCreated.length > 0;
 
@@ -66,7 +73,7 @@ const load = async (r: RuntimePorts, id: string): Promise<ApiResult<RecordData>>
 };
 
 const summary = async (r: RuntimePorts, record: RecordData): Promise<ApiResult<Summary>> => {
-	const base = { id: record.id, shell: record.shell, cwd: record.cwd, startedAt: record.startedAt };
+	const base = record.shell === "rig" ? { id: record.id, shell: record.shell, args: record.args, startedAt: record.startedAt } : { id: record.id, shell: record.shell, cwd: record.cwd, startedAt: record.startedAt };
 	const lost = (reason: string): ApiResult<Summary> => apiOk({ ...base, state: "ended", end: { kind: "lost", code: null, at: r.clock.nowText(), reason } });
 	try {
 		const exitPath = file(r, record.id, "exit.json");
@@ -103,14 +110,21 @@ const scan = async (r: RuntimePorts): Promise<ApiResult<{ runs: Summary[]; broke
 	} catch (error) { return io(r, error); }
 };
 
-const start = async (r: RuntimePorts, shell: ExecShell, cwd: string, text: string): Promise<ApiResult<JsonValue>> => {
+type StartTarget = { kind: "shell"; shell: ExecShell; cwd: string; text: string } | { kind: "rig"; args: readonly string[] };
+
+const start = async (r: RuntimePorts, target: StartTarget): Promise<ApiResult<JsonValue>> => {
 	const m = messagesFor(r.language).exec;
 	const state = await readState(r.fs, r.home);
 	if (!state.ok) return apiFail(EXEC_IO, m.io(state.error));
-	if (shell !== "bash" && (r.platform !== "windows" || state.value.features[shell] !== true)) return apiFail(EXEC_UNAVAILABLE, m.unavailable());
-	if (cwd.length === 0) return apiFail(EXEC_INVALID, m.invalid());
-	const resolved = r.resolvePath(cwd);
-	try { await r.fs.listDirectory(resolved); } catch (error) { return io(r, error); }
+	let resolved = "";
+	if (target.kind === "rig") {
+		if (target.args.length === 0 || EXEC_RIG_REFUSED.has(target.args[0])) return apiFail(ERROR_CODE_USAGE, m.usage());
+	} else {
+		if (target.shell !== "bash" && (r.platform !== "windows" || state.value.features[target.shell] !== true)) return apiFail(EXEC_UNAVAILABLE, m.unavailable());
+		if (target.cwd.length === 0) return apiFail(EXEC_INVALID, m.invalid());
+		resolved = r.resolvePath(target.cwd);
+		try { await r.fs.listDirectory(resolved); } catch (error) { return io(r, error); }
+	}
 	const listed = await scan(r);
 	if (!listed.ok) return listed;
 	try {
@@ -126,7 +140,8 @@ const start = async (r: RuntimePorts, shell: ExecShell, cwd: string, text: strin
 		if (!ID_PATTERN.test(id)) return apiFail(EXEC_BAD_ID, m.badId());
 		const path = dir(r, id);
 		await r.fs.ensureDirectory(path);
-		const record: RecordData = { id, shell, cwd: resolved, text, startedAt: r.clock.nowText() };
+			const startedAt = r.clock.nowText();
+		const record: RecordData = target.kind === "rig" ? { id, shell: "rig", args: [...target.args], startedAt } : { id, shell: target.shell, cwd: resolved, text: target.text, startedAt };
 		await r.fs.writeText(file(r, id, "heartbeat"), record.startedAt);
 		await r.fs.writeText(file(r, id, "log"), "");
 		const created = await r.fs.writeExclusive(file(r, id, "record.json"), JSON.stringify(record));
@@ -135,7 +150,8 @@ const start = async (r: RuntimePorts, shell: ExecShell, cwd: string, text: strin
 		const spawned = await r.process.spawnDetached([r.executablePath, r.resolvePath(state.value.paths.repo, "src", "cli.ts"), "exec-runner", id], 0, EXEC_RUNNER_STDERR_LIMIT, file(r, id, "runner-stderr"), { windowsHide: true });
 		if (!spawned.ok || spawned.value.pid === undefined) { const reason = spawned.ok ? "Missing process ID" : spawned.error; await r.fs.writeExclusive(file(r, id, "exit.json"), JSON.stringify({ kind: "lost", code: null, at: r.clock.nowText(), reason: "start-failed" })); return apiFail(EXEC_LAUNCH, m.launch(reason)); }
 		const pid = spawned.value.pid;
-		return apiOk({ id, shell, cwd: resolved, pid, startedAt: record.startedAt });
+		const started: JsonValue = record.shell === "rig" ? { id, shell: "rig", pid, startedAt: record.startedAt } : { id, shell: record.shell, cwd: resolved, pid, startedAt: record.startedAt };
+		return apiOk(started);
 	} catch (error) { return io(r, error); }
 };
 
@@ -152,8 +168,24 @@ const status = async (r: RuntimePorts, id: string, from: number): Promise<ApiRes
 		const start = Math.min(from, size);
 		const bytes = info === null ? new Uint8Array() : await r.fs.readRange(path, start, Math.min(EXEC_LOG_CHUNK_BYTES, size - start));
 		const length = state.value.state === "running" || start + bytes.length < size ? completeUtf8Length(bytes) : bytes.length;
-		return apiOk({ ...state.value, log: { from: start, to: start + length, size, text: new TextDecoder().decode(bytes.subarray(0, length)) } });
+			const log = { from: start, to: start + length, size, text: new TextDecoder().decode(bytes.subarray(0, length)) };
+		if (record.value.shell !== "rig" || state.value.state !== "ended" || state.value.end === undefined) return apiOk({ ...state.value, log });
+		const outcome = await rigResult(r, id);
+		if (outcome.result !== undefined) return apiOk({ ...state.value, result: outcome.result, log });
+		const end = state.value.end.kind === "exit" && state.value.end.reason === undefined ? { ...state.value.end, reason: outcome.reason } : state.value.end;
+		return apiOk({ ...state.value, end, log });
 	} catch (error) { return io(r, error); }
+};
+
+// The stdout of a rig run is its one JSON object; anything else is no result, with the reason.
+const rigResult = async (r: RuntimePorts, id: string): Promise<{ result?: JsonValue; reason: string }> => {
+	let text = "";
+	try { text = await r.fs.readText(file(r, id, "result")); } catch (error) { if (!missing(error)) throw error; }
+	if (text.trim().length === 0) return { reason: "empty-result" };
+	try {
+		const value: JsonValue = JSON.parse(text);
+		return typeof value === "object" && value !== null && !Array.isArray(value) ? { result: value, reason: "" } : { reason: "invalid-result" };
+	} catch { return { reason: "invalid-result" }; }
 };
 
 // The identity is missing until the runner has written it; undefined means missing, any other read failure is an I/O error.
@@ -203,12 +235,20 @@ const stop = async (r: RuntimePorts, id: string): Promise<ApiResult<JsonValue>> 
 	return written.value ? apiOk({ id, stopping: true }) : apiOk({ id, state: "ended" });
 };
 
-export const startExec = start;
+export const startExec = (r: RuntimePorts, shell: ExecShell, cwd: string, text: string): Promise<ApiResult<JsonValue>> => start(r, { kind: "shell", shell, cwd, text });
+export const startRigExec = (r: RuntimePorts, args: readonly string[]): Promise<ApiResult<JsonValue>> => start(r, { kind: "rig", args });
 export const stopExec = stop;
 export const statusExec = status;
 export const listExecs = async (r: RuntimePorts): Promise<ApiResult<{ runs: Summary[] }>> => {
 	const listed = await scan(r);
 	return listed.ok ? apiOk({ runs: listed.value.runs }) : listed;
+};
+
+// Rig's own CLI runs with the runner's own environment: its commands need it; the cleaning is for typed shell commands only.
+const rigLaunch = async (r: RuntimePorts, args: readonly string[]): Promise<ApiResult<ShellLaunch>> => {
+	const state = await readState(r.fs, r.home);
+	if (!state.ok) return apiFail(EXEC_IO, messagesFor(r.language).exec.io(state.error));
+	return apiOk({ argv: [r.executablePath, r.resolvePath(state.value.paths.repo, "src", "cli.ts"), ...args], env: r.environment.entries(), files: [] });
 };
 
 export const runExecRunner = async (r: RuntimePorts, id: string, build: ShellBuilder): Promise<number> => {
@@ -228,7 +268,8 @@ export const runExecRunner = async (r: RuntimePorts, id: string, build: ShellBui
 		if (!identity.ok) { await finish({ kind: "exit", code: null, at: r.clock.nowText(), reason: identity.error }); return 1; }
 		// A stop recorded before the identity existed is honoured here: the run ends stopped and no shell is launched.
 		if (await r.fs.stat(file(r, id, "stop-request")) !== null) { await finish({ kind: "stopped", code: null, at: r.clock.nowText() }); return 0; }
-		const launch = await build(r, record.value.shell, record.value.text, path);
+			const rig = record.value.shell === "rig" ? record.value : null;
+		const launch = rig !== null ? await rigLaunch(r, rig.args) : record.value.shell === "rig" ? apiFail(EXEC_INVALID, "Invalid exec record") : await build(r, record.value.shell, record.value.text, path);
 		if (!launch.ok) { await finish({ kind: "exit", code: null, at: r.clock.nowText(), reason: launch.error.message }); return 1; }
 		for (const item of launch.value.files) await r.fs.appendBytes(item.path, item.bytes);
 		const beat = (): void => { void atomicWrite(r.fs, file(r, id, "heartbeat"), r.clock.nowText()); };
@@ -236,7 +277,7 @@ export const runExecRunner = async (r: RuntimePorts, id: string, build: ShellBui
 		if (!initialBeat.ok) { await finish({ kind: "exit", code: null, at: r.clock.nowText(), reason: initialBeat.error }); return 1; }
 		const cancel = r.clock.every(EXEC_HEARTBEAT_MS, beat);
 		try {
-			const result = await r.process.runStreaming(launch.value.argv, record.value.cwd, launch.value.env, (bytes) => r.fs.appendBytes(file(r, id, "log"), bytes), launch.value.verbatimArguments ?? false);
+			const result = await r.process.runStreaming(launch.value.argv, record.value.shell === "rig" ? rigHome(r) : record.value.cwd, launch.value.env, (bytes) => r.fs.appendBytes(file(r, id, "log"), bytes), launch.value.verbatimArguments ?? false, rig === null ? undefined : (bytes) => r.fs.appendBytes(file(r, id, "result"), bytes));
 			await finish(result.ok ? { kind: "exit", code: result.value, at: r.clock.nowText() } : { kind: "exit", code: null, at: r.clock.nowText(), reason: result.error });
 			return result.ok ? 0 : 1;
 		} finally { cancel(); }

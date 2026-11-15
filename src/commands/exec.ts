@@ -1,7 +1,7 @@
 import type { ApiResult, JsonValue } from "../output.js";
 import type { RuntimePorts } from "../ports.js";
 
-import { listExecs, startExec, statusExec, stopExec } from "../exec-core.js";
+import { listExecs, startExec, startRigExec, statusExec, stopExec } from "../exec-core.js";
 import { messagesFor } from "../messages.js";
 import { apiFail, ERROR_CODE_USAGE } from "../output.js";
 
@@ -9,6 +9,7 @@ export const runExecCommand = async (runtime: RuntimePorts, name: string, args: 
 	const usage = (): ApiResult<never> => apiFail(ERROR_CODE_USAGE, messagesFor(runtime.language).exec.usage());
 	if (name === "list") return args.length === 0 ? listExecs(runtime) : usage();
 	if (name === "start") {
+			if (args[0] === "rig") return args[1] === "--" ? startRigExec(runtime, args.slice(2)) : usage();
 		const [shell, flag, cwd] = args;
 		if (args.length !== 3 || (shell !== "pwsh" && shell !== "cmd" && shell !== "bash") || flag !== "--cwd" || cwd === "") return usage();
 		return startExec(runtime, shell, cwd, await runtime.stdin.read());

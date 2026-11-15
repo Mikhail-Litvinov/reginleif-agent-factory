@@ -53,6 +53,7 @@ const USAGE: string[] = [
 	"rig session run <id> [--mode <mode>] [--account <n>]",
 	"rig session mode <id> <mode>",
 	"rig exec start <shell> --cwd <dir>",
+	"rig exec start rig -- <rig arguments>",
 	"rig exec status <id> [--from <byte offset>]",
 	"rig exec stop <id>",
 	"rig exec list",

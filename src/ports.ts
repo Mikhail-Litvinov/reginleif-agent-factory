@@ -26,7 +26,7 @@ export type ProcessOptions = {
 export type ProcessPorts = {
 	run(command: string, args: readonly string[], options?: ProcessOptions): Promise<Result<ProcessOutput>>;
 	spawnDetached(command: readonly string[], graceMs: number, stderrLimit: number, stderrPath: string, options?: { windowsHide?: boolean }): Promise<Result<{ exited: boolean; exitCode: number | null; stderr: string; pid?: number }>>;
-	runStreaming(argv: readonly string[], cwd: string, env: Record<string, string>, append: (bytes: Uint8Array) => Promise<void>, verbatimArguments: boolean): Promise<Result<number | null>>;
+	runStreaming(argv: readonly string[], cwd: string, env: Record<string, string>, append: (bytes: Uint8Array) => Promise<void>, verbatimArguments: boolean, appendStdout?: (bytes: Uint8Array) => Promise<void>): Promise<Result<number | null>>;
 	isAvailable(command: string): Promise<boolean>;
 	createdAt(pids: readonly number[]): Promise<Result<Record<string, string | null>>>;
 	killTree(pid: number, force?: boolean): Promise<Result<void>>;

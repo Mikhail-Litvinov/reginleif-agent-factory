@@ -46,7 +46,7 @@ export const en = {
 		allowlistBadCategory: (category: string): string => `Account allowlist helper returned an invalid ${category} answer`,
 	},
 	exec: {
-		usage: (): string => "Usage: rig exec start <pwsh|cmd|bash> --cwd <dir> | status <id> [--from <offset>] | stop <id> | list",
+		usage: (): string => "Usage: rig exec start <pwsh|cmd|bash> --cwd <dir> | start rig -- <rig arguments> | status <id> [--from <offset>] | stop <id> | list",
 		badId: (): string => "Invalid exec id",
 		unknown: (): string => "Unknown exec run",
 		invalid: (): string => "Invalid exec record or arguments",

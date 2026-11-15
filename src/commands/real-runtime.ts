@@ -242,7 +242,7 @@ const createProcessPorts = (pathEnvironment: string): ProcessPorts => {
 	const ports: ProcessPorts = {
 	run: (command: string, args: readonly string[], options?: ProcessOptions) => runProcess(pathEnvironment, command, args, options),
 	spawnDetached,
-	runStreaming: async (argv, cwd, env, append, verbatimArguments) => {
+	runStreaming: async (argv, cwd, env, append, verbatimArguments, appendStdout) => {
 		const [command, ...args] = argv;
 		if (!command) return err("Empty command");
 		if (hostPlatform() === "win32") {
@@ -256,7 +256,8 @@ const createProcessPorts = (pathEnvironment: string): ProcessPorts => {
 			try {
 				const child = spawn(command, args, { cwd, env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true, windowsVerbatimArguments: verbatimArguments });
 				const write = (bytes: Uint8Array): void => { pending = pending.then(() => append(bytes)).catch((error: unknown) => { failure = errorText(error); }); };
-				child.stdout.on("data", write);
+					const writeStdout = (bytes: Uint8Array): void => { pending = pending.then(() => (appendStdout ?? append)(bytes)).catch((error: unknown) => { failure = errorText(error); }); };
+				child.stdout.on("data", appendStdout === undefined ? write : writeStdout);
 				child.stderr.on("data", write);
 				child.once("error", (error) => { failure = error.message; });
 				child.once("close", (code) => { void pending.then(() => resolve(failure === null ? ok(code) : err(failure))); });

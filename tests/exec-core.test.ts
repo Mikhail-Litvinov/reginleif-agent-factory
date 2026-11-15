@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
-import { EXEC_LOG_CHUNK_BYTES, EXEC_MAX_RUNS, EXEC_STALE_MS, listExecs, runExecRunner, startExec, statusExec, stopExec } from "../src/exec-core.js";
+import { runExecCommand } from "../src/commands/exec.js";
+import { EXEC_LOG_CHUNK_BYTES, EXEC_MAX_RUNS, EXEC_STALE_MS, listExecs, runExecRunner, startExec, startRigExec, statusExec, stopExec } from "../src/exec-core.js";
 import { apiOk } from "../src/output.js";
 import { err, ok } from "../src/result.js";
 import { createMemoryRuntime } from "./fakes/memory-runtime.js";
@@ -18,7 +19,56 @@ const seed = (platform: Parameters<typeof createMemoryRuntime>[0] = "linux") => 
 	return h;
 };
 
+const hasKey = (value: unknown, key: string): boolean => typeof value === "object" && value !== null && key in value;
+const noBuild = async (): Promise<never> => { throw new Error("a rig run never builds a shell launch"); };
+
 describe("exec core", () => {
+	test("rig start validates its arguments and stores args, with no cwd", async () => {
+		const h = seed();
+		for (const args of [[], ["exec", "list"], ["exec-runner", "x"], ["update-step"]]) {
+			expect(await startRigExec(h.runtime, args)).toMatchObject({ ok: false, error: { code: "usage" } });
+		}
+		expect(await runExecCommand(h.runtime, "start", ["rig"])).toMatchObject({ ok: false, error: { code: "usage" } });
+		expect(await runExecCommand(h.runtime, "start", ["rig", "status"])).toMatchObject({ ok: false, error: { code: "usage" } });
+		expect(await runExecCommand(h.runtime, "start", ["rig", "--"])).toMatchObject({ ok: false, error: { code: "usage" } });
+		expect(h.fs.directories.has(`${ROOT}/event-1`)).toBe(false);
+		const started = await runExecCommand(h.runtime, "start", ["rig", "--", "feature", "x", "enable"]);
+		expect(started).toMatchObject({ ok: true, value: { id: "event-1", shell: "rig", pid: expect.any(Number), startedAt: NOW } });
+		expect(started.ok && hasKey(started.value, "cwd")).toBe(false);
+		expect(JSON.parse(h.fs.files.get(`${ROOT}/event-1/record.json`) ?? "")).toEqual({ id: "event-1", shell: "rig", args: ["feature", "x", "enable"], startedAt: NOW });
+		const listed = await listExecs(h.runtime);
+		expect(listed.ok && listed.value.runs).toEqual([{ id: "event-1", shell: "rig", args: ["feature", "x", "enable"], state: "running", startedAt: NOW }]);
+	});
+
+	test("the rig runner runs the rig CLI in the rig home with the runner environment; stdout goes to result and status returns it", async () => {
+		const h = seed();
+		await startRigExec(h.runtime, ["language"]);
+		const seen: { call?: { argv: readonly string[]; cwd: string; env: Record<string, string> } } = {};
+		h.runtime.process.runStreaming = async (argv, cwd, env, append, _verbatim, appendStdout) => {
+			seen.call = { argv, cwd, env };
+			await append(new TextEncoder().encode("{\"progress\":1}\n"));
+			await appendStdout?.(new TextEncoder().encode("{\"language\":\"en\"}\n"));
+			return ok(0);
+		};
+		expect(await runExecRunner(h.runtime, "event-1", noBuild)).toBe(0);
+		expect(seen.call).toEqual({ argv: [h.runtime.executablePath, "/repo/src/cli.ts", "language"], cwd: `${HOME}/.agent-rig`, env: h.runtime.environment.entries() });
+		const done = await statusExec(h.runtime, "event-1", 0);
+		expect(done.ok && done.value).toMatchObject({ shell: "rig", args: ["language"], state: "ended", end: { kind: "exit", code: 0 }, result: { language: "en" }, log: { text: "{\"progress\":1}\n" } });
+		expect(done.ok && JSON.stringify(done.value)).not.toContain("reason");
+	});
+
+	test("rig stdout that is empty or not one JSON object gives no result and a reason", async () => {
+		for (const [out, reason] of [["", "empty-result"], ["not json", "invalid-result"], ["[1]", "invalid-result"], ["7", "invalid-result"]] as const) {
+			const h = seed();
+			await startRigExec(h.runtime, ["status"]);
+			h.runtime.process.runStreaming = async (_argv, _cwd, _env, _append, _verbatim, appendStdout) => { if (out !== "") await appendStdout?.(new TextEncoder().encode(out)); return ok(1); };
+			await runExecRunner(h.runtime, "event-1", noBuild);
+			const done = await statusExec(h.runtime, "event-1", 0);
+			expect(done.ok && done.value).toMatchObject({ state: "ended", end: { kind: "exit", code: 1, reason } });
+			expect(done.ok && hasKey(done.value, "result")).toBe(false);
+		}
+	});
+
 	test("start writes a record and spawns a runner; status pages bytes and reads exit", async () => {
 		const h = seed();
 		let argv: readonly string[] = [];

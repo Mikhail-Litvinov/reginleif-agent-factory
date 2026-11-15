@@ -5,9 +5,10 @@
 | Command | Success |
 | --- | --- |
 | `rig exec start <pwsh\|cmd\|bash> --cwd <dir>` | `{id, shell, cwd, pid, startedAt}` |
-| `rig exec status <id> [--from <byte offset>]` | `{id, shell, cwd, state, startedAt, end?, log: {from, to, size, text}}` |
+| `rig exec status <id> [--from <byte offset>]` | `{id, shell, cwd, state, startedAt, end?, log: {from, to, size, text}}`; for a rig run `args` replaces `cwd` and an ended run adds `result?` |
+| `rig exec start rig -- <arg…>` | `{id, shell: "rig", pid, startedAt}`; no `cwd` key |
 | `rig exec stop <id>` | `{id, stopping: true}` or `{id, state: "ended"}` |
-| `rig exec list` | `{runs: [{id, shell, cwd, state, startedAt, end?}]}`, newest first |
+| `rig exec list` | `{runs: [{id, shell, cwd, state, startedAt, end?}]}`, newest first; a rig run shows `shell: "rig"` and `args` instead of `cwd` |
 
 The offset is a nonnegative byte offset; the next poll uses `log.to`. A response reads at most 64 KiB, the hub's `TAIL_BYTES` in `plugin/src/hub/exec.ts`. A partial UTF-8 character at a chunk boundary waits for the next poll. `pwsh` and `cmd` require their respective feature enabled and Windows; `bash` is available on supported platforms.
 
@@ -26,5 +27,13 @@ The command text never goes into a quoted template: it is written to a file or p
 `bash` writes `command.sh` as UTF-8 without a BOM, prefixed with `set -eo pipefail`, and runs `bash -l command.sh` (the script path with forward slashes), a login shell, with `CHERE_INVOKING=1` so Git Bash stays in the working directory. On Windows the executable is Git for Windows' `C:\Program Files\Git\bin\bash.exe` (the hub's `WINDOWS_BASH`); elsewhere it is `bash` from `PATH`.
 
 The environment is built fresh, never copied whole from the runner's parent. On POSIX it is the parent environment. On Windows it starts from the parent's system variables only (`SYSTEM_VARS`: `SystemRoot`, `USERPROFILE`, `APPDATA`, `ProgramFiles` and the like, plus `PROCESSOR_*`), then applies the registry keys read with `reg query`, each with a 10 second timeout (the hub's registry timeout): machine `HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment`, then `HKCU\Volatile Environment`, then user `HKCU\Environment`, so the later key wins. Within a key plain values go first and `REG_EXPAND_SZ` values after them, with `%NAME%` expanded from what is already set. `Path` is not overridden: it is the machine `Path` and the user `Path` joined with `;`. If the machine or the user key cannot be read, the cleaned parent environment is used instead. Both ways drop every variable whose name starts with `CLAUDE`, `TELEGRAM_HUB_` or `ANTHROPIC_` (case-insensitive). `ANTHROPIC_` names carry API keys and endpoints, and `TELEGRAM_HUB_` names carry the hub's bot token and settings: secrets a typed command must not see. `CLAUDE` names (`CLAUDECODE`, `CLAUDE_CONFIG_DIR` and the like) would make a `claude` started by the command act as nested in the calling session or run under its account.
+
+## Rig runs
+
+`rig exec start rig -- <arg…>` runs rig's own mutation (`update`, `feature <name> enable|disable`, `language`, any other rig command) detached, so it survives the caller: `rig update` restarts the hub, and a blocking call from the hub would die with it. The arguments are in argv after `--`; nothing is read from stdin and there is no `--cwd`. An empty argument list, and the commands `exec`, `exec-runner` and `update-step`, are refused with `usage` (no recursion, no internal commands); rig validates every other argument itself when the run starts, and its refusal is the run's `result` (`{error: {...}}`) with its exit code.
+
+The record holds `args` (a string array) instead of `cwd` and `text`; validation accepts both kinds. Start returns `{id, shell: "rig", pid, startedAt}` with no `cwd` key. The runner runs `<executablePath> <repo>/src/cli.ts <arg…>` in the rig home directory `~/.agent-rig`. The environment is the runner's own, unchanged: rig's commands need it. The environment cleaning described under Shells is for typed shell commands only. The child's stderr (rig's progress JSON Lines) goes to the run's `log`; its stdout (rig's one JSON object) goes to the file `result` in the run directory.
+
+`status` is as for shells and, once `state` is `ended`, adds `result`: the object parsed from `result` (a success object or `{error: {...}}`). It is absent when stdout was empty or not one JSON object; then, for an `exit` end, `end.reason` is `empty-result` or `invalid-result`. `end.code` is rig's exit code. `stop` works as for shells: the run is one kill unit (job object on Windows, process group on POSIX).
 
 Errors use `usage`, `exec-bad-id`, `exec-unknown`, `exec-invalid`, `exec-io`, `exec-unavailable`, or `exec-launch`, alongside errors returned by the shell builder. The internal runner is outside the JSON API. All host access goes through runtime ports.

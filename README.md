@@ -14,7 +14,8 @@ The repository is for anyone who works with Claude Code and Codex on several mac
 `rig session run <id> [--mode <mode>] [--account <n>]` resumes a stopped session in a new terminal using a platform-specific command built by rig.
 `rig session mode <id> <mode>` changes a session's permission mode, restarting it when needed.
 `rig exec start <shell> --cwd <dir>` starts the command read from stdin in a detached runner.
-`rig exec status <id> [--from <byte offset>]` reads a bounded log chunk and the run's state.
+`rig exec start rig -- <rig arguments>` runs one of rig's own commands (`update`, `feature`, `language`, ...) the same way, so the run outlives the caller; `exec`, `exec-runner` and `update-step` are refused.
+`rig exec status <id> [--from <byte offset>]` reads a bounded log chunk and the run's state; for a rig run that has ended it also returns `result`, the JSON object rig printed.
 `rig exec stop <id>` stops a run and its process tree.
 `rig exec list` lists runs newest first.
 
