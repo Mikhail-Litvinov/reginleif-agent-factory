@@ -17,6 +17,9 @@ export const EXEC_MAX_RUNS = 50;
 export const EXEC_LOG_CHUNK_BYTES = 64 * 1024;
 // Keep startup diagnostics bounded to the same 64 KiB diagnostic budget independently of log paging.
 const EXEC_RUNNER_STDERR_LIMIT = 64 * 1024;
+// Exit code of a failed runner, and the reason of the last-resort end recorded when the end itself cannot be written.
+const EXEC_RUNNER_FAILED_CODE = 1;
+const EXEC_END_WRITE_FAILED = "end-write-failed";
 const UTF8_CONTINUATION_MASK = 0xc0;
 const UTF8_CONTINUATION_PREFIX = 0x80;
 const UTF8_TWO_BYTE_MIN = 0xc2;
@@ -298,13 +301,31 @@ const rigLaunch = async (r: RuntimePorts, args: readonly string[]): Promise<ApiR
 	return apiOk({ argv: [r.executablePath, r.resolvePath(state.value.paths.repo, "src", "cli.ts"), ...args], env: cleanEnvironment(r.environment.entries()), files: [] });
 };
 
+const joinChunks = (chunks: Uint8Array[]): Uint8Array => {
+	const joined = new Uint8Array(chunks.reduce((sum, chunk) => sum + chunk.length, 0));
+	let offset = 0;
+	for (const chunk of chunks) {
+		joined.set(chunk, offset);
+		offset += chunk.length;
+	}
+	return joined;
+};
+
 export const runExecRunner = async (r: RuntimePorts, id: string, build: ShellBuilder): Promise<number> => {
 	const record = await load(r, id);
 	if (!record.ok) return 1;
 	const path = dir(r, id);
-	const finish = async (end: End): Promise<void> => {
-		const stopped = await r.fs.stat(file(r, id, "stop-request")) !== null;
-		await r.fs.writeExclusive(file(r, id, "exit.json"), JSON.stringify(stopped ? { kind: "stopped", code: null, at: r.clock.nowText() } : end));
+	// Records the end and reports true when that end (or the stop recorded instead) is written. When it cannot be written, a last-resort end names the failure and this reports false; it never throws.
+	const finish = async (end: End): Promise<boolean> => {
+		try {
+			const stopped = await r.fs.stat(file(r, id, "stop-request")) !== null;
+			const written = await r.fs.writeExclusive(file(r, id, "exit.json"), JSON.stringify(stopped ? { kind: "stopped", code: null, at: r.clock.nowText() } : end));
+			if (written.ok) return true;
+		} catch { /* The last-resort end below records the failure. */ }
+		try {
+			await r.fs.writeExclusive(file(r, id, "exit.json"), JSON.stringify({ kind: "exit", code: EXEC_RUNNER_FAILED_CODE, at: r.clock.nowText(), reason: EXEC_END_WRITE_FAILED }));
+		} catch { /* No end can be written: the stale heartbeat ends the run as lost. */ }
+		return false;
 	};
 	try {
 		const pid = r.lock.process.pid;
@@ -314,19 +335,22 @@ export const runExecRunner = async (r: RuntimePorts, id: string, build: ShellBui
 		const identity = await atomicWrite(r.fs, file(r, id, "identity.json"), JSON.stringify({ pid, pidCreated }));
 		if (!identity.ok) { await finish({ kind: "exit", code: null, at: r.clock.nowText(), reason: identity.error }); return 1; }
 		// A stop recorded before the identity existed is honoured here: the run ends stopped and no shell is launched.
-		if (await r.fs.stat(file(r, id, "stop-request")) !== null) { await finish({ kind: "stopped", code: null, at: r.clock.nowText() }); return 0; }
+		if (await r.fs.stat(file(r, id, "stop-request")) !== null) { return (await finish({ kind: "stopped", code: null, at: r.clock.nowText() })) ? 0 : 1; }
 			const rig = record.value.shell === "rig" ? record.value : null;
 		const launch = rig !== null ? await rigLaunch(r, rig.args) : record.value.shell === "rig" ? apiFail(EXEC_INVALID, "Invalid exec record") : await build(r, record.value.shell, record.value.text, path);
 		if (!launch.ok) { await finish({ kind: "exit", code: null, at: r.clock.nowText(), reason: launch.error.message }); return 1; }
-		for (const item of launch.value.files) await r.fs.appendBytes(item.path, item.bytes);
+		for (const item of launch.value.files) await r.fs.writeBytes(item.path, item.bytes);
 		const beat = (): void => { void atomicWrite(r.fs, file(r, id, "heartbeat"), r.clock.nowText()); };
 		const initialBeat = await atomicWrite(r.fs, file(r, id, "heartbeat"), r.clock.nowText());
 		if (!initialBeat.ok) { await finish({ kind: "exit", code: null, at: r.clock.nowText(), reason: initialBeat.error }); return 1; }
 		const cancel = r.clock.every(EXEC_HEARTBEAT_MS, beat);
 		try {
-			const result = await r.process.runStreaming(launch.value.argv, record.value.shell === "rig" ? rigHome(r) : record.value.cwd, launch.value.env, (bytes) => r.fs.appendBytes(file(r, id, "log"), bytes), launch.value.verbatimArguments ?? false, rig === null ? undefined : (bytes) => r.fs.appendBytes(file(r, id, "result"), bytes));
-			await finish(result.ok ? { kind: "exit", code: result.value, at: r.clock.nowText() } : { kind: "exit", code: null, at: r.clock.nowText(), reason: result.error });
-			return result.ok ? 0 : 1;
+			// The result is one JSON object: its stdout is collected and written whole once the run has ended.
+			const stdout: Uint8Array[] = [];
+			const result = await r.process.runStreaming(launch.value.argv, record.value.shell === "rig" ? rigHome(r) : record.value.cwd, launch.value.env, (bytes) => r.fs.appendBytes(file(r, id, "log"), bytes), launch.value.verbatimArguments ?? false, rig === null ? undefined : async (bytes) => { stdout.push(bytes.slice()); });
+			if (rig !== null) await r.fs.writeBytes(file(r, id, "result"), joinChunks(stdout));
+			const ended = await finish(result.ok ? { kind: "exit", code: result.value, at: r.clock.nowText() } : { kind: "exit", code: null, at: r.clock.nowText(), reason: result.error });
+			return result.ok && ended ? 0 : 1;
 		} finally { cancel(); }
 	} catch (error) { await finish({ kind: "exit", code: null, at: r.clock.nowText(), reason: errorText(error) }); return 1; }
 };

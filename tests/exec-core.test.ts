@@ -281,6 +281,60 @@ describe("exec core", () => {
 		expect(state.ok && state.value).toMatchObject({ end: { kind: "exit", code: 3 }, log: { text: "one\ntwo\n" } });
 	});
 
+	test("a failed end write is recorded as a last-resort end with reason end-write-failed; the runner does not throw", async () => {
+		for (const failure of ["throws", "fails"] as const) {
+			const h = seed();
+			await startExec(h.runtime, "bash", "/work", "echo hi");
+			const writeExclusive = h.fs.writeExclusive.bind(h.fs);
+			let endWrites = 0;
+			h.fs.writeExclusive = async (path, value) => {
+				if (path.endsWith("/exit.json")) {
+					endWrites += 1;
+					if (endWrites === 1) {
+						if (failure === "throws") throw new Error("disk gone");
+						return err("disk gone");
+					}
+				}
+				return writeExclusive(path, value);
+			};
+			expect(await runExecRunner(h.runtime, "event-1", async () => apiOk({ argv: ["fake"], env: {}, files: [] }))).toBe(1);
+			expect(await statusExec(h.runtime, "event-1", 0)).toMatchObject({ ok: true, value: { state: "ended", end: { kind: "exit", code: 1, reason: "end-write-failed" } } });
+		}
+	});
+
+	test("an end that cannot be written at all does not make the runner throw", async () => {
+		const h = seed();
+		await startExec(h.runtime, "bash", "/work", "echo hi");
+		const writeExclusive = h.fs.writeExclusive.bind(h.fs);
+		h.fs.writeExclusive = async (path, value) => {
+			if (path.endsWith("/exit.json")) throw new Error("disk gone");
+			return writeExclusive(path, value);
+		};
+		expect(await runExecRunner(h.runtime, "event-1", async () => apiOk({ argv: ["fake"], env: {}, files: [] }))).toBe(1);
+	});
+
+	test("a script file left by an earlier attempt is replaced, not appended to", async () => {
+		const h = seed();
+		await startExec(h.runtime, "bash", "/work", "echo hi");
+		const script = `${ROOT}/event-1/command.sh`;
+		h.fs.seed(script, "old script\n");
+		await runExecRunner(h.runtime, "event-1", async () => apiOk({ argv: ["fake"], env: {}, files: [{ path: script, bytes: new TextEncoder().encode("new script\n") }] }));
+		expect(h.fs.files.get(script)).toBe("new script\n");
+	});
+
+	test("a result left by an earlier attempt is replaced, not appended to", async () => {
+		const h = seed();
+		await startRigExec(h.runtime, ["language"]);
+		h.fs.seed(`${ROOT}/event-1/result`, "{\"stale\":true}\n");
+		h.runtime.process.runStreaming = async (_argv, _cwd, _env, _append, _verbatim, appendStdout) => {
+			await appendStdout?.(new TextEncoder().encode("{\"language\":\"en\"}\n"));
+			return ok(0);
+		};
+		expect(await runExecRunner(h.runtime, "event-1", noBuild)).toBe(0);
+		const done = await statusExec(h.runtime, "event-1", 0);
+		expect(done.ok && done.value).toMatchObject({ result: { language: "en" } });
+	});
+
 	test("exec never uses the rig lock and requests a hidden runner", async () => {
 		const h = seed();
 		let lockCalls = 0;

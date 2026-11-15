@@ -29,6 +29,7 @@ const manifest = (overrides: Partial<FeatureManifest> = {}): FeatureManifest => 
 
 class FeatureFileSystem implements FileSystem {
 	async appendBytes(): Promise<void> {}
+	async writeBytes(): Promise<void> {}
 	readonly files = new Map<string, string>();
 	async readText(path: string): Promise<string> {
 		const value = this.files.get(path);

@@ -230,6 +230,7 @@ export const createFileSystem = (hostKind: HostPlatform = hostPlatform() === "wi
 	},
 	writeText: (path, value) => fs.writeFile(path, value, "utf8"),
 	appendBytes: (path, value) => fs.appendFile(path, value),
+	writeBytes: (path, value) => fs.writeFile(path, value),
 	appendText: (path, value) => fs.appendFile(path, value, "utf8"),
 	rename: (from, to) => fs.rename(from, to),
 	remove: (path) => fs.unlink(path),

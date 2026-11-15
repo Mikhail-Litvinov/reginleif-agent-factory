@@ -15,6 +15,8 @@ export type FileSystem = {
 	// (Codex rollouts), where reading the whole file is not an option.
 	readRange(path: string, start: number, length: number): Promise<Uint8Array>;
 	appendBytes(path: string, value: Uint8Array): Promise<void>;
+	// Creates the file with exactly these bytes, replacing any earlier content: for files that hold a whole content.
+	writeBytes(path: string, value: Uint8Array): Promise<void>;
 	writeText(path: string, value: string): Promise<void>;
 	appendText(path: string, value: string): Promise<void>;
 	rename(from: string, to: string): Promise<void>;

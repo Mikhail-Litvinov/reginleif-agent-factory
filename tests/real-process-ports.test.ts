@@ -186,4 +186,13 @@ describe("real process ports", () => {
 		await files.appendBytes(path, new Uint8Array([10, 13]));
 		expect([...readFileSync(path)]).toEqual([0, 1, 255, 10, 13]);
 	}, TEST_BOUND_MS);
+
+	test("writeBytes replaces an existing file with exactly the given bytes", async () => {
+		const root = makeDirectory();
+		const path = join(root, "command.bin");
+		const files = createFileSystem();
+		await files.writeBytes(path, new Uint8Array([0, 1, 255]));
+		await files.writeBytes(path, new Uint8Array([10, 13]));
+		expect([...readFileSync(path)]).toEqual([10, 13]);
+	}, TEST_BOUND_MS);
 });

@@ -76,6 +76,13 @@ export class MemoryFileSystem implements FileSystem {
 		this.files.set(path, new TextDecoder().decode(bytes));
 	}
 
+	async writeBytes(path: string, value: Uint8Array): Promise<void> {
+		this.record(`write:${path}`);
+		this.ensureParentDirectories(path);
+		this.binaries.set(path, value.slice());
+		this.files.set(path, new TextDecoder().decode(value));
+	}
+
 	async readText(path: string): Promise<string> {
 		this.textReads.push(path);
 		const value = this.files.get(path);
