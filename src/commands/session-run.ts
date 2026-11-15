@@ -5,6 +5,7 @@ import type { SessionRecord } from "../session-core.js";
 import { joinPath } from "../file-system.js";
 import { messagesFor } from "../messages.js";
 import { apiFail, apiOk, ERROR_CODE_USAGE, LAUNCH_FAILED, LAUNCH_INVALID, LAUNCH_NOT_CONFIGURED, LAUNCH_TIMEOUT, SESSION_RUNNING } from "../output.js";
+import { errorText } from "../result.js";
 import { lookupSession, lookupSessionForCommand, sessionLive, SESSION_POLL_MS } from "../session-core.js";
 import { accountOf, INFO_ERROR_STATE_UNREADABLE } from "./info.js";
 import { readRigState } from "./shared.js";
@@ -82,7 +83,26 @@ const readLaunch = async (runtime: RuntimePorts): Promise<ApiResult<Launch>> => 
 	return apiFail(LAUNCH_NOT_CONFIGURED, messagesFor(runtime.language).session.launchConfigured(path));
 };
 
-export const runSession = async (runtime: RuntimePorts, session: SessionRecord, mode: string | null, accountOverride: string | null, spawnCommand: SpawnLaunch = async (command) => { const result = await runtime.process.spawnDetached(command, LAUNCH_EXIT_GRACE_MS, STDERR_LIMIT); if (!result.ok) return apiFail(LAUNCH_FAILED, result.error); return !result.value.exited || result.value.exitCode === 0 ? apiOk(null) : apiFail(LAUNCH_FAILED, messagesFor(runtime.language).session.launchExited(result.value.exitCode, result.value.stderr)); }): Promise<ApiResult<LaunchResult>> => {
+const spawnLaunch = async (runtime: RuntimePorts, command: string[]): Promise<ApiResult<null>> => {
+	const directory = joinPath(runtime.home, ".agent-rig", "launch-stderr");
+	const now = runtime.clock.now().getTime();
+	const path = joinPath(directory, `${now}-${runtime.ids.next()}.log`);
+	try {
+		await runtime.fs.ensureDirectory(directory);
+		for (const entry of await runtime.fs.listDirectory(directory)) {
+			const match = /^(\d+)-[\w-]+\.log$/.exec(entry.name);
+			// A concurrent launch needs its stderr until its grace period has elapsed.
+			if (!entry.directory && match && now - Number(match[1]) >= LAUNCH_EXIT_GRACE_MS) await runtime.fs.remove(joinPath(directory, entry.name)).catch(() => undefined);
+		}
+	} catch (error) { return apiFail(LAUNCH_FAILED, errorText(error)); }
+	const result = await runtime.process.spawnDetached(command, LAUNCH_EXIT_GRACE_MS, STDERR_LIMIT, path);
+	// On Windows the child may still hold the file; the next launch retries it.
+	await runtime.fs.remove(path).catch(() => undefined);
+	if (!result.ok) return apiFail(LAUNCH_FAILED, result.error);
+	return !result.value.exited || result.value.exitCode === 0 ? apiOk(null) : apiFail(LAUNCH_FAILED, messagesFor(runtime.language).session.launchExited(result.value.exitCode, result.value.stderr));
+};
+
+export const runSession = async (runtime: RuntimePorts, session: SessionRecord, mode: string | null, accountOverride: string | null, spawnCommand: SpawnLaunch = (command) => spawnLaunch(runtime, command)): Promise<ApiResult<LaunchResult>> => {
 	const live = await sessionLive(runtime, session);
 	if (!live.ok) return live;
 	if (live.value) return apiFail(SESSION_RUNNING, messagesFor(runtime.language).session.alreadyRunning());

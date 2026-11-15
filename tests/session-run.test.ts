@@ -12,6 +12,8 @@ import { createMemoryRuntime } from "./fakes/memory-runtime.js";
 const ID = "11111111-1111-1111-1111-111111111111";
 const ROOT = "/home/test/.agent-rig";
 const CREATED = "2026-01-01";
+// The two-second failure-detection grace documented for session launches.
+const LAUNCH_GRACE_MS = 2000;
 const session: SessionRecord = { id: ID, cwd: "/work", transcriptPath: "/transcript", pid: 42, pidCreated: CREATED, startedAt: CREATED, endedAt: CREATED };
 const raw = { session_id: ID, cwd: session.cwd, transcript_path: session.transcriptPath, pid: session.pid, pid_created: session.pidCreated, started_at: CREATED, ended_at: CREATED, config_dir: "/cfg/1-test" };
 const config = { command: ["terminal", "{cwd}", "{account}", "{session}", "{mode}"], timeoutSec: 2 };
@@ -78,6 +80,44 @@ describe("session run and mode", () => {
 		h.runtime.process.spawnDetached = async () => ({ ok: false, error: "launch error" });
 		const result = await runSession(h.runtime, session, "plan", "1");
 		expect(result.ok ? "ok" : result.error.message).toContain("launch error");
+	});
+	test("retries stderr cleanup on a later launch after a child releases its file", async () => {
+		const h = setup();
+		const directory = `${ROOT}/launch-stderr`;
+		const originalRemove = h.fs.remove.bind(h.fs);
+		let locked = "";
+		let now = 0;
+		h.runtime.clock.now = () => new Date(now);
+		h.runtime.process.createdAt = async () => ok({ "43": CREATED });
+		h.fs.remove = async (path) => { if (path === locked) throw new Error("file is open"); await originalRemove(path); };
+		h.runtime.process.spawnDetached = async (_command, _grace, _limit, path) => {
+			h.fs.seed(path, "stderr");
+			locked = path;
+			h.fs.seed(`${ROOT}/sessions/${ID}.json`, JSON.stringify({ ...raw, pid: 43, ended_at: null }));
+			return ok({ exited: false, exitCode: null, stderr: "" });
+		};
+		expect(code(await runSession(h.runtime, session, "plan", "1"))).toBe("ok");
+		expect((await h.fs.listDirectory(directory)).length).toBe(1);
+		const previous = locked;
+		locked = "";
+		now += LAUNCH_GRACE_MS;
+		expect(code(await runSession(h.runtime, session, "plan", "1"))).toBe("ok");
+		expect(h.fs.files.has(previous)).toBe(false);
+		expect((await h.fs.listDirectory(directory)).length).toBe(1);
+	});
+	test("removes an unlocked stderr file and preserves a concurrent launch's diagnostic window", async () => {
+		const h = setup();
+		const directory = `${ROOT}/launch-stderr`;
+		const concurrent = `${directory}/0-other.log`;
+		h.fs.seed(concurrent, "diagnostic");
+		h.runtime.process.createdAt = async () => ok({ "43": CREATED });
+		h.runtime.process.spawnDetached = async (_command, _grace, _limit, path) => {
+			h.fs.seed(path, "stderr");
+			h.fs.seed(`${ROOT}/sessions/${ID}.json`, JSON.stringify({ ...raw, pid: 43, ended_at: null }));
+			return ok({ exited: false, exitCode: null, stderr: "" });
+		};
+		expect(code(await runSession(h.runtime, session, "plan", "1"))).toBe("ok");
+		expect((await h.fs.listDirectory(directory)).map((entry) => entry.name)).toEqual(["0-other.log"]);
 	});
 	test("rejects a live session and accepts a newly recorded process", async () => {
 		const h = setup();

@@ -25,7 +25,7 @@ export type ProcessOptions = {
 
 export type ProcessPorts = {
 	run(command: string, args: readonly string[], options?: ProcessOptions): Promise<Result<ProcessOutput>>;
-	spawnDetached(command: readonly string[], graceMs: number, stderrLimit: number): Promise<Result<{ exited: boolean; exitCode: number | null; stderr: string }>>;
+	spawnDetached(command: readonly string[], graceMs: number, stderrLimit: number, stderrPath: string): Promise<Result<{ exited: boolean; exitCode: number | null; stderr: string }>>;
 	isAvailable(command: string): Promise<boolean>;
 	createdAt(pids: readonly number[]): Promise<Result<Record<string, string | null>>>;
 	killTree(pid: number): Promise<Result<void>>;
