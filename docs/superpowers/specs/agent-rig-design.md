@@ -397,6 +397,9 @@ means `"en"`. `rig` and the hub are English by default and switch to Russian tog
   `language`), and the operating system's own text goes in as a parameter of the catalogue message. A guard test
   (`tests/message-catalogue-guard.test.ts`) fails on any English literal that reaches `err`/`fail`/`apiFail`, an
   `error`/`message`/`reason` field or a catalogue call from outside the two catalogue files.
+  Each fact is said once: a port's message names the operation and the path and is the complete sentence; a caller
+  passes it on unchanged or adds only context the port does not know (feature, step), never the same operation or path
+  again (`tests/message-context-once.test.ts`).
 - A feature description in `feature.json` is a plain English string; the other languages go into the optional
   `translations` field, keyed by language: `{ "ru": { "description": "..." } }`. `rig feature`
   prints the description in the current language, falling back to the English string, and always as a plain string, so the

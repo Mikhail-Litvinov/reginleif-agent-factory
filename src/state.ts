@@ -121,7 +121,7 @@ export const readStoredLanguage = async (fs: FileSystem, home: string): Promise<
 export const writeState = async (fs: FileSystem, home: string, state: RigState, messages: Messages): Promise<Result<void>> => {
 	try {
 		const result = await atomicWrite(fs, joinPath(home, ".agent-rig", "state.json"), `${JSON.stringify(state, null, 2)}\n`, messages);
-		return result.ok ? ok(undefined) : err(messages.failure.stateWriteFailed(result.error));
+		return result.ok ? ok(undefined) : err(result.error);
 	} catch (error) {
 		return err(messages.failure.stateWriteFailed(errorText(error)));
 	}

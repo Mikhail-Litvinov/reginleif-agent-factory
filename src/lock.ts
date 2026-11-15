@@ -116,7 +116,7 @@ const acquire = async (dependencies: LockDependencies, onWait: (() => void) | nu
 		while (true) {
 			const owner: LockOwner = { pid: dependencies.process.pid, startTime: dependencies.process.startTime };
 			const created = await fs.writeExclusive(lockPath, `${JSON.stringify(owner)}\n`);
-			if (!created.ok) return err(dependencies.messages.failure.lockAcquireFailed(created.error));
+			if (!created.ok) return err(created.error);
 			if (created.value) return ok(createHandle(fs, lockPath, owner, dependencies.messages));
 			let existingText: string;
 			try {

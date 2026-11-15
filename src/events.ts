@@ -54,7 +54,7 @@ export const trimEvents = async (dependencies: EventDependencies): Promise<Resul
 		if (!Number.isSafeInteger(offset) || offset !== encoded.length) return ok(undefined);
 
 		const fileWrite = await atomicWrite(dependencies.fs, eventPath, "", dependencies.messages);
-		if (!fileWrite.ok) return err(dependencies.messages.failure.eventTrimFailed(fileWrite.error));
+		if (!fileWrite.ok) return err(fileWrite.error);
 		return ok(undefined);
 	} catch (error) {
 		return err(dependencies.messages.failure.eventTrimFailed(errorText(error)));

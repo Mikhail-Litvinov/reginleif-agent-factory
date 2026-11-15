@@ -141,7 +141,7 @@ const currentHash = async (
 	}
 	const read = await dependencies.assetFs.readFile(path);
 	if (read.ok) return ok(hashContent(read.value));
-	return read.error === NOT_FOUND ? ok(null) : err(dependencies.messages.failure.readFailed(path, read.error));
+	return read.error === NOT_FOUND ? ok(null) : err(read.error);
 };
 
 const readLog = async (dependencies: JournalDependencies): Promise<Result<string>> => {

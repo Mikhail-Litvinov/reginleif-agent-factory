@@ -16,6 +16,6 @@ export const cleanupSession = async (runtime: RuntimePorts, session: SessionReco
 	if (!stopped.ok) return stopped;
 	if (session.transcriptPath === null || session.transcriptPath.replaceAll("\\", "/").split("/").at(-1) !== `${session.id}.jsonl`) return apiFail(SESSION_IO, messagesFor(runtime.language).session.io(messagesFor(runtime.language).session.transcriptPath()));
 	const cleaned = await cleanTranscript(runtime, session.transcriptPath);
-	if (!cleaned.ok) return apiFail(SESSION_IO, messagesFor(runtime.language).session.io(cleaned.error));
+	if (!cleaned.ok) return apiFail(SESSION_IO, cleaned.error);
 	return apiOk({ session: session.id, compacted: compact.value, ...cleaned.value });
 };

@@ -118,7 +118,7 @@ export const inspectRig = async (runtime: RuntimePorts): Promise<Result<RigInspe
 	const installedPrograms = await checkPrograms(runtime, features, enabled);
 	if (!installedPrograms.ok) problems.push(installedPrograms.error);
 	const temporary = await runtime.temporary.createDirectory("rig-check-");
-	if (!temporary.ok) problems.push(messages.check.temporaryCreateFailed(temporary.error));
+	if (!temporary.ok) problems.push(temporary.error);
 	else {
 		try {
 			if (expectedHooks.ok) {
@@ -129,7 +129,7 @@ export const inspectRig = async (runtime: RuntimePorts): Promise<Result<RigInspe
 			if (!projectTmp.ok) problems.push(projectTmp.error);
 		} finally {
 			const removed = await runtime.temporary.removeDirectory(temporary.value);
-			if (!removed.ok) problems.push(messages.check.temporaryRemoveFailed(temporary.value, removed.error));
+			if (!removed.ok) problems.push(removed.error);
 		}
 	}
 	const environmentProblems: string[] = [];
@@ -247,7 +247,7 @@ const checkProjectTmp = async (runtime: RuntimePorts, state: RigState, temporary
 // Checks that settings.json records each expected hook with the same event, matcher, command and args.
 const missingSettingsHooks = (text: string, hooks: readonly ExpectedHook[], messages: Messages): string[] => {
 	const settings = parseJson(text, messages);
-	if (!settings.ok) return [messages.check.settingsNotJson(settings.error)];
+	if (!settings.ok) return [settings.error];
 	return hooks
 		.filter((hook) => !isRecordedHook(settings.value, hook))
 		.map((hook) => messages.check.hookNotRecorded(hook.feature, hook.event));
@@ -279,7 +279,7 @@ const parseJson = (text: string, messages: Messages): Result<unknown> => {
 	try {
 		return ok(JSON.parse(text));
 	} catch (error) {
-		return err(messages.failure.jsonParseFailed(errorText(error)));
+		return err(messages.check.settingsNotJson(errorText(error)));
 	}
 };
 

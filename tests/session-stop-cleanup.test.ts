@@ -34,7 +34,7 @@ describe("session stop and cleanup", () => {
 			h.runtime.language = language;
 			h.fs.seed("/transcripts/abc.jsonl", '{"type":"attachment","attachment":{"type":"invoked_skills","skills":[{}]}}');
 			const result = await cleanTranscript(h.runtime, "/transcripts/abc.jsonl");
-			expect(result.ok ? "ok" : result.error).toBe(messagesFor(language).session.skillsRecord());
+			expect(result.ok ? "ok" : result.error).toBe(messagesFor(language).session.io(messagesFor(language).session.skillsRecord()));
 		}
 	});
 	test("CLI emits one JSON object for each subcommand", async () => {

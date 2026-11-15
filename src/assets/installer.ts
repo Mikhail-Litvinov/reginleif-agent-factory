@@ -331,16 +331,16 @@ async function loadSourceFiles(fs: FileSystem, sourcePath: string, messages: Mes
   if (file.ok) return { ok: true, value: [{ relativePath: "", content: file.value }] };
 
   const files = await fs.listFiles(sourcePath);
-  if (!files.ok) return { ok: false, error: messages.failure.assetSourceReadFailed(sourcePath, files.error) };
+  if (!files.ok) return { ok: false, error: files.error };
   if (files.value.length === EMPTY_LENGTH) {
-    return { ok: false, error: messages.failure.assetSourceMissing(sourcePath, file.error) };
+    return { ok: false, error: messages.failure.assetSourceMissing(sourcePath) };
   }
 
   const prefix = trimTrailingSeparator(toSlashPath(sourcePath));
   const results: SourceFile[] = [];
   for (const path of files.value) {
     const read = await fs.readFile(path);
-    if (!read.ok) return { ok: false, error: messages.failure.assetSourceReadFailed(path, read.error) };
+    if (!read.ok) return { ok: false, error: read.error };
     const slashPath = toSlashPath(path);
     const relativePath = slashPath.startsWith(`${prefix}/`)
       ? slashPath.slice(prefix.length + PATH_SEPARATOR_LENGTH)
@@ -387,7 +387,7 @@ async function enableAsset(
   const prior = records[targetPath];
 
   if (!current.ok) {
-    if (!isNotFound(current.error)) return { ok: false, error: environment.messages.failure.installedAssetReadFailed(targetPath, current.error) };
+    if (!isNotFound(current.error)) return { ok: false, error: current.error };
     operations.writes.push({ path: targetPath, content });
     records[targetPath] = { hash: desiredHash, owned: true, notifiedHashes: [] };
     return { ok: true, value: undefined };
@@ -459,7 +459,7 @@ async function disableAsset(
   const current = await environment.fs.readFile(targetPath);
   if (!current.ok) {
     if (isNotFound(current.error)) return { ok: true, value: undefined };
-    return { ok: false, error: environment.messages.failure.installedAssetReadFailed(targetPath, current.error) };
+    return { ok: false, error: current.error };
   }
   const currentHash = hashContent(current.value);
   if (currentHash === prior.hash) {
@@ -475,7 +475,7 @@ async function disableAsset(
       const existing = await environment.fs.readFile(path);
       if (existing.ok) return { ok: true, value: hashContent(existing.value) };
       if (isNotFound(existing.error)) return { ok: true, value: null };
-      return { ok: false, error: environment.messages.failure.backupPathCheckFailed(path, existing.error) };
+      return { ok: false, error: existing.error };
     },
     environment.messages,
   );
@@ -517,7 +517,7 @@ async function nearestRealPath(fs: FileSystem, path: string, messages: Messages)
   for (;;) {
     const real = await fs.realPath(candidate);
     if (real.ok) return { ok: true, value: normalizeRealPath(real.value) };
-    if (!isNotFound(real.error)) return { ok: false, error: messages.failure.pathResolveFailed(candidate, real.error) };
+    if (!isNotFound(real.error)) return { ok: false, error: real.error };
     const parent = parentPath(candidate);
     // Nothing on the way exists, so nothing can be a symlink and the written path is its own real path.
     if (parent === "." || parent === candidate) return { ok: true, value: normalizeRealPath(path) };
