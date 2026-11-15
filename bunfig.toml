@@ -1,0 +1,3 @@
+# rig's own tests live in tests/; plugins/*/mod/*.test.ts run under `claude plugin test` (they import claude-code/testing).
+[test]
+root = "./tests"
