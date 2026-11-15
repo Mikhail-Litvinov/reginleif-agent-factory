@@ -9,7 +9,7 @@ import { join } from "node:path";
 
 import { applyRig } from "../src/apply.js";
 import { readRigState } from "../src/commands/shared.js";
-import { baseManifest, createMemoryRuntime, CrashError, featureManifest, seedFeature, seedHubManifest } from "./fakes/memory-runtime.js";
+import { baseManifest, createMemoryRuntime, CrashError, featureManifest, seedFeature, seedHubManifest, seedRigPluginManifest } from "./fakes/memory-runtime.js";
 
 const HOME = "/home/test";
 const REPO = "/repo";
@@ -430,5 +430,61 @@ describe("the core does not depend on the command layer (A11)", () => {
 		const source = readFileSync(SOURCE_APPLY_FILE, "utf8");
 
 		expect(source).not.toMatch(/from\s+["']\.\/commands\/shared(?:\.js)?["']/);
+	});
+});
+
+describe("a plugin shipped inside the rig clone", () => {
+	const RIG_PLUGIN = "rig:window-demo";
+	const RIG_PLUGIN_PATH = `${REPO}/plugins/window-demo`;
+	const commandsOf = (harness: MemoryRuntimeHarness): string[] => harness.processCalls.map((call) => call.args.join(" "));
+
+	test("installs from the clone folder under the names its marketplace manifest declares", async () => {
+		const harness = createMemoryRuntime();
+		harness.fs.seed(SETTINGS_PATH, "{}\n");
+		seedWorld(harness, { version: "v1", flag: "a", plugins: [RIG_PLUGIN], assets: false });
+		seedRigPluginManifest(harness.fs, REPO, "window-demo", "demo-market", "window-demo");
+
+		await applyOk(harness, seedInitialState(harness, { demo: true }), "install");
+
+		expect(commandsOf(harness)).toContain(`plugin marketplace add ${RIG_PLUGIN_PATH}`);
+		expect([...harness.installedPlugins]).toEqual(["window-demo@demo-market"]);
+	});
+
+	test("a missing folder is a clear error that names the folder", async () => {
+		const harness = createMemoryRuntime();
+		harness.fs.seed(SETTINGS_PATH, "{}\n");
+		seedWorld(harness, { version: "v1", flag: "a", plugins: [RIG_PLUGIN], assets: false });
+
+		const result = await applyRig(harness.runtime, { state: seedInitialState(harness, { demo: true }), mode: "install" });
+
+		expect(result.ok).toBe(false);
+		if (!result.ok) expect(result.error).toContain(RIG_PLUGIN_PATH);
+		expect([...harness.installedPlugins]).toEqual([]);
+	});
+
+	test("a marketplace manifest that does not list the plugin is a clear error", async () => {
+		const harness = createMemoryRuntime();
+		harness.fs.seed(SETTINGS_PATH, "{}\n");
+		seedWorld(harness, { version: "v1", flag: "a", plugins: [RIG_PLUGIN], assets: false });
+		seedRigPluginManifest(harness.fs, REPO, "window-demo", "demo-market", "something-else");
+
+		const result = await applyRig(harness.runtime, { state: seedInitialState(harness, { demo: true }), mode: "install" });
+
+		expect(result.ok).toBe(false);
+		if (!result.ok) expect(result.error).toContain("window-demo");
+	});
+
+	test("a renamed marketplace converges: the old id is removed, the new one installed", async () => {
+		const harness = createMemoryRuntime();
+		harness.fs.seed(SETTINGS_PATH, "{}\n");
+		seedWorld(harness, { version: "v1", flag: "a", plugins: [RIG_PLUGIN], assets: false });
+		seedRigPluginManifest(harness.fs, REPO, "window-demo", "market-old");
+		await applyOk(harness, seedInitialState(harness, { demo: true }), "install");
+		expect([...harness.installedPlugins]).toEqual(["window-demo@market-old"]);
+
+		seedRigPluginManifest(harness.fs, REPO, "window-demo", "market-new");
+		await applyOk(harness, await stateFromDisk(harness));
+
+		expect([...harness.installedPlugins]).toEqual(["window-demo@market-new"]);
 	});
 });

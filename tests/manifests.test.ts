@@ -392,6 +392,7 @@ describe("real feature manifests", () => {
 async function seedRepository(fileSystem: MemoryFileSystem): Promise<void> {
 	await seedDirectory(fileSystem, join(REPOSITORY_ROOT, "base"), `${REPOSITORY_PATH}/base`);
 	await seedDirectory(fileSystem, join(REPOSITORY_ROOT, "features"), `${REPOSITORY_PATH}/features`);
+	await seedDirectory(fileSystem, join(REPOSITORY_ROOT, "plugins"), `${REPOSITORY_PATH}/plugins`);
 }
 
 function addWindowsOnlyHook(fileSystem: MemoryFileSystem): void {

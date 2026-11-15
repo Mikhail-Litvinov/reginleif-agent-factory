@@ -10,7 +10,7 @@ Installing on a server is described in [INSTALL.md](INSTALL.md). Agent, you were
 
 ## Features
 
-A feature is a set of rules, hooks, plugins and programs under one name. The feature `base` is always on and cannot be turned off. The descriptions come from the manifests `base/feature.json` and `features/*/feature.json`.
+A feature is a set of rules, hooks, plugins and programs under one name. The feature `base` is always on and cannot be turned off. The descriptions come from the manifests `base/feature.json` and `features/*/feature.json`. `base` also installs rig's own Claude Code plugin `agent-rig-window` from `plugins/agent-rig-window` of the clone (the in-window module).
 
 | Feature | Default | Platforms | What it does |
 | --- | --- | --- | --- |

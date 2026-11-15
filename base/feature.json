@@ -432,7 +432,9 @@
       "platform": "windows"
     }
   ],
-  "plugins": [],
+  "plugins": [
+    "rig:agent-rig-window"
+  ],
   "files": [
     "hooks/compact_history.py",
     "hooks/no_ampersand.py",

@@ -93,7 +93,10 @@ optional. `kind` is `value`, `list-entry` or `install-default`; without `kind`, 
 `permissions.deny` and `autoMode.allow` are extended, other values are replaced. `assets` holds `sourcePath`/`targetPath`
 pairs relative to the feature clone and to `~/.claude`; paths cannot leave these directories. `files` lists extra sources
 that stay in the clone; `agents` and `skills` list the source files and directories to copy. Programs can be restricted by
-`platform`. Plugins are given by the selector `plugin@marketplace`; the hub's local plugin is taken from the hub clone.
+`platform`. Plugins are given by the selector `plugin@marketplace`; the hub's local plugin is taken from the hub clone. A plugin shipped inside the rig clone is given as
+`rig:<folder>` (a plain kebab-case name): it resolves to `plugins/<folder>` of the clone, a folder holding
+`.claude-plugin/marketplace.json`. The marketplace name comes from that file and the plugin id is `<folder>@<marketplace name>`;
+the file must list a plugin named `<folder>`. `base` lists `rig:agent-rig-window`, the in-window module, so every machine gets it.
 `hubCommands` is a list of command names the feature declares for the hub.
 
 The program a hook `command` names (`{{PYTHON}}`, `{{BASH}}`, `rtk`) is resolved once, in the rig process at apply time,

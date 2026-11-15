@@ -1,0 +1,6 @@
+{
+  "hooks": {},
+  "modules": [
+    "../mod/register.ts"
+  ]
+}

@@ -367,6 +367,11 @@ export const seedHubManifest = (fs: MemoryFileSystem, hub: string, name: string)
 	fs.seed(`${hub}/.claude-plugin/marketplace.json`, JSON.stringify({ name, plugins: [{ name: "telegram-hub", source: "./plugin" }] }));
 };
 
+// A plugin shipped inside the clone: a folder under `plugins/` with its own marketplace manifest.
+export const seedRigPluginManifest = (fs: MemoryFileSystem, repo: string, folder: string, marketplace: string, pluginName: string = folder): void => {
+	fs.seed(`${repo}/plugins/${folder}/.claude-plugin/marketplace.json`, JSON.stringify({ name: marketplace, plugins: [{ name: pluginName, source: "./" }] }));
+};
+
 export const seedFeature = (fs: MemoryFileSystem, repo: string, feature: Record<string, unknown>): void => {
 	const name = typeof feature.name === "string" ? feature.name : "unknown";
 	const featurePath = name === "base" ? `${repo}/base/feature.json` : `${repo}/features/${name}/feature.json`;

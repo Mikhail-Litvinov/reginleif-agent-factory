@@ -12,7 +12,7 @@ import { createRealRuntime } from "../src/commands/real-runtime.js";
 const TEMP_DIRECTORY_PREFIX = "agent-rig-update-real-";
 // Each update spawns bun twice and asks the OS for process start times; Windows is slow at that.
 const REAL_UPDATE_TIMEOUT_MS = 120_000;
-const COPIED_ENTRIES = ["src", "base", "features", "package.json", "tsconfig.json"];
+const COPIED_ENTRIES = ["src", "base", "features", "plugins", "package.json", "tsconfig.json"];
 const BROKEN_IMPORT = "import \"./does-not-exist.js\";\n";
 // Runs before the code of src/cli.ts, so only the child `update-step check` exits non-zero; `update-step apply` still passes.
 const CHECK_STEP_FAILURE = 'if (process.argv[2] === "update-step" && process.argv[3] === "check") process.exit(1);\n';
@@ -29,16 +29,17 @@ type Fixture = {
 };
 
 let root: string | undefined;
-let savedHome: { USERPROFILE: string | undefined; HOME: string | undefined } | undefined;
+let savedHome: { USERPROFILE: string | undefined; HOME: string | undefined; CLAUDE_CONFIG_DIR: string | undefined } | undefined;
 
 beforeEach(() => {
-	savedHome = { USERPROFILE: process.env.USERPROFILE, HOME: process.env.HOME };
+	savedHome = { USERPROFILE: process.env.USERPROFILE, HOME: process.env.HOME, CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR };
 });
 
 afterEach(async () => {
 	if (savedHome !== undefined) {
 		restoreEnvironment("USERPROFILE", savedHome.USERPROFILE);
 		restoreEnvironment("HOME", savedHome.HOME);
+		restoreEnvironment("CLAUDE_CONFIG_DIR", savedHome.CLAUDE_CONFIG_DIR);
 		savedHome = undefined;
 	}
 	if (root !== undefined) {
@@ -135,6 +136,8 @@ const createFixture = async (secondCommitChange: (origin: string) => Promise<voi
 	await fs.writeFile(join(home, ".agent-rig", "state.json"), `${JSON.stringify(state, null, 2)}\n`, "utf8");
 	process.env.USERPROFILE = home;
 	process.env.HOME = home;
+	// The base feature installs a plugin through the real `claude`: its marketplaces must land in the fixture, never in the user's real Claude config.
+	process.env.CLAUDE_CONFIG_DIR = join(home, ".claude");
 	return { root: slashed, home, clone, hubClone, firstCommit, secondCommit };
 };
 
@@ -158,7 +161,7 @@ const readState = async (home: string): Promise<RigState> => {
 	return parsed;
 };
 
-const restoreEnvironment = (name: "USERPROFILE" | "HOME", value: string | undefined): void => {
+const restoreEnvironment = (name: "USERPROFILE" | "HOME" | "CLAUDE_CONFIG_DIR", value: string | undefined): void => {
 	if (value === undefined) delete process.env[name];
 	else process.env[name] = value;
 };

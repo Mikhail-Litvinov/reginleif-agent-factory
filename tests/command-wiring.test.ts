@@ -611,7 +611,7 @@ const SHIPPED_LINUX_FEATURES = ["codex", "js-ts-rules", "reflection", "rtk", "sk
 const IN_PROCESS_TOGGLE_FEATURES = SHIPPED_LINUX_FEATURES.filter((name) => name !== "telegram");
 
 const seedShippedRepository = (fs: ReturnType<typeof createMemoryRuntime>["fs"]): void => {
-	for (const top of ["base", "features"]) {
+	for (const top of ["base", "features", "plugins"]) {
 		const root = join(REAL_REPOSITORY, top);
 		for (const file of readdirSync(root, { recursive: true, encoding: "utf8" })) {
 			const source = join(root, file);

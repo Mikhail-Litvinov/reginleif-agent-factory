@@ -36,8 +36,10 @@ const UPDATE_CHANNEL_SETTING_ID = "rig-update-channel";
 const UPDATE_CHANNEL_PATH = ["autoUpdatesChannel"];
 const SERVER_UPDATE_CHANNEL = "stable";
 const EMPTY_SETTINGS_TEXT = "{}\n";
-const HUB_MARKETPLACE_DIRECTORY = ".claude-plugin";
-const HUB_MARKETPLACE_FILENAME = "marketplace.json";
+const MARKETPLACE_DIRECTORY = ".claude-plugin";
+const MARKETPLACE_FILENAME = "marketplace.json";
+const RIG_PLUGIN_PREFIX = "rig:";
+const RIG_PLUGINS_DIRECTORY = "plugins";
 
 export type ApplyRequest = {
 	state: RigState;
@@ -128,7 +130,7 @@ export const applyRig = async (runtime: RuntimePorts, request: ApplyRequest): Pr
 	});
 	if (!draftMerge.ok) return err(invalidSettings(draftMerge.error));
 	const pluginRecords = readPluginRecords(records);
-	const pluginPlansResult = await buildPluginPlans(runtime.fs, manifests, enabled, request.state.paths.hub, runtime.platform, pluginRecords);
+	const pluginPlansResult = await buildPluginPlans(runtime.fs, manifests, enabled, request.state.paths.hub, request.state.paths.repo, runtime.platform, pluginRecords);
 	if (!pluginPlansResult.ok) return pluginPlansResult;
 	const assetEnvironment = {
 		fs: runtime.assetFs,
@@ -432,33 +434,40 @@ const makeAssetFile = (
 	};
 };
 
-// A plugin written without "@" comes from the hub. The hub declares its marketplace name in its own manifest,
-// which is read at most once per apply and only when such a plugin is enabled.
+// A plugin written without "@" is local: "rig:<folder>" is a folder of the rig clone under plugins/, anything else comes
+// from the hub. A local folder declares its marketplace name in its own manifest, which is read at most once per apply
+// and only when such a plugin is enabled.
 const buildPluginPlans = async (
 	fs: FileSystem,
 	manifests: readonly FeatureManifest[],
 	enabled: ReadonlySet<string>,
 	hubPath: string,
+	repoPath: string,
 	platform: RuntimePorts["platform"],
 	pluginRecords: Readonly<Record<string, PluginRecord>>,
 ): Promise<Result<PluginPlan[]>> => {
 	const plans: PluginPlan[] = [];
-	let hubMarketplace: Result<string> | null = null;
+	const marketplaces = new Map<string, Result<MarketplaceManifest>>();
 	for (const feature of manifests) {
 		for (const plugin of feature.plugins) {
 			const isEnabled = feature.name === "base" ? true : enabled.has(feature.name) && feature.platforms.includes(platform);
-			const separator = plugin.indexOf("@");
-			if (separator < 0) {
+			const local = localPluginOrigin(plugin, hubPath, repoPath);
+			if (local !== null) {
 				if (!isEnabled) {
-					plans.push(...recordedHubPlans(plugin, hubPath, pluginRecords));
+					plans.push(...recordedLocalPlans(local.name, local.path, pluginRecords));
 					continue;
 				}
-				hubMarketplace ??= await readHubMarketplaceName(fs, hubPath);
-				if (!hubMarketplace.ok) return hubMarketplace;
-				plans.push({ enabled: true, id: `${plugin}@${hubMarketplace.value}`, marketplace: hubMarketplace.value, source: hubPath });
+				const cached = marketplaces.get(local.path);
+				const manifest = cached ?? await readMarketplaceManifest(fs, local.path, local.label);
+				marketplaces.set(local.path, manifest);
+				if (!manifest.ok) return manifest;
+				if (local.mustBeListed && !manifest.value.plugins.includes(local.name)) {
+					return err(`The ${local.label} ${manifestPathOf(local.path)} does not list the plugin ${local.name}`);
+				}
+				plans.push({ enabled: true, id: `${local.name}@${manifest.value.name}`, marketplace: manifest.value.name, source: local.path });
 				continue;
 			}
-			const marketplace = plugin.slice(separator + 1);
+			const marketplace = plugin.slice(plugin.indexOf("@") + 1);
 			const source = marketplaceSource(marketplace);
 			if (source === null) return err(`Plugin ${plugin} refers to unknown marketplace ${marketplace}`);
 			plans.push({ enabled: isEnabled, id: plugin, marketplace, source });
@@ -467,31 +476,48 @@ const buildPluginPlans = async (
 	return ok(plans);
 };
 
-// A disabled hub plugin is not looked up again: its recorded ids are uninstalled under the names they were installed with.
-const recordedHubPlans = (plugin: string, hubPath: string, pluginRecords: Readonly<Record<string, PluginRecord>>): PluginPlan[] =>
+type LocalPluginOrigin = { name: string; path: string; label: string; mustBeListed: boolean };
+
+const localPluginOrigin = (plugin: string, hubPath: string, repoPath: string): LocalPluginOrigin | null => {
+	if (plugin.startsWith(RIG_PLUGIN_PREFIX)) {
+		const folder = plugin.slice(RIG_PLUGIN_PREFIX.length);
+		return { name: folder, path: joinPath(repoPath, RIG_PLUGINS_DIRECTORY, folder), label: "rig plugin marketplace manifest", mustBeListed: true };
+	}
+	if (plugin.includes("@")) return null;
+	return { name: plugin, path: hubPath, label: "hub marketplace manifest", mustBeListed: false };
+};
+
+// A disabled local plugin is not looked up again: its recorded ids are uninstalled under the names they were installed with.
+const recordedLocalPlans = (plugin: string, sourcePath: string, pluginRecords: Readonly<Record<string, PluginRecord>>): PluginPlan[] =>
 	Object.entries(pluginRecords)
-		.filter(([id, record]) => id.startsWith(`${plugin}@`) && record.source === hubPath)
+		.filter(([id, record]) => id.startsWith(`${plugin}@`) && record.source === sourcePath)
 		.map(([id, record]) => ({ enabled: false, id, marketplace: record.marketplace, source: record.source }));
 
-const readHubMarketplaceName = async (fs: FileSystem, hubPath: string): Promise<Result<string>> => {
-	const path = joinPath(hubPath, HUB_MARKETPLACE_DIRECTORY, HUB_MARKETPLACE_FILENAME);
+type MarketplaceManifest = { name: string; plugins: string[] };
+
+const manifestPathOf = (directory: string): string => joinPath(directory, MARKETPLACE_DIRECTORY, MARKETPLACE_FILENAME);
+
+const readMarketplaceManifest = async (fs: FileSystem, directory: string, label: string): Promise<Result<MarketplaceManifest>> => {
+	const path = manifestPathOf(directory);
 	let text: string;
 	try {
 		text = await fs.readText(path);
 	} catch (error) {
-		return err(`Cannot read the hub marketplace manifest ${path}: ${errorText(error)}`);
+		return err(`Cannot read the ${label} ${path}: ${errorText(error)}`);
 	}
 	let value: unknown;
 	try {
 		value = JSON.parse(text);
 	} catch {
-		return err(`The hub marketplace manifest ${path} is not valid JSON`);
+		return err(`The ${label} ${path} is not valid JSON`);
 	}
-	if (!isHubMarketplace(value)) return err(`The hub marketplace manifest ${path} does not declare a marketplace name`);
-	return ok(value.name);
+	if (!isMarketplaceName(value)) return err(`The ${label} ${path} does not declare a marketplace name`);
+	const listed: unknown[] = Array.isArray(value.plugins) ? value.plugins : [];
+	const plugins = listed.flatMap((entry) => (isObject(entry) && typeof entry.name === "string" ? [entry.name] : []));
+	return ok({ name: value.name, plugins });
 };
 
-const isHubMarketplace = (value: unknown): value is { name: string } =>
+const isMarketplaceName = (value: unknown): value is { name: string; plugins?: unknown } =>
 	isObject(value) && typeof value.name === "string" && value.name.length > 0;
 
 const marketplaceSource = (marketplace: string): string | null => {

@@ -1,0 +1,14 @@
+{
+  "name": "agent-rig",
+  "owner": {
+    "name": "agent-rig"
+  },
+  "plugins": [
+    {
+      "name": "agent-rig-window",
+      "source": "./",
+      "description": "The in-window module of rig."
+    }
+  ],
+  "description": "Local marketplace for the plugin that rig ships inside its own clone."
+}

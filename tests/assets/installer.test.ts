@@ -413,6 +413,28 @@ describe("applyPlugins stale local marketplaces", () => {
     ]);
   });
 
+  test("covers a plugin shipped inside the rig clone the same way", async () => {
+    const runner = makeRunner({
+      [MARKETPLACE_LIST_JSON]: directoryListing([{ name: "old-window", path: "C:\\Projects\\rig\\plugins\\agent-rig-window\\" }]),
+      "plugin list --json": JSON.stringify([{ id: "agent-rig-window@old-window" }]),
+    });
+
+    const result = await applyPlugins(
+      { runner, claudeCommand: "claude" },
+      [{ enabled: true, id: "agent-rig-window@agent-rig", marketplace: "agent-rig", source: "C:/projects/rig/plugins/agent-rig-window" }],
+    );
+
+    expect(result.ok).toBe(true);
+    expect(runner.calls).toEqual([
+      ["claude", "plugin", "marketplace", "list", "--json"],
+      ["claude", "plugin", "list", "--json"],
+      ["claude", "plugin", "uninstall", "agent-rig-window@old-window", "--scope", "user", "--yes"],
+      ["claude", "plugin", "marketplace", "remove", "old-window"],
+      ["claude", "plugin", "marketplace", "add", "C:/projects/rig/plugins/agent-rig-window"],
+      ["claude", "plugin", "install", "agent-rig-window@agent-rig", "--scope", "user", "--yes"],
+    ]);
+  });
+
   test("leaves a marketplace with a different path untouched", async () => {
     const runner = makeRunner({
       [MARKETPLACE_LIST_JSON]: directoryListing([{ name: "other-hub", path: "C:/projects/other" }]),

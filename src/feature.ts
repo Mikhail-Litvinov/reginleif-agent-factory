@@ -80,6 +80,12 @@ const isObject = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
 const isUnknownArray = (value: unknown): value is unknown[] => Array.isArray(value);
 const isString = (value: unknown): value is string => typeof value === "string";
+const RIG_PLUGIN_PREFIX = "rig:";
+const RIG_PLUGIN_FOLDER = /^[a-z0-9]+(-[a-z0-9]+)*$/;
+// "rig:<folder>" names a plugin folder of the rig clone: a plain kebab-case name, never a path.
+const isPlugin = (value: unknown): value is string =>
+	isString(value) && (!value.startsWith(RIG_PLUGIN_PREFIX) || RIG_PLUGIN_FOLDER.test(value.slice(RIG_PLUGIN_PREFIX.length)));
+const isPluginArray = (value: unknown): value is string[] => isUnknownArray(value) && value.every(isPlugin);
 const isStringArray = (value: unknown): value is string[] => isUnknownArray(value) && value.every(isString);
 const isRelativePathArray = (value: unknown): value is string[] => isUnknownArray(value) &&
 	value.every((entry) => isString(entry) && isRelativeAssetPath(entry));
@@ -126,7 +132,7 @@ const isRelativeAssetPath = (value: string): boolean => {
 const hasValidLists = (value: Record<string, unknown>): boolean => {
 	if (!isStringArray(value.dependencies) || !isUnknownArray(value.platforms) || !value.platforms.every(isPlatform) ||
 		!isUnknownArray(value.rules) || !value.rules.every(isRule) || !isUnknownArray(value.hooks) || !value.hooks.every(isHook) ||
-		!isUnknownArray(value.settings) || !value.settings.every(isSetting) || !isStringArray(value.plugins) ||
+		!isUnknownArray(value.settings) || !value.settings.every(isSetting) || !isPluginArray(value.plugins) ||
 		!isRelativePathArray(value.files) ||
 		!isRelativePathArray(value.agents) || !isRelativePathArray(value.skills) || !isStringArray(value.hubCommands) ||
 		!isUnknownArray(value.programs) || !value.programs.every(isProgram) ||

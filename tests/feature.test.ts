@@ -50,6 +50,13 @@ class FeatureFileSystem implements FileSystem {
 }
 
 describe("feature manifests", () => {
+	test("accepts a plugin of the rig clone and rejects a folder that is a path", () => {
+		expect(validateFeature({ ...manifest(), plugins: ["rig:agent-rig-window"] }).ok).toBe(true);
+		for (const bad of ["rig:", "rig:../x", "rig:a/b", "rig:Upper"]) {
+			expect(validateFeature({ ...manifest(), plugins: [bad] }).ok).toBe(false);
+		}
+	});
+
 	test("rejects malformed manifests with their feature name", () => {
 		const result = validateFeature({ ...manifest(), dependencies: [4] });
 		expect(result.ok).toBe(false);
