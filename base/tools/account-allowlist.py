@@ -9,7 +9,11 @@ Account of the session:
   - CLAUDE_CONFIG_DIR = .../sessions/<N>-<name>: account N
   - anything else (unreadable sequence.json, a profile dir without a number): unknown, so a restricted category fails closed
 Malformed config: every category is refused, naming the file.
+Query from outside (the telegram hub's /info):
+  python -I account-allowlist.py check <codex|volunteers> --config-dir <dir>
+prints {"allowed": bool, "reason": str} as one JSON line; an empty or omitted --config-dir is the main login.
 """
+import argparse
 import json
 import os
 import re
@@ -119,3 +123,29 @@ def session_hint(category, hint, env=None, home=None, out=None):
     text = json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart",
                                               "additionalContext": f"{hint} ({reason})"}}, ensure_ascii=True)
     print(text, file=out)
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(description="Query the cswap account allowlist.")
+    commands = parser.add_subparsers(dest="command", required=True)
+    query = commands.add_parser("check", help="print whether a category is allowed for a Claude config dir")
+    query.add_argument("category", choices=CATEGORIES)
+    query.add_argument("--config-dir", default="",
+                       help="the CLAUDE_CONFIG_DIR of the session; empty or omitted is the main login")
+    return parser
+
+
+def main(argv=None):
+    """`check <category> --config-dir <dir>`: one line of JSON {"allowed", "reason"}, exit 0 in both cases.
+
+    The process's own CLAUDE_CONFIG_DIR is ignored: --config-dir alone names the session's config dir.
+    """
+    args = build_parser().parse_args(argv)
+    env = {"CLAUDE_CONFIG_DIR": args.config_dir} if args.config_dir else {}
+    allowed, reason = check(args.category, env)
+    print(json.dumps({"allowed": allowed, "reason": reason}, ensure_ascii=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

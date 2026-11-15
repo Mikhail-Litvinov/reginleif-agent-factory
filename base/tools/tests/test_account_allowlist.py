@@ -3,12 +3,17 @@
 Run from the clone root: python -I -m unittest discover -s base/tools/tests -v
 Every test injects the home directory and the environment; nothing reads the real ~ or cswap files.
 """
+import contextlib
 import importlib.util
 import io
 import json
+import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 MODULE = Path(__file__).resolve().parents[1] / "account-allowlist.py"
 SPEC = importlib.util.spec_from_file_location("account_allowlist", MODULE)
@@ -17,6 +22,9 @@ SPEC.loader.exec_module(al)
 
 ACTIVE_ACCOUNT = 4
 HINT = "do not use the feature"
+CLI_TIMEOUT_SECONDS = 60
+# Variables that pick the home directory or the Claude config dir; the CLI tests set the ones they need.
+HOME_ENV = ("HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "CLAUDE_CONFIG_DIR")
 
 
 class Home:
@@ -38,8 +46,11 @@ class Home:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(data if isinstance(data, str) else json.dumps(data), encoding="utf-8")
 
+    def side_dir(self, name):
+        return str(self.root / ".claude-swap-backup" / "sessions" / name)
+
     def side_env(self, name):
-        return {"CLAUDE_CONFIG_DIR": str(self.root / ".claude-swap-backup" / "sessions" / name)}
+        return {"CLAUDE_CONFIG_DIR": self.side_dir(name)}
 
     def main_env(self):
         return {"CLAUDE_CONFIG_DIR": str(self.root / ".claude")}
@@ -192,6 +203,104 @@ class EntryPointsTest(unittest.TestCase):
         self.assertEqual(payload["hookEventName"], "SessionStart")
         self.assertIn(HINT, payload["additionalContext"])
         self.assertIn("account 2", payload["additionalContext"])
+
+    def test_importing_the_module_does_not_run_the_cli(self):
+        spec = importlib.util.spec_from_file_location("account_allowlist_import", MODULE)
+        module = importlib.util.module_from_spec(spec)
+        out = io.StringIO()
+        argv = ["account-allowlist.py", "check", "codex", "--config-dir", ""]
+        with mock.patch.object(sys, "argv", argv), contextlib.redirect_stdout(out):
+            spec.loader.exec_module(module)
+        self.assertEqual(out.getvalue(), "")
+
+
+class CliTest(unittest.TestCase):
+    """`check <category> --config-dir <dir>` run as a subprocess with a fake HOME (and USERPROFILE on Windows)."""
+
+    def run_cli(self, home, argv, own_config_dir=None):
+        env = {key: value for key, value in os.environ.items() if key not in HOME_ENV}
+        env["HOME"] = env["USERPROFILE"] = str(home.root)
+        if own_config_dir is not None:
+            env["CLAUDE_CONFIG_DIR"] = own_config_dir
+        return subprocess.run([sys.executable, "-I", str(MODULE), *argv], env=env, capture_output=True,
+                              encoding="utf-8", timeout=CLI_TIMEOUT_SECONDS, check=False)
+
+    def query(self, home, category, config_dir=None, own_config_dir=None):
+        argv = ["check", category]
+        if config_dir is not None:
+            argv += ["--config-dir", config_dir]
+        proc = self.run_cli(home, argv, own_config_dir)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(len(proc.stdout.splitlines()), 1, proc.stdout)
+        return json.loads(proc.stdout)
+
+    def test_allowed_account_prints_allowed_true_with_empty_reason(self):
+        home = Home(self)
+        home.sequence()
+        home.config({"codex": [1, 4]})
+        self.assertEqual(self.query(home, "codex", home.side_dir("1-x")), {"allowed": True, "reason": ""})
+
+    def test_refused_side_profile_prints_the_refusal_and_still_exits_zero(self):
+        home = Home(self)
+        home.sequence()
+        home.config({"codex": [1, 4]})
+        result = self.query(home, "codex", home.side_dir("2-x"))
+        self.assertFalse(result["allowed"])
+        self.assertTrue(result["reason"].startswith("REFUSED"))
+        self.assertIn("account 2", result["reason"])
+        self.assertIn("account-allowlist.json", result["reason"])
+
+    def test_empty_config_dir_is_the_main_login_account(self):
+        home = Home(self)
+        home.sequence(active=2)
+        home.config({"codex": [1, 4]})
+        self.assertFalse(self.query(home, "codex", "")["allowed"])
+        home.sequence(active=4)
+        self.assertEqual(self.query(home, "codex", ""), {"allowed": True, "reason": ""})
+
+    def test_omitted_config_dir_is_the_main_login_account(self):
+        home = Home(self)
+        home.sequence(active=2)
+        home.config({"codex": [1, 4]})
+        self.assertFalse(self.query(home, "codex")["allowed"])
+
+    def test_own_claude_config_dir_is_ignored(self):
+        home = Home(self)
+        home.sequence()
+        home.config({"codex": [1, 4]})
+        # the process's own CLAUDE_CONFIG_DIR points at refused account 2; the query is about the main login (4)
+        self.assertTrue(self.query(home, "codex", "", own_config_dir=home.side_dir("2-x"))["allowed"])
+        self.assertTrue(self.query(home, "codex", None, own_config_dir=home.side_dir("2-x"))["allowed"])
+        # the flag wins over the process's own variable: own says account 1 (allowed), the flag says account 2
+        self.assertFalse(self.query(home, "codex", home.side_dir("2-x"),
+                                    own_config_dir=home.side_dir("1-x"))["allowed"])
+
+    def test_unrestricted_without_cswap_is_allowed_even_when_listed_empty(self):
+        home = Home(self)
+        home.config({"volunteers": []})
+        self.assertEqual(self.query(home, "volunteers", ""), {"allowed": True, "reason": ""})
+
+    def test_malformed_config_prints_a_refusal_naming_the_file(self):
+        home = Home(self)
+        home.config("{oops")
+        result = self.query(home, "volunteers", "")
+        self.assertFalse(result["allowed"])
+        self.assertIn("malformed", result["reason"])
+        self.assertIn("account-allowlist.json", result["reason"])
+
+    def test_unknown_category_is_an_argparse_error(self):
+        home = Home(self)
+        proc = self.run_cli(home, ["check", "telegram", "--config-dir", ""])
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertEqual(proc.stdout, "")
+        self.assertIn("invalid choice", proc.stderr)
+
+    def test_missing_category_or_command_is_a_usage_error(self):
+        home = Home(self)
+        for argv in (["check"], []):
+            proc = self.run_cli(home, argv)
+            self.assertNotEqual(proc.returncode, 0, argv)
+            self.assertEqual(proc.stdout, "", argv)
 
 
 if __name__ == "__main__":

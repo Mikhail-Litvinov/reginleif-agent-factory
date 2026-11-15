@@ -155,6 +155,13 @@ session's account and answers whether a category is allowed:
   subagent of that feature; do the work as the rules describe with the feature off, silently) only when the current
   account is not allowed, so a session on another account never spends a delegation attempt. The hint is model context,
   not user output, so it is English like the other hook texts; only a hook's `statusMessage` is translated.
+- The query for outside programs, the contract for readers outside the launchers (the telegram hub's `/info` uses it to hide
+  the Codex and volunteer blocks on an account that is not allowed): `python -I <clone>/base/tools/account-allowlist.py check
+  <codex|volunteers> --config-dir <dir>` prints one line of JSON, `{"allowed": true|false, "reason": "<empty or refusal
+  text>"}`, and exits 0 in both cases. `--config-dir` plays the role of the session's `CLAUDE_CONFIG_DIR`; an empty or omitted
+  value is the main login; the process's own `CLAUDE_CONFIG_DIR` is ignored. An unknown category or bad usage is an argparse
+  error with a nonzero exit. The answer comes from the same `check` the launchers use, so no reader reimplements the rule.
+  Importing the module runs no CLI.
 
 The `codex` supervisor owns each Codex process tree through the shared process-job helper `base/tools/process-job.py`. It
 closes the job after every turn or stop, including normal completion; if cancellation times out, the client stops the
