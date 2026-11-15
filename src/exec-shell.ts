@@ -2,12 +2,18 @@ import type { RuntimePorts } from "./ports.js";
 import type { ApiResult } from "./output.js";
 
 import { cleanEnvironment } from "./clean-environment.js";
+import { findOnPath } from "./executable-path.js";
 import { messagesFor } from "./messages.js";
-import { apiFail, apiOk, ERROR_CODE_USAGE } from "./output.js";
+import { apiFail, apiOk, ERROR_CODE_USAGE, EXEC_UNAVAILABLE } from "./output.js";
 
 // Git for Windows installs bash here; this is the hub's WINDOWS_BASH path.
 const WINDOWS_BASH = "C:\\Program Files\\Git\\bin\\bash.exe";
 const CMD_LINE_VAR = "RIG_EXEC_LINE";
+const POSIX_PATH_SEPARATOR = ":";
+const WINDOWS_PATH_SEPARATOR = ";";
+// Both live under the Windows system directory (SystemRoot); pwsh is searched on PATH first, these are the fallbacks.
+const WINDOWS_CMD_FILE = ["System32", "cmd.exe"];
+const WINDOWS_POWERSHELL_FILE = ["System32", "WindowsPowerShell", "v1.0", "powershell.exe"];
 // The hub's registry timeout, in milliseconds.
 const REG_TIMEOUT_MS = 10_000;
 const MACHINE_KEY = "HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment";
@@ -142,35 +148,49 @@ function psWrapper(userFile: string, runFile: string): string {
 
 const bytes = (text: string, bom: boolean): Uint8Array => new TextEncoder().encode((bom ? "\uFEFF" : "") + text);
 
-// Bun.which in the hub searches the parent PATH; use the file port so building a launch starts no lookup process.
-const powershellCommand = async (runtime: RuntimePorts): Promise<string> => {
-  const parent = runtime.environment.entries();
-  const path = Object.entries(parent).find(([name]) => name.toLowerCase() === "path")?.[1] ?? "";
+type ShellName = "pwsh" | "cmd" | "bash";
+
+const fileExists = async (runtime: RuntimePorts, path: string): Promise<boolean> => await runtime.fs.stat(path) !== null;
+
+const systemFile = async (runtime: RuntimePorts, parts: string[]): Promise<string | null> => {
+  const root = runtime.environment.get("SystemRoot");
+  if (root === undefined) return null;
+  const path = runtime.resolvePath(root, ...parts);
+  return await fileExists(runtime, path) ? path : null;
+};
+
+const pathValue = (env: Record<string, string>): string => Object.entries(env).find(([name]) => name.toLowerCase() === "path")?.[1] ?? "";
+
+// The full path of the executable a shell launch starts, or null when the shell is not installed. PATH is the one the
+// child receives (env), so the file checked here is the file the child would start.
+const shellExecutable = async (runtime: RuntimePorts, env: Record<string, string>, shell: ShellName): Promise<string | null> => {
   const windows = runtime.platform === "windows";
-  for (const directory of path.split(windows ? ";" : ":")) {
-    const candidate = runtime.resolvePath(directory || runtime.currentDirectory, windows ? "pwsh.exe" : "pwsh");
-    if (await runtime.fs.stat(candidate) !== null) return "pwsh";
-  }
-  return "powershell.exe";
+  if (shell === "cmd") return windows ? await systemFile(runtime, WINDOWS_CMD_FILE) : null;
+  if (shell === "bash" && windows) return await fileExists(runtime, WINDOWS_BASH) ? WINDOWS_BASH : null;
+  const name = windows ? `${shell}.exe` : shell;
+  const found = await findOnPath(pathValue(env), windows ? WINDOWS_PATH_SEPARATOR : POSIX_PATH_SEPARATOR, (directory) => runtime.resolvePath(directory, name), (path) => fileExists(runtime, path));
+  if (found === null && windows && shell === "pwsh") return await systemFile(runtime, WINDOWS_POWERSHELL_FILE);
+  return found;
 };
 
 export async function buildShellLaunch(runtime: RuntimePorts, shell: "pwsh" | "cmd" | "bash", text: string, runDir: string): Promise<ApiResult<Launch>> {
   if (shell === "cmd" && /[\r\n]/.test(text)) return apiFail(ERROR_CODE_USAGE, messagesFor(runtime.language).execShell.singleLine());
   const env = await freshEnvironment(runtime);
+  const executable = await shellExecutable(runtime, env, shell);
+  if (executable === null) return apiFail(EXEC_UNAVAILABLE, messagesFor(runtime.language).execShell.notFound(shell));
   if (shell === "pwsh") {
     const user = runtime.resolvePath(runDir, "command.user.ps1");
     const wrapper = runtime.resolvePath(runDir, "command.ps1");
     const rewritten = runtime.resolvePath(runDir, "command.run.ps1");
-    const executable = await powershellCommand(runtime);
     return apiOk({ argv: [executable, "-NoLogo", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", wrapper], env,
       files: [{ path: user, bytes: bytes(text, true) }, { path: wrapper, bytes: bytes(psWrapper(user, rewritten), true) }], verbatimArguments: false });
   }
   if (shell === "bash") {
     const script = runtime.resolvePath(runDir, "command.sh");
     env.CHERE_INVOKING = "1";
-    return apiOk({ argv: [runtime.platform === "windows" ? WINDOWS_BASH : "bash", "-l", script.replaceAll("\\", "/")], env,
+    return apiOk({ argv: [executable, "-l", script.replaceAll("\\", "/")], env,
       files: [{ path: script, bytes: bytes(`set -eo pipefail\n${text}`, false) }], verbatimArguments: false });
   }
   env[CMD_LINE_VAR] = `"${text}"`;
-  return apiOk({ argv: ["cmd.exe", "/d", "/v:on", "/s", "/c", `"chcp 65001>nul 2>nul & cmd /s /c !${CMD_LINE_VAR}!"`], env, files: [], verbatimArguments: true });
+  return apiOk({ argv: [executable, "/d", "/v:on", "/s", "/c",`"chcp 65001>nul 2>nul & cmd /s /c !${CMD_LINE_VAR}!"`], env, files: [], verbatimArguments: true });
 }

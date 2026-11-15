@@ -3,6 +3,7 @@ import type { RuntimePorts } from "../ports.js";
 import type { SessionRecord } from "../session-core.js";
 
 import { localPluginOrigin, readMarketplaceManifest } from "../apply.js";
+import { findOnPath } from "../executable-path.js";
 import { readFeature } from "../feature.js";
 import { joinPath } from "../file-system.js";
 import { buildLaunchCommand } from "../launch-command.js";
@@ -21,6 +22,9 @@ const STDERR_LIMIT = 1000;
 const MODE_BLOCK_BYTES = 1024 * 1024;
 // Hub config.ts launchSchema default.
 const DEFAULT_TIMEOUT_SEC = 90;
+const POSIX_PATH_SEPARATOR = ":";
+// Windows launches cswap by this name; see cswapCommand.
+const WINDOWS_CSWAP = "cswap.exe";
 const MS_PER_SECOND = 1000;
 const MODES = ["manual", "auto", "acceptEdits", "plan", "dontAsk"] as const;
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -30,6 +34,20 @@ type SpawnLaunch = (command: string[]) => Promise<ApiResult<null>>;
 const object = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 const validMode = (value: string): boolean => MODES.some((mode) => mode === value);
 const invalid = (message: string): ApiResult<never> => apiFail(LAUNCH_INVALID, message);
+
+// The full path of a launcher found on PATH, or null. The launch starts that path, not the bare name PATH would resolve again.
+const launcherPath = async (runtime: RuntimePorts, name: string): Promise<string | null> => findOnPath(
+	runtime.pathEnvironment,
+	POSIX_PATH_SEPARATOR,
+	(directory) => runtime.resolvePath(directory, name),
+	async (path) => await runtime.fs.stat(path) !== null,
+);
+
+// Windows: where.exe also finds .cmd shims, so cswap is checked by name and launched as cswap.exe, as before.
+const cswapCommand = async (runtime: RuntimePorts): Promise<string | null> => {
+	if (runtime.platform !== "windows") return await launcherPath(runtime, "cswap");
+	return await runtime.process.isAvailable("cswap") ? WINDOWS_CSWAP : null;
+};
 
 export const prepareLaunch = async (runtime: RuntimePorts, session: SessionRecord, account: string, mode: string | null): Promise<ApiResult<string[]>> => {
 	const m = messagesFor(runtime.language).session;
@@ -59,12 +77,12 @@ export const prepareLaunch = async (runtime: RuntimePorts, session: SessionRecor
 			plugins.push(id);
 		}
 	}
-	const cswap = await runtime.process.isAvailable("cswap");
-	if (!cswap && account !== "") return invalid(m.launchNoCswap());
+	const cswap = await cswapCommand(runtime);
+	if (cswap === null && account !== "") return invalid(m.launchNoCswap());
 	const display = Boolean(runtime.environment.get("DISPLAY") || runtime.environment.get("WAYLAND_DISPLAY"));
-	const terminal = runtime.platform === "linux" && display && await runtime.process.isAvailable("x-terminal-emulator");
-	const tmux = runtime.platform === "linux" && !terminal && await runtime.process.isAvailable("tmux");
-	const command = buildLaunchCommand({ platform: runtime.platform, cwd: cwd.value, session: session.id, account, mode, plugins, cswap, display, terminal, tmux });
+	const terminal = runtime.platform === "linux" && display ? await launcherPath(runtime, "x-terminal-emulator") : null;
+	const tmux = runtime.platform === "linux" && terminal === null ? await launcherPath(runtime, "tmux") : null;
+	const command = buildLaunchCommand({ platform: runtime.platform, cwd: cwd.value, session: session.id, account, mode, plugins, cswap, terminal, tmux });
 	return command === null ? apiFail(LAUNCH_UNAVAILABLE, m.launchUnavailable()) : apiOk(command);
 };
 

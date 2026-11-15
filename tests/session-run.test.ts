@@ -50,6 +50,11 @@ const pluginAnswer = async (plugin: string, market: string): Promise<string> => 
 	const result = await prepareLaunch(h.runtime, session, "", null);
 	return result.ok ? "ok" : result.error.message;
 };
+// A Linux launch finds its launchers as files on the fake PATH (/usr/bin:/bin); tests that launch need them present.
+const seedLaunchers = (h: ReturnType<typeof setup>): void => {
+	h.fs.seed("/usr/bin/tmux", "");
+	h.fs.seed("/usr/bin/cswap", "");
+};
 
 describe("session run and mode", () => {
 	test("looks up the account without collecting limit information", async () => {
@@ -79,6 +84,7 @@ describe("session run and mode", () => {
 	test("account helper failure with cswap absent still launches without an account", async () => {
 		const h = setup();
 		h.unavailableCommands.add("cswap");
+		h.fs.seed("/usr/bin/tmux", "");
 		h.runtime.process.run = async () => ok({ stdout: "", stderr: "broken", exitCode: 2 });
 		let launched = false;
 		h.runtime.process.createdAt = async () => ok({ "43": CREATED });
@@ -118,13 +124,13 @@ describe("session run and mode", () => {
 	});
 	test("builds commands for every platform and rejects unsafe inputs", async () => {
 		const h = setup();
-		const facts = { platform: "windows", cwd: "/work", session: ID, account: "12", mode: "plan", plugins: ["custom@market"], cswap: true, display: false, terminal: false, tmux: false } as const;
+		const facts = { platform: "windows", cwd: "/work", session: ID, account: "12", mode: "plan", plugins: ["custom@market"], cswap: "cswap.exe", terminal: null, tmux: null } as const;
 		expect(buildLaunchCommand({ ...facts, plugins: [...facts.plugins] })).toEqual(["cmd.exe", "/c", "start", "", "wt.exe", "-w", "new", "-d", "/work", "cmd.exe", "/c", `cswap.exe run 12 --share-history -- --channels plugin:custom@market --resume ${ID} --permission-mode plan & exit /b 0`]);
-		expect(buildLaunchCommand({ ...facts, plugins: [], account: "", mode: null, cswap: false })).toEqual(["cmd.exe", "/c", "start", "", "wt.exe", "-w", "new", "-d", "/work", "cmd.exe", "/c", `claude --resume ${ID} & exit /b 0`]);
+		expect(buildLaunchCommand({ ...facts, plugins: [], account: "", mode: null, cswap: null })).toEqual(["cmd.exe", "/c", "start", "", "wt.exe", "-w", "new", "-d", "/work", "cmd.exe", "/c", `claude --resume ${ID} & exit /b 0`]);
 		expect(buildLaunchCommand({ ...facts, plugins: [], account: "", mode: null })).toContain(`cswap.exe run --share-history -- --resume ${ID} & exit /b 0`);
-		expect(buildLaunchCommand({ ...facts, platform: "darwin", plugins: [], cwd: "/a b/c'd", cswap: false, mode: null })).toEqual(["osascript", "-e", "on run argv", "-e", 'tell application "Terminal" to do script (item 1 of argv)', "-e", "end run", "--", `cd -- '/a b/c'\\''d' && exec 'claude' '--resume' '${ID}'`]);
-		expect(buildLaunchCommand({ ...facts, platform: "linux", plugins: [], display: true, terminal: true })).toEqual(["x-terminal-emulator", "-e", "sh", "-c", 'cd -- "$1" && shift && exec "$@"', "sh", "/work", "cswap", "run", "12", "--share-history", "--", "--resume", ID, "--permission-mode", "plan"]);
-		expect(buildLaunchCommand({ ...facts, platform: "linux", plugins: [], tmux: true })).toEqual(["tmux", "new-session", "-d", "-c", "/work", "cswap", "run", "12", "--share-history", "--", "--resume", ID, "--permission-mode", "plan"]);
+		expect(buildLaunchCommand({ ...facts, platform: "darwin", plugins: [], cwd: "/a b/c'd", cswap: null, mode: null })).toEqual(["osascript", "-e", "on run argv", "-e", 'tell application "Terminal" to do script (item 1 of argv)', "-e", "end run", "--", `cd -- '/a b/c'\\''d' && exec 'claude' '--resume' '${ID}'`]);
+		expect(buildLaunchCommand({ ...facts, platform: "linux", plugins: [], terminal: "/usr/bin/x-terminal-emulator", cswap: "/usr/bin/cswap" })).toEqual(["/usr/bin/x-terminal-emulator", "-e", "sh", "-c", 'cd -- "$1" && shift && exec "$@"', "sh", "/work", "/usr/bin/cswap", "run", "12", "--share-history", "--", "--resume", ID, "--permission-mode", "plan"]);
+		expect(buildLaunchCommand({ ...facts, platform: "linux", plugins: [], tmux: "/usr/bin/tmux", cswap: "/usr/bin/cswap" })).toEqual(["/usr/bin/tmux", "new-session", "-d", "-c", "/work", "/usr/bin/cswap", "run", "12", "--share-history", "--", "--resume", ID, "--permission-mode", "plan"]);
 		expect(buildLaunchCommand({ ...facts, platform: "linux", plugins: [] })).toBeNull();
 		for (const [account, mode] of [["bad&", "plan"], ["1", "unknown"]]) expect(code(await prepareLaunch(h.runtime, session, account, mode))).toBe("launch-invalid");
 		for (const character of NOT_IDENTIFIER) {
@@ -132,7 +138,6 @@ describe("session run and mode", () => {
 			expect(code(await prepareLaunch(h.runtime, session, "", `plan${character}`))).toBe("launch-invalid");
 			expect(code(await prepareLaunch(h.runtime, { ...session, id: `${ID.slice(0, -1)}${character}` }, "", null))).toBe("launch-invalid");
 		}
-		h.runtime.process.isAvailable = async () => false;
 		expect(code(await prepareLaunch(h.runtime, session, "1", null))).toBe("launch-invalid");
 		expect(code(await prepareLaunch(h.runtime, session, "", null))).toBe("launch-unavailable");
 	});
@@ -168,40 +173,62 @@ describe("session run and mode", () => {
 	});
 	test("resolves channels from the enabled feature and hub marketplace manifests", async () => {
 		const h = setup();
+		seedLaunchers(h);
 		h.fs.seed(`${ROOT}/state.json`, JSON.stringify({ mode: "dev", paths: { repo: "/repo", hub: "/hub" }, features: { telegram: true }, records: {}, badPairs: [], pendingHubRestart: null }));
 		seedFeature(h.fs, "/repo", { ...baseManifest(), name: "telegram", plugins: ["test-channel"] });
 		seedHubManifest(h.fs, "/hub", "test-market");
 		const result = await prepareLaunch(h.runtime, session, "", null);
 		expect(result.ok && result.value).toContain("plugin:test-channel@test-market");
 	});
-	test("selects display terminal or tmux from runtime facts", async () => {
+	test("launches the display terminal from the full path it was found at", async () => {
 		const h = setup();
 		h.environment.set("WAYLAND_DISPLAY", "wayland-1");
-		let result = await prepareLaunch(h.runtime, session, "", null);
-		expect(result.ok && result.value[0]).toBe("x-terminal-emulator");
-		h.unavailableCommands.add("x-terminal-emulator");
-		result = await prepareLaunch(h.runtime, session, "", null);
-		expect(result.ok && result.value[0]).toBe("tmux");
-		h.unavailableCommands.add("tmux");
+		h.fs.seed("/usr/bin/x-terminal-emulator", "");
+		h.fs.seed("/usr/bin/tmux", "");
+		const result = await prepareLaunch(h.runtime, session, "", null);
+		expect(result.ok && result.value[0]).toBe("/usr/bin/x-terminal-emulator");
+	});
+	test("launches tmux from the full path it was found at when no display terminal is on PATH", async () => {
+		const h = setup();
+		h.environment.set("WAYLAND_DISPLAY", "wayland-1");
+		h.fs.seed("/usr/bin/tmux", "");
+		const result = await prepareLaunch(h.runtime, session, "", null);
+		expect(result.ok && result.value[0]).toBe("/usr/bin/tmux");
+	});
+	test("reports launch-unavailable when neither a display terminal nor tmux is on PATH", async () => {
+		const h = setup();
+		h.environment.set("WAYLAND_DISPLAY", "wayland-1");
 		expect(code(await prepareLaunch(h.runtime, session, "", null))).toBe("launch-unavailable");
-		h.unavailableCommands.delete("tmux");
-		h.unavailableCommands.add("cswap");
-		result = await prepareLaunch(h.runtime, session, "", null);
-		expect(result.ok && result.value).toEqual(["tmux", "new-session", "-d", "-c", "/work", "claude", "--resume", ID]);
+	});
+	test("runs cswap from the full path it was found at inside tmux", async () => {
+		const h = setup();
+		h.fs.seed("/usr/bin/tmux", "");
+		h.fs.seed("/usr/bin/cswap", "");
+		const result = await prepareLaunch(h.runtime, session, "12", null);
+		expect(result.ok && result.value).toEqual(["/usr/bin/tmux", "new-session", "-d", "-c", "/work", "/usr/bin/cswap", "run", "12", "--share-history", "--", "--resume", ID]);
+	});
+	test("runs claude directly inside tmux when cswap is not on PATH", async () => {
+		const h = setup();
+		h.fs.seed("/usr/bin/tmux", "");
+		const result = await prepareLaunch(h.runtime, session, "", null);
+		expect(result.ok && result.value).toEqual(["/usr/bin/tmux", "new-session", "-d", "-c", "/work", "claude", "--resume", ID]);
 	});
 	test("reports spawn failure and timeout", async () => {
 		const h = setup();
+		seedLaunchers(h);
 		expect(code(await runSession(h.runtime, session, "plan", "1", async () => apiFail("launch-failed", "stderr")))).toBe("launch-failed");
 		expect(code(await runSession(h.runtime, session, "plan", "1", async () => apiOk(null)))).toBe("launch-timeout");
 	});
 	test("reports stderr from detached launch failure", async () => {
 		const h = setup();
+		seedLaunchers(h);
 		h.runtime.process.spawnDetached = async () => ({ ok: false, error: "launch error" });
 		const result = await runSession(h.runtime, session, "plan", "1");
 		expect(result.ok ? "ok" : result.error.message).toContain("launch error");
 	});
 	test("retries stderr cleanup on a later launch after a child releases its file", async () => {
 		const h = setup();
+		seedLaunchers(h);
 		const directory = `${ROOT}/launch-stderr`;
 		const originalRemove = h.fs.remove.bind(h.fs);
 		let locked = "";
@@ -226,6 +253,7 @@ describe("session run and mode", () => {
 	});
 	test("removes an unlocked stderr file and preserves a concurrent launch's diagnostic window", async () => {
 		const h = setup();
+		seedLaunchers(h);
 		const directory = `${ROOT}/launch-stderr`;
 		const concurrent = `${directory}/0-other.log`;
 		h.fs.seed(concurrent, "diagnostic");
@@ -240,6 +268,7 @@ describe("session run and mode", () => {
 	});
 	test("rejects a live session and accepts a newly recorded process", async () => {
 		const h = setup();
+		seedLaunchers(h);
 		h.runtime.process.createdAt = async () => ok({ "42": CREATED, "43": CREATED });
 		expect(code(await runSession(h.runtime, { ...session, endedAt: null }, "plan", "1"))).toBe("session-running");
 		const answer = await runSession(h.runtime, session, "plan", "1", async () => { h.fs.seed(`${ROOT}/sessions/${ID}.json`, JSON.stringify({ ...raw, pid: 43, ended_at: null })); return apiOk(null); });

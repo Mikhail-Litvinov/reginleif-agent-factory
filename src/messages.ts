@@ -232,7 +232,10 @@ export const en = {
 		checksumMissing: (target: string): string => `checksums.txt has no checksum for ${target}.`,
 		rtkFetchFailed: (error: string): string => `Could not get the rtk release: ${error}`,
 	},
-	execShell: { singleLine: (): string => "A cmd command must be a single line." },
+	execShell: {
+		singleLine: (): string => "A cmd command must be a single line.",
+		notFound: (shell: string): string => `The ${shell} shell was not found on this machine.`,
+	},
 };
 
 export type Messages = typeof en;

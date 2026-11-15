@@ -7,15 +7,25 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { buildShellLaunch } from "../src/exec-shell.js";
+import { EXEC_UNAVAILABLE } from "../src/output.js";
 import { ok } from "../src/result.js";
 import { createMemoryRuntime } from "./fakes/memory-runtime.js";
 
 // Bounds a real shell process, including profile startup.
 const SHELL_TIMEOUT_MS = 15_000;
 const WINDOWS_BASH = "C:\\Program Files\\Git\\bin\\bash.exe";
+const SYSTEM_CMD = "C:/Windows/System32/cmd.exe";
+const WINDOWS_POWERSHELL = "C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe";
 const SPECIAL = 'echo "quoted" %PATH% !value! $HOME `literal`';
 const BOM = [0xef, 0xbb, 0xbf];
 const decoder = new TextDecoder();
+
+// The file each shell is seeded at in the fake filesystem; the launch must carry exactly this path.
+const checkedShellPath = (platform: "windows" | "linux", shell: "pwsh" | "cmd" | "bash"): string => {
+  if (shell === "cmd") return SYSTEM_CMD;
+  if (shell === "bash") return platform === "windows" ? WINDOWS_BASH : "/bin/bash";
+  return platform === "windows" ? "/bin/pwsh.exe" : "/bin/pwsh";
+};
 
 const hasRealShell = (shell: "pwsh" | "cmd" | "bash"): boolean => {
   if (shell === "cmd") return process.platform === "win32" && Bun.which("cmd.exe") !== null;
@@ -27,10 +37,14 @@ const hasRealShell = (shell: "pwsh" | "cmd" | "bash"): boolean => {
 describe("shell launches", () => {
   for (const platform of ["windows", "linux"] as const) {
     for (const shell of ["pwsh", "cmd", "bash"] as const) {
-      test(`${platform} ${shell} keeps command text out of argv`, async () => {
+      // cmd is a Windows shell only: exec refuses it elsewhere before any lookup.
+      if (shell === "cmd" && platform !== "windows") continue;
+      test(`${platform} ${shell} keeps command text out of argv and launches the path it checked`, async () => {
         const h = createMemoryRuntime(platform);
         h.environment.set("PATH", "/bin");
-        h.fs.seed(platform === "windows" ? "/bin/pwsh.exe" : "/bin/pwsh", "");
+        h.environment.set("SystemRoot", "C:/Windows");
+        const checked = checkedShellPath(platform, shell);
+        h.fs.seed(checked, "");
         h.environment.set("NORMAL", "present");
         h.environment.set("claude_secret", "secret");
         h.environment.set("TELEGRAM_HUB_TOKEN", "secret");
@@ -42,23 +56,23 @@ describe("shell launches", () => {
         if (!result.ok) throw new Error(result.error.message);
         const launch = result.value;
         expect(launch.argv.join(" ")).not.toContain(SPECIAL);
+        expect(launch.argv[0]).toBe(checked);
         expect(launch.env.NORMAL).toBe("present");
         expect(launch.env.claude_secret).toBeUndefined();
         expect(launch.env.TELEGRAM_HUB_TOKEN).toBeUndefined();
         expect(launch.env.ANTHROPIC_API_KEY).toBeUndefined();
         if (shell === "pwsh") {
-          expect(launch.argv.slice(0, 6)).toEqual(["pwsh", "-NoLogo", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"]);
+          expect(launch.argv.slice(0, 6)).toEqual([checked, "-NoLogo", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"]);
           expect(launch.files.map((file) => [...file.bytes.slice(0, BOM.length)])).toEqual([BOM, BOM]);
           expect(decoder.decode(launch.files[0]?.bytes)).toBe(SPECIAL);
           expect(decoder.decode(launch.files[1]?.bytes)).toContain("Parser]::ParseFile");
           expect(decoder.decode(launch.files[1]?.bytes)).toContain("command.run.ps1");
         } else if (shell === "bash") {
-          expect(launch.argv[0]).toBe(platform === "windows" ? "C:\\Program Files\\Git\\bin\\bash.exe" : "bash");
           expect(launch.argv[1]).toBe("-l");
           expect(decoder.decode(launch.files[0]?.bytes)).toBe(`set -eo pipefail\n${SPECIAL}`);
           expect(launch.env.CHERE_INVOKING).toBe("1");
         } else {
-          expect(launch.argv.slice(0, 4)).toEqual(["cmd.exe", "/d", "/v:on", "/s"]);
+          expect(launch.argv.slice(0, 4)).toEqual([checked, "/d", "/v:on", "/s"]);
           expect(launch.argv.join(" ")).toContain("chcp 65001");
           expect(launch.env.RIG_EXEC_LINE).toBe(`"${SPECIAL}"`);
           expect(launch.verbatimArguments).toBe(true);
@@ -67,6 +81,36 @@ describe("shell launches", () => {
       });
     }
   }
+
+  test("a shell is launched from the first PATH directory that holds it", async () => {
+    const h = createMemoryRuntime("linux");
+    h.environment.set("PATH", "/other:/bin");
+    h.fs.seed("/other/pwsh", "");
+    h.fs.seed("/bin/pwsh", "");
+    const result = await buildShellLaunch(h.runtime, "pwsh", "true", "/runs/one");
+    expect(result.ok && result.value.argv[0]).toBe("/other/pwsh");
+  });
+
+  test("Windows PowerShell is the System32 file when pwsh is not on PATH", async () => {
+    const h = createMemoryRuntime("windows");
+    h.environment.set("PATH", "/bin");
+    h.environment.set("SystemRoot", "C:/Windows");
+    h.fs.seed(WINDOWS_POWERSHELL, "");
+    h.runtime.process.run = async () => ok({ stdout: "", stderr: "", exitCode: 1 });
+    const result = await buildShellLaunch(h.runtime, "pwsh", "true", "/runs/one");
+    expect(result.ok && result.value.argv[0]).toBe(WINDOWS_POWERSHELL);
+  });
+
+  test("a shell that is not found is refused, never spawned by its bare name", async () => {
+    for (const [platform, shell] of [["linux", "pwsh"], ["linux", "bash"], ["windows", "pwsh"], ["windows", "bash"], ["windows", "cmd"]] as const) {
+      const h = createMemoryRuntime(platform);
+      h.environment.set("PATH", "/bin");
+      h.environment.set("SystemRoot", "C:/Windows");
+      const result = await buildShellLaunch(h.runtime, shell, "true", "/runs/one");
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error.code).toBe(EXEC_UNAVAILABLE);
+    }
+  });
 
   test("cmd refuses either kind of line break before looking up the environment", async () => {
     const h = createMemoryRuntime();
@@ -82,6 +126,7 @@ describe("shell launches", () => {
     const h = createMemoryRuntime("windows");
     h.environment.set("SystemRoot", "C:\\Windows");
     h.environment.set("PARENT_ONLY", "no");
+    h.fs.seed(WINDOWS_BASH, "");
     const registry: Record<string, string> = {
       "HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment": "    Path    REG_EXPAND_SZ    %SystemRoot%\\bin\n    SHARED    REG_SZ    machine\n    ANTHROPIC_KEY    REG_SZ    secret",
       "HKCU\\Environment": "    path    REG_SZ    userbin\n    shared    REG_SZ    user\n    EXPANDED    REG_EXPAND_SZ    %SHARED%\\x\n    CLAUDE_TOKEN    REG_SZ    secret",

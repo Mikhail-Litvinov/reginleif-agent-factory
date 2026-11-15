@@ -219,5 +219,8 @@ export const ru: Messages = {
 		checksumMissing: (target: string): string => `В checksums.txt нет контрольной суммы ${target}.`,
 		rtkFetchFailed: (error: string): string => `Не удалось получить релиз rtk: ${error}`,
 	},
-	execShell: { singleLine: (): string => "Команда cmd должна состоять из одной строки." },
+	execShell: {
+		singleLine: (): string => "Команда cmd должна состоять из одной строки.",
+		notFound: (shell: string): string => `Оболочка ${shell} не найдена на этом компьютере.`,
+	},
 };
