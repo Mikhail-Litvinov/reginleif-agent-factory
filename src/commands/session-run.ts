@@ -2,9 +2,12 @@ import type { ApiResult, ProgressEvent } from "../output.js";
 import type { RuntimePorts } from "../ports.js";
 import type { SessionRecord } from "../session-core.js";
 
+import { localPluginOrigin, readMarketplaceManifest } from "../apply.js";
+import { readFeature } from "../feature.js";
 import { joinPath } from "../file-system.js";
+import { buildLaunchCommand } from "../launch-command.js";
 import { messagesFor } from "../messages.js";
-import { apiFail, apiOk, ERROR_CODE_USAGE, LAUNCH_FAILED, LAUNCH_INVALID, LAUNCH_NOT_CONFIGURED, LAUNCH_TIMEOUT, SESSION_RUNNING } from "../output.js";
+import { apiFail, apiOk, ERROR_CODE_USAGE, LAUNCH_FAILED, LAUNCH_INVALID, LAUNCH_UNAVAILABLE, LAUNCH_TIMEOUT, SESSION_RUNNING } from "../output.js";
 import { errorText } from "../result.js";
 import { lookupSession, lookupSessionForCommand, sessionLive, SESSION_POLL_MS } from "../session-core.js";
 import { accountOf, INFO_ERROR_STATE_UNREADABLE } from "./info.js";
@@ -23,28 +26,41 @@ const ACCOUNT = /^[\w.@-]+$/;
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const WINDOWS_SPECIAL = /["%&|<>^]/;
 
-type Launch = { command: string[]; timeoutSec: number };
 type LaunchResult = { session: string; pid: number; mode: string | null; account: number | null };
 type SpawnLaunch = (command: string[]) => Promise<ApiResult<null>>;
 const object = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 const validMode = (value: string): boolean => MODES.some((mode) => mode === value);
 const invalid = (message: string): ApiResult<never> => apiFail(LAUNCH_INVALID, message);
 
-export const expandLaunch = async (runtime: RuntimePorts, launch: Launch, session: SessionRecord, account: string, mode: string | null): Promise<ApiResult<string[]>> => {
+export const prepareLaunch = async (runtime: RuntimePorts, session: SessionRecord, account: string, mode: string | null, requestedAccount: boolean): Promise<ApiResult<string[]>> => {
 	const m = messagesFor(runtime.language).session;
 	if (!SESSION_ID.test(session.id)) return invalid(m.launchSessionId());
 	if (account !== "" && !ACCOUNT.test(account)) return invalid(m.launchAccount());
 	if (mode !== null && !validMode(mode)) return invalid(m.launchMode());
-	if (mode !== null && !launch.command.some((part) => part.includes("{mode}"))) return invalid(m.launchModePlaceholder());
 	if (session.cwd === null || (runtime.platform === "windows" && WINDOWS_SPECIAL.test(session.cwd))) return invalid(m.launchDirectory());
 	try { await runtime.fs.listDirectory(session.cwd); } catch { return invalid(m.launchDirectoryMissing()); }
-	const cwd = session.cwd;
-	const modeArg = mode === null ? "" : `--permission-mode ${mode}`;
-	return apiOk(launch.command.flatMap((part) => {
-		if (part === "{mode}") return mode === null ? [] : ["--permission-mode", mode];
-		const expanded = part.replaceAll("{cwd}", cwd).replaceAll("{account}", account).replaceAll("{session}", session.id).replaceAll("{mode}", modeArg);
-		return expanded === "" ? [] : [expanded];
-	}));
+	const state = await readRigState(runtime);
+	if (!state.ok) return apiFail(INFO_ERROR_STATE_UNREADABLE, state.error);
+	const plugins: string[] = [];
+	if (state.value.features.telegram === true) {
+		const feature = await readFeature(runtime.fs, joinPath(state.value.paths.repo, "features", "telegram"));
+		if (!feature.ok) return invalid(feature.error);
+		for (const plugin of feature.value.plugins) {
+			const origin = localPluginOrigin(plugin, state.value.paths.hub, state.value.paths.repo);
+			if (origin === null) { plugins.push(plugin); continue; }
+			const marketplace = await readMarketplaceManifest(runtime.fs, origin.path, origin.label);
+			if (!marketplace.ok) return invalid(marketplace.error);
+			if (origin.mustBeListed && !marketplace.value.plugins.includes(origin.name)) return invalid(m.pluginMissingFromMarketplace(origin.name, marketplace.value.name));
+			plugins.push(`${origin.name}@${marketplace.value.name}`);
+		}
+	}
+	const cswap = await runtime.process.isAvailable("cswap");
+	if (!cswap && requestedAccount) return invalid(m.launchNoCswap());
+	const display = Boolean(runtime.environment.get("DISPLAY") || runtime.environment.get("WAYLAND_DISPLAY"));
+	const terminal = runtime.platform === "linux" && display && await runtime.process.isAvailable("x-terminal-emulator");
+	const tmux = runtime.platform === "linux" && !terminal && await runtime.process.isAvailable("tmux");
+	const command = buildLaunchCommand({ platform: runtime.platform, cwd: session.cwd, session: session.id, account, mode, plugins, cswap, display, terminal, tmux });
+	return command === null ? apiFail(LAUNCH_UNAVAILABLE, m.launchUnavailable()) : apiOk(command);
 };
 
 export const transcriptMode = async (runtime: RuntimePorts, path: string | null): Promise<string | null> => {
@@ -71,18 +87,6 @@ export const transcriptMode = async (runtime: RuntimePorts, path: string | null)
 	return null;
 };
 
-const readLaunch = async (runtime: RuntimePorts): Promise<ApiResult<Launch>> => {
-	const path = joinPath(runtime.home, ".agent-rig", "launch.json");
-	try {
-		const value: unknown = JSON.parse(await runtime.fs.readText(path));
-		if (object(value) && Array.isArray(value.command) && value.command.length > 0 && value.command.every((part: unknown) => typeof part === "string") && (value.timeoutSec === undefined || (typeof value.timeoutSec === "number" && Number.isFinite(value.timeoutSec) && value.timeoutSec > 0))) {
-			const command: string[] = value.command.filter((part: unknown): part is string => typeof part === "string");
-			return apiOk({ command, timeoutSec: typeof value.timeoutSec === "number" ? value.timeoutSec : DEFAULT_TIMEOUT_SEC });
-		}
-	} catch { /* Missing or invalid configuration has one actionable error. */ }
-	return apiFail(LAUNCH_NOT_CONFIGURED, messagesFor(runtime.language).session.launchConfigured(path));
-};
-
 const spawnLaunch = async (runtime: RuntimePorts, command: string[]): Promise<ApiResult<null>> => {
 	const directory = joinPath(runtime.home, ".agent-rig", "launch-stderr");
 	const now = runtime.clock.now().getTime();
@@ -106,8 +110,6 @@ export const runSession = async (runtime: RuntimePorts, session: SessionRecord, 
 	const live = await sessionLive(runtime, session);
 	if (!live.ok) return live;
 	if (live.value) return apiFail(SESSION_RUNNING, messagesFor(runtime.language).session.alreadyRunning());
-	const launch = await readLaunch(runtime);
-	if (!launch.ok) return launch;
 	let accountText = accountOverride ?? "";
 	if (accountOverride === null) {
 		const state = await readRigState(runtime);
@@ -118,11 +120,11 @@ export const runSession = async (runtime: RuntimePorts, session: SessionRecord, 
 		accountText = account === null ? "" : String(account);
 	}
 	if (accountText !== "" && !/^\d+$/.test(accountText)) return invalid(messagesFor(runtime.language).session.accountNumber());
-	const command = await expandLaunch(runtime, launch.value, session, accountText, mode);
+	const command = await prepareLaunch(runtime, session, accountText, mode, accountOverride !== null);
 	if (!command.ok) return command;
 	const spawned = await spawnCommand(command.value);
 	if (!spawned.ok) return spawned;
-	const deadline = runtime.clock.now().getTime() + launch.value.timeoutSec * MS_PER_SECOND;
+	const deadline = runtime.clock.now().getTime() + DEFAULT_TIMEOUT_SEC * MS_PER_SECOND;
 	for (;;) {
 		const current = await lookupSession(runtime, session.id);
 		if (!current.ok) return current;
@@ -160,9 +162,7 @@ export const modeCommand = async (runtime: RuntimePorts, args: readonly string[]
 	const session = await lookupSessionForCommand(runtime, id, false);
 	if (!session.ok) return session;
 	if (await transcriptMode(runtime, session.value.transcriptPath) === mode) return apiOk({ session: id, mode, changed: false });
-	const launch = await readLaunch(runtime);
-	if (!launch.ok) return launch;
-	const checked = await expandLaunch(runtime, launch.value, session.value, "", mode);
+	const checked = await prepareLaunch(runtime, session.value, "", mode, false);
 	if (!checked.ok) return checked;
 	const stopped = await stopSession(runtime, session.value, progress);
 	if (!stopped.ok) return stopped;

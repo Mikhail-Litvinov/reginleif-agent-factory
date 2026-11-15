@@ -29,7 +29,6 @@ export const SESSION_BAD_RESPONSE = "session-bad-response";
 export const SESSION_STOP_TIMEOUT = "session-stop-timeout";
 export const SESSION_CLEANUP_NOT_COMPACTED = "session-cleanup-not-compacted";
 export const LAUNCH_INVALID = "launch-invalid";
-export const LAUNCH_NOT_CONFIGURED = "launch-not-configured";
 export const LAUNCH_FAILED = "launch-failed";
 export const LAUNCH_TIMEOUT = "launch-timeout";
 export const SESSION_RUNNING = "session-running";
@@ -40,6 +39,7 @@ export const EXEC_IO = "exec-io";
 export const EXEC_UNAVAILABLE = "exec-unavailable";
 export const EXEC_LAUNCH = "exec-launch";
 export const PROGRESS_CODE_SESSION_WAITING = "session-waiting";
+export const LAUNCH_UNAVAILABLE = "launch-unavailable";
 
 export const SUCCESS_EXIT_CODE = 0;
 export const FAILURE_EXIT_CODE = 1;

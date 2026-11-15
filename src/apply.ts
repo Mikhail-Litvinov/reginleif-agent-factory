@@ -491,7 +491,7 @@ const buildPluginPlans = async (
 
 type LocalPluginOrigin = { name: string; path: string; label: string; mustBeListed: boolean };
 
-const localPluginOrigin = (plugin: string, hubPath: string, repoPath: string): LocalPluginOrigin | null => {
+export const localPluginOrigin = (plugin: string, hubPath: string, repoPath: string): LocalPluginOrigin | null => {
 	if (plugin.startsWith(RIG_PLUGIN_PREFIX)) {
 		const folder = plugin.slice(RIG_PLUGIN_PREFIX.length);
 		return { name: folder, path: joinPath(repoPath, RIG_PLUGINS_DIRECTORY, folder), label: "rig plugin marketplace manifest", mustBeListed: true };
@@ -510,7 +510,7 @@ type MarketplaceManifest = { name: string; plugins: string[] };
 
 const manifestPathOf = (directory: string): string => joinPath(directory, MARKETPLACE_DIRECTORY, MARKETPLACE_FILENAME);
 
-const readMarketplaceManifest = async (fs: FileSystem, directory: string, label: string): Promise<Result<MarketplaceManifest>> => {
+export const readMarketplaceManifest = async (fs: FileSystem, directory: string, label: string): Promise<Result<MarketplaceManifest>> => {
 	const path = manifestPathOf(directory);
 	let text: string;
 	try {
