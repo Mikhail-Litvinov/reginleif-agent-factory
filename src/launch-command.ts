@@ -9,7 +9,11 @@ const quote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
 export const buildLaunchCommand = (facts: LaunchFacts): string[] | null => {
 	const args = [...facts.plugins.flatMap((plugin) => ["--channels", `plugin:${plugin}`]), "--resume", facts.session, ...(facts.mode === null ? [] : ["--permission-mode", facts.mode])];
 	const claude = facts.cswap === null ? ["claude", ...args] : [facts.cswap, "run", ...(facts.account === "" ? [] : [facts.account]), "--share-history", "--", ...args];
-	if (facts.platform === "windows") return ["cmd.exe", "/c", "start", "", "wt.exe", "-w", "new", "-d", facts.cwd, "cmd.exe", "/c", `${claude.join(" ")} & exit /b 0`];
+	// Windows: the cswap path may hold spaces, so it is quoted on the line. Probed with the real wt.exe and a cswap.cmd in
+	// a directory with a space: the quoted path alone works (the product's argument quoting turns the line into one
+	// quoted argument whose inner quotes keep the outer cmd.exe inside quotes at the `&`); wrapping the line in one more
+	// pair of quotes puts that `&` outside quotes, and the probe launch then runs nothing.
+	if (facts.platform === "windows") return ["cmd.exe", "/c", "start", "", "wt.exe", "-w", "new", "-d", facts.cwd, "cmd.exe", "/c", `${(facts.cswap === null ? claude : [`"${facts.cswap}"`, ...claude.slice(1)]).join(" ")} & exit /b 0`];
 	if (facts.platform === "darwin") return ["osascript", "-e", "on run argv", "-e", "tell application \"Terminal\" to do script (item 1 of argv)", "-e", "end run", "--", `cd -- ${quote(facts.cwd)} && exec ${claude.map(quote).join(" ")}`];
 	if (facts.terminal !== null) return [facts.terminal, "-e", "sh", "-c", 'cd -- "$1" && shift && exec "$@"', "sh", facts.cwd, ...claude];
 	if (facts.tmux !== null) return [facts.tmux, "new-session", "-d", "-c", facts.cwd, ...claude];

@@ -23,8 +23,9 @@ const MODE_BLOCK_BYTES = 1024 * 1024;
 // Hub config.ts launchSchema default.
 const DEFAULT_TIMEOUT_SEC = 90;
 const POSIX_PATH_SEPARATOR = ":";
-// Windows launches cswap by this name; see cswapCommand.
-const WINDOWS_CSWAP = "cswap.exe";
+const WINDOWS_PATH_SEPARATOR = ";";
+// Windows file types cmd.exe /c runs for a bare name, in the order of process-runner.ts; PATH order comes first.
+const WINDOWS_EXECUTABLE_SUFFIXES = [".exe", ".com", ".cmd", ".bat"] as const;
 const MS_PER_SECOND = 1000;
 const MODES = ["manual", "auto", "acceptEdits", "plan", "dontAsk"] as const;
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -36,20 +37,20 @@ const validMode = (value: string): boolean => MODES.some((mode) => mode === valu
 const invalid = (message: string): ApiResult<never> => apiFail(LAUNCH_INVALID, message);
 
 // The full path of a launcher found on PATH, or null. The launch starts that path, not the bare name PATH would resolve again.
-const launcherPath = async (runtime: RuntimePorts, name: string): Promise<string | null> => findOnPath(
+const launcherPath = async (runtime: RuntimePorts, name: string, suffixes: readonly string[] = [""]): Promise<string | null> => findOnPath(
 	runtime.pathEnvironment,
-	POSIX_PATH_SEPARATOR,
+	runtime.platform === "windows" ? WINDOWS_PATH_SEPARATOR : POSIX_PATH_SEPARATOR,
 	(directory) => runtime.resolvePath(directory, name),
 	async (path) => await runtime.fs.stat(path) !== null,
+	suffixes,
 );
 
-// Windows: where.exe also finds .cmd shims, so cswap is checked by name and launched as cswap.exe, as before.
-const cswapCommand = async (runtime: RuntimePorts): Promise<string | null> => {
-	if (runtime.platform !== "windows") return await launcherPath(runtime, "cswap");
-	return await runtime.process.isAvailable("cswap") ? WINDOWS_CSWAP : null;
-};
+// The one cswap lookup of a launch: the full path of the file that will run, or null. resolveLaunch does it once and
+// hands the result to both the account decision and prepareLaunch, so the file checked is the file started. On Windows
+// a .cmd or .bat shim counts, as cmd.exe /c runs it.
+export const findCswap = async (runtime: RuntimePorts): Promise<string | null> => launcherPath(runtime, "cswap", runtime.platform === "windows" ? WINDOWS_EXECUTABLE_SUFFIXES : [""]);
 
-export const prepareLaunch = async (runtime: RuntimePorts, session: SessionRecord, account: string, mode: string | null): Promise<ApiResult<string[]>> => {
+export const prepareLaunch = async (runtime: RuntimePorts, session: SessionRecord, account: string, mode: string | null, cswapFound: string | null): Promise<ApiResult<string[]>> => {
 	const m = messagesFor(runtime.language).session;
 	if (!SESSION_ID.test(session.id)) return invalid(m.launchSessionId());
 	if (account !== "" && !LAUNCH_TOKEN.test(account)) return invalid(m.launchAccount());
@@ -77,8 +78,11 @@ export const prepareLaunch = async (runtime: RuntimePorts, session: SessionRecor
 			plugins.push(id);
 		}
 	}
-	const cswap = await cswapCommand(runtime);
-	if (cswap === null && account !== "") return invalid(m.launchNoCswap());
+	if (cswapFound === null && account !== "") return invalid(m.launchNoCswap());
+	// The path goes onto the launch line like the directory does, so the same platform rules apply to it.
+	const cswapOnLine = cswapFound === null ? null : launchPath(runtime.platform, cswapFound);
+	if (cswapOnLine !== null && !cswapOnLine.ok) return apiFail(LAUNCH_UNAVAILABLE, m.launchCswapPath());
+	const cswap = cswapOnLine === null ? null : cswapOnLine.value;
 	const display = Boolean(runtime.environment.get("DISPLAY") || runtime.environment.get("WAYLAND_DISPLAY"));
 	const terminal = runtime.platform === "linux" && display ? await launcherPath(runtime, "x-terminal-emulator") : null;
 	const tmux = runtime.platform === "linux" && terminal === null ? await launcherPath(runtime, "tmux") : null;
@@ -135,6 +139,7 @@ type ResolvedLaunch = { command: string[]; account: string };
 // matters only where cswap could use the account; without cswap the session starts as before 0.7.0, without one.
 export const resolveLaunch = async (runtime: RuntimePorts, session: SessionRecord, mode: string | null, accountOverride: string | null): Promise<ApiResult<ResolvedLaunch>> => {
 	const m = messagesFor(runtime.language);
+	const cswap = await findCswap(runtime);
 	let accountText = accountOverride ?? "";
 	if (accountOverride === null) {
 		const state = await readRigState(runtime);
@@ -143,10 +148,10 @@ export const resolveLaunch = async (runtime: RuntimePorts, session: SessionRecor
 		try { record = JSON.parse(await runtime.fs.readText(joinPath(runtime.home, ".agent-rig", "sessions", `${session.id}.json`))); } catch { record = null; }
 		const account = await accountOf(runtime, state.value, object(record) && typeof record.config_dir === "string" ? record.config_dir : "");
 		if (account.ok) accountText = account.value === null ? "" : String(account.value);
-		else if (await runtime.process.isAvailable("cswap")) return apiFail(LAUNCH_ACCOUNT_LOOKUP, m.session.launchAccountLookup(account.error));
+		else if (cswap !== null) return apiFail(LAUNCH_ACCOUNT_LOOKUP, m.session.launchAccountLookup(account.error));
 	}
 	if (accountText !== "" && !/^\d+$/.test(accountText)) return invalid(m.session.accountNumber());
-	const command = await prepareLaunch(runtime, session, accountText, mode);
+	const command = await prepareLaunch(runtime, session, accountText, mode, cswap);
 	return command.ok ? apiOk({ command: command.value, account: accountText }) : command;
 };
 

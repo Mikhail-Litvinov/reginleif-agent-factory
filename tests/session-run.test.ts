@@ -4,7 +4,7 @@ import type { SessionRecord } from "../src/session-core.js";
 import { describe, expect, test } from "bun:test";
 
 import { runCli } from "../src/cli.js";
-import { modeCommand, prepareLaunch, runSession, transcriptMode } from "../src/commands/session-run.js";
+import { findCswap, modeCommand, prepareLaunch, resolveLaunch, runSession, transcriptMode } from "../src/commands/session-run.js";
 import { buildLaunchCommand } from "../src/launch-command.js";
 import { messagesFor } from "../src/messages.js";
 import { apiFail, apiOk } from "../src/output.js";
@@ -23,6 +23,8 @@ const code = (result: { ok: true } | { ok: false; error: { code: string } }): st
 const CONTROL = ["\t", "\n", "\r", "\x03", "\x15"];
 const CMD_LINE = ["&", "|", "<", ">", "^", "%", "\"", "!"];
 const NOT_IDENTIFIER = [...CONTROL, ...CMD_LINE, ";", "#", "(", ")", "'", "$", "~", "+", "=", ",", "[", "]", "\\", "/", "*", "?", ":", " "];
+// The launch as resolveLaunch does it: one cswap lookup, handed to prepareLaunch.
+const prepare = async (h: ReturnType<typeof createMemoryRuntime>, record: SessionRecord, account: string, mode: string | null) => prepareLaunch(h.runtime, record, account, mode, await findCswap(h.runtime));
 const setup = () => {
 	const h = createMemoryRuntime();
 	h.fs.directories.add("/work");
@@ -38,7 +40,7 @@ const setup = () => {
 const launchRefusal = async (platform: Platform, cwd: string): Promise<string> => {
 	const h = createMemoryRuntime(platform);
 	h.fs.directories.add(cwd);
-	const result = await prepareLaunch(h.runtime, { ...session, cwd }, "", null);
+	const result = await prepare(h, { ...session, cwd }, "", null);
 	return result.ok ? "ok" : result.error.message;
 };
 // The launch answer for one plugin of the enabled telegram feature, resolved from a hub marketplace with the given name.
@@ -47,7 +49,7 @@ const pluginAnswer = async (plugin: string, market: string): Promise<string> => 
 	h.fs.seed(`${ROOT}/state.json`, JSON.stringify({ mode: "dev", paths: { repo: "/repo", hub: "/hub" }, features: { telegram: true }, records: {}, badPairs: [], pendingHubRestart: null }));
 	seedFeature(h.fs, "/repo", { ...baseManifest(), name: "telegram", plugins: [plugin] });
 	seedHubManifest(h.fs, "/hub", market);
-	const result = await prepareLaunch(h.runtime, session, "", null);
+	const result = await prepare(h, session, "", null);
 	return result.ok ? "ok" : result.error.message;
 };
 // A Linux launch finds its launchers as files on the fake PATH (/usr/bin:/bin); tests that launch need them present.
@@ -70,6 +72,7 @@ describe("session run and mode", () => {
 	});
 	test("account helper failure with cswap present returns its own code carrying the reason", async () => {
 		const h = setup();
+		h.fs.seed("/usr/bin/cswap", "");
 		for (const output of [ok({ stdout: "", stderr: "broken", exitCode: 2 }), ok({ stdout: "garbage", stderr: "", exitCode: 0 })]) {
 			h.runtime.process.run = async () => output;
 			let launched = false;
@@ -83,7 +86,6 @@ describe("session run and mode", () => {
 	});
 	test("account helper failure with cswap absent still launches without an account", async () => {
 		const h = setup();
-		h.unavailableCommands.add("cswap");
 		h.fs.seed("/usr/bin/tmux", "");
 		h.runtime.process.run = async () => ok({ stdout: "", stderr: "broken", exitCode: 2 });
 		let launched = false;
@@ -94,7 +96,7 @@ describe("session run and mode", () => {
 	});
 	test("a recorded account without cswap is refused like a requested one", async () => {
 		const h = setup();
-		h.unavailableCommands.add("cswap");
+		h.fs.seed("/usr/bin/tmux", "");
 		h.runtime.process.run = async () => ok({ stdout: '{"accounts":{"/cfg/1-test":{"present":true,"account":12}},"categories":{}}', stderr: "", exitCode: 0 });
 		let launched = false;
 		const result = await runSession(h.runtime, session, "plan", null, async () => { launched = true; return apiOk(null); });
@@ -104,6 +106,7 @@ describe("session run and mode", () => {
 	});
 	test("mode resolves the new launch before stopping the session", async () => {
 		const h = setup();
+		h.fs.seed("/usr/bin/cswap", "");
 		h.fs.seed("/transcript", JSON.stringify({ type: "permission-mode", permissionMode: "plan" }));
 		h.fs.seed(`${ROOT}/sessions/${ID}.json`, JSON.stringify({ ...raw, ended_at: null }));
 		h.runtime.process.createdAt = async () => ok({ "42": CREATED });
@@ -118,28 +121,28 @@ describe("session run and mode", () => {
 		for (const language of ["en", "ru"] as const) {
 			const h = setup();
 			h.runtime.language = language;
-			const result = await prepareLaunch(h.runtime, session, "1", "unknown");
+			const result = await prepare(h, session, "1", "unknown");
 			expect(result.ok ? "ok" : result.error.message).toBe(messagesFor(language).session.launchMode());
 		}
 	});
 	test("builds commands for every platform and rejects unsafe inputs", async () => {
 		const h = setup();
 		const facts = { platform: "windows", cwd: "/work", session: ID, account: "12", mode: "plan", plugins: ["custom@market"], cswap: "cswap.exe", terminal: null, tmux: null } as const;
-		expect(buildLaunchCommand({ ...facts, plugins: [...facts.plugins] })).toEqual(["cmd.exe", "/c", "start", "", "wt.exe", "-w", "new", "-d", "/work", "cmd.exe", "/c", `cswap.exe run 12 --share-history -- --channels plugin:custom@market --resume ${ID} --permission-mode plan & exit /b 0`]);
+		expect(buildLaunchCommand({ ...facts, plugins: [...facts.plugins] })).toEqual(["cmd.exe", "/c", "start", "", "wt.exe", "-w", "new", "-d", "/work", "cmd.exe", "/c", `"cswap.exe" run 12 --share-history -- --channels plugin:custom@market --resume ${ID} --permission-mode plan & exit /b 0`]);
 		expect(buildLaunchCommand({ ...facts, plugins: [], account: "", mode: null, cswap: null })).toEqual(["cmd.exe", "/c", "start", "", "wt.exe", "-w", "new", "-d", "/work", "cmd.exe", "/c", `claude --resume ${ID} & exit /b 0`]);
-		expect(buildLaunchCommand({ ...facts, plugins: [], account: "", mode: null })).toContain(`cswap.exe run --share-history -- --resume ${ID} & exit /b 0`);
+		expect(buildLaunchCommand({ ...facts, plugins: [], account: "", mode: null })).toContain(`"cswap.exe" run --share-history -- --resume ${ID} & exit /b 0`);
 		expect(buildLaunchCommand({ ...facts, platform: "darwin", plugins: [], cwd: "/a b/c'd", cswap: null, mode: null })).toEqual(["osascript", "-e", "on run argv", "-e", 'tell application "Terminal" to do script (item 1 of argv)', "-e", "end run", "--", `cd -- '/a b/c'\\''d' && exec 'claude' '--resume' '${ID}'`]);
 		expect(buildLaunchCommand({ ...facts, platform: "linux", plugins: [], terminal: "/usr/bin/x-terminal-emulator", cswap: "/usr/bin/cswap" })).toEqual(["/usr/bin/x-terminal-emulator", "-e", "sh", "-c", 'cd -- "$1" && shift && exec "$@"', "sh", "/work", "/usr/bin/cswap", "run", "12", "--share-history", "--", "--resume", ID, "--permission-mode", "plan"]);
 		expect(buildLaunchCommand({ ...facts, platform: "linux", plugins: [], tmux: "/usr/bin/tmux", cswap: "/usr/bin/cswap" })).toEqual(["/usr/bin/tmux", "new-session", "-d", "-c", "/work", "/usr/bin/cswap", "run", "12", "--share-history", "--", "--resume", ID, "--permission-mode", "plan"]);
 		expect(buildLaunchCommand({ ...facts, platform: "linux", plugins: [] })).toBeNull();
-		for (const [account, mode] of [["bad&", "plan"], ["1", "unknown"]]) expect(code(await prepareLaunch(h.runtime, session, account, mode))).toBe("launch-invalid");
+		for (const [account, mode] of [["bad&", "plan"], ["1", "unknown"]]) expect(code(await prepare(h, session, account, mode))).toBe("launch-invalid");
 		for (const character of NOT_IDENTIFIER) {
-			expect(code(await prepareLaunch(h.runtime, session, `1${character}`, null))).toBe("launch-invalid");
-			expect(code(await prepareLaunch(h.runtime, session, "", `plan${character}`))).toBe("launch-invalid");
-			expect(code(await prepareLaunch(h.runtime, { ...session, id: `${ID.slice(0, -1)}${character}` }, "", null))).toBe("launch-invalid");
+			expect(code(await prepare(h, session, `1${character}`, null))).toBe("launch-invalid");
+			expect(code(await prepare(h, session, "", `plan${character}`))).toBe("launch-invalid");
+			expect(code(await prepare(h, { ...session, id: `${ID.slice(0, -1)}${character}` }, "", null))).toBe("launch-invalid");
 		}
-		expect(code(await prepareLaunch(h.runtime, session, "1", null))).toBe("launch-invalid");
-		expect(code(await prepareLaunch(h.runtime, session, "", null))).toBe("launch-unavailable");
+		expect(code(await prepare(h, session, "1", null))).toBe("launch-invalid");
+		expect(code(await prepare(h, session, "", null))).toBe("launch-unavailable");
 	});
 	test("refuses a directory whose characters the launch line cannot carry, per platform", async () => {
 		const message = messagesFor("en").session.launchDirectory();
@@ -153,7 +156,7 @@ describe("session run and mode", () => {
 			const h = createMemoryRuntime("windows");
 			h.fs.directories.add(cwd);
 			h.fs.seed(`${ROOT}/state.json`, JSON.stringify({ mode: "dev", paths: { repo: "/repo", hub: "/hub" }, features: {}, records: {}, badPairs: [], pendingHubRestart: null }));
-			const result = await prepareLaunch(h.runtime, { ...session, cwd }, "", null);
+			const result = await prepare(h, { ...session, cwd }, "", null);
 			expect(result.ok && result.value[result.value.indexOf("-d") + 1]).toBe(escaped);
 		}
 	});
@@ -177,7 +180,7 @@ describe("session run and mode", () => {
 		h.fs.seed(`${ROOT}/state.json`, JSON.stringify({ mode: "dev", paths: { repo: "/repo", hub: "/hub" }, features: { telegram: true }, records: {}, badPairs: [], pendingHubRestart: null }));
 		seedFeature(h.fs, "/repo", { ...baseManifest(), name: "telegram", plugins: ["test-channel"] });
 		seedHubManifest(h.fs, "/hub", "test-market");
-		const result = await prepareLaunch(h.runtime, session, "", null);
+		const result = await prepare(h, session, "", null);
 		expect(result.ok && result.value).toContain("plugin:test-channel@test-market");
 	});
 	test("launches the display terminal from the full path it was found at", async () => {
@@ -185,32 +188,32 @@ describe("session run and mode", () => {
 		h.environment.set("WAYLAND_DISPLAY", "wayland-1");
 		h.fs.seed("/usr/bin/x-terminal-emulator", "");
 		h.fs.seed("/usr/bin/tmux", "");
-		const result = await prepareLaunch(h.runtime, session, "", null);
+		const result = await prepare(h, session, "", null);
 		expect(result.ok && result.value[0]).toBe("/usr/bin/x-terminal-emulator");
 	});
 	test("launches tmux from the full path it was found at when no display terminal is on PATH", async () => {
 		const h = setup();
 		h.environment.set("WAYLAND_DISPLAY", "wayland-1");
 		h.fs.seed("/usr/bin/tmux", "");
-		const result = await prepareLaunch(h.runtime, session, "", null);
+		const result = await prepare(h, session, "", null);
 		expect(result.ok && result.value[0]).toBe("/usr/bin/tmux");
 	});
 	test("reports launch-unavailable when neither a display terminal nor tmux is on PATH", async () => {
 		const h = setup();
 		h.environment.set("WAYLAND_DISPLAY", "wayland-1");
-		expect(code(await prepareLaunch(h.runtime, session, "", null))).toBe("launch-unavailable");
+		expect(code(await prepare(h, session, "", null))).toBe("launch-unavailable");
 	});
 	test("runs cswap from the full path it was found at inside tmux", async () => {
 		const h = setup();
 		h.fs.seed("/usr/bin/tmux", "");
 		h.fs.seed("/usr/bin/cswap", "");
-		const result = await prepareLaunch(h.runtime, session, "12", null);
+		const result = await prepare(h, session, "12", null);
 		expect(result.ok && result.value).toEqual(["/usr/bin/tmux", "new-session", "-d", "-c", "/work", "/usr/bin/cswap", "run", "12", "--share-history", "--", "--resume", ID]);
 	});
 	test("runs claude directly inside tmux when cswap is not on PATH", async () => {
 		const h = setup();
 		h.fs.seed("/usr/bin/tmux", "");
-		const result = await prepareLaunch(h.runtime, session, "", null);
+		const result = await prepare(h, session, "", null);
 		expect(result.ok && result.value).toEqual(["/usr/bin/tmux", "new-session", "-d", "-c", "/work", "claude", "--resume", ID]);
 	});
 	test("reports spawn failure and timeout", async () => {

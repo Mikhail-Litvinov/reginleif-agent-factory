@@ -74,6 +74,7 @@ export const ru: Messages = {
 		launchTimeout: (): string => "Сессия не запустилась вовремя",
 		launchExited: (code: number | null, stderr: string): string => `Команда запуска завершилась с кодом ${code}: ${stderr}`,
 		launchNoCswap: (): string => "Для выбора аккаунта нужен cswap",
+		launchCswapPath: (): string => "Путь к cswap нельзя записать в командную строку запуска",
 		launchAccountLookup: (reason: string): string => `Не удалось определить аккаунт сессии: ${reason}`,
 		launchUnavailable: (): string => "Терминал недоступен: проверены x-terminal-emulator с DISPLAY или WAYLAND_DISPLAY и tmux",
 		transcriptPath: (): string => "Некорректный путь к транскрипту",
