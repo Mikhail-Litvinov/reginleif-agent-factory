@@ -18,13 +18,27 @@ const BUS_ERROR = "Failed to connect to user scope bus via local transport";
 
 type Call = { command: string; args: readonly string[]; options: ProcessOptions | undefined };
 
-const fakeRunner = (exitCode: number, stderr = ""): { calls: Call[]; run: (command: string, args: readonly string[], options?: ProcessOptions) => Promise<Result<ProcessOutput>> } => {
+type DetachedCall = { command: readonly string[]; graceMs: number; hide: boolean | undefined };
+type DetachedOutcome = { exited: boolean; exitCode: number | null; stderr: string; pid?: number };
+
+const fakeRunner = (exitCode: number, stderr = "", detached: DetachedOutcome = { exited: false, exitCode: null, stderr: "" }): {
+	calls: Call[];
+	detachedCalls: DetachedCall[];
+	run: (command: string, args: readonly string[], options?: ProcessOptions) => Promise<Result<ProcessOutput>>;
+	spawnDetached: (command: readonly string[], graceMs: number, stderrLimit: number, stderrPath: string, options?: { windowsHide?: boolean }) => Promise<Result<DetachedOutcome>>;
+} => {
 	const calls: Call[] = [];
+	const detachedCalls: DetachedCall[] = [];
 	return {
 		calls,
+		detachedCalls,
 		run: async (command, args, options) => {
 			calls.push({ command, args, options });
 			return ok({ stdout: "", stderr, exitCode });
+		},
+		spawnDetached: async (command, graceMs, _stderrLimit, _stderrPath, options) => {
+			detachedCalls.push({ command, graceMs, hide: options?.windowsHide });
+			return ok(detached);
 		},
 	};
 };
@@ -86,5 +100,29 @@ describe("systemctl --user under cron", () => {
 
 		expect(result.ok).toBe(false);
 		if (!result.ok) expect(result.error).toContain(BUS_ERROR);
+	});
+});
+
+describe("hub restart on Windows", () => {
+	const source = { environment: {}, uid: USER_ID };
+
+	test("runs detached and hidden, so stopping the task's job cannot end the restart", async () => {
+		const runner = fakeRunner(ACTIVE_EXIT_CODE);
+
+		expect(await runService(runner, "windows", "restart", source, en)).toEqual(ok(undefined));
+
+		expect(runner.calls).toEqual([]);
+		expect(runner.detachedCalls).toHaveLength(1);
+		expect(runner.detachedCalls[0]?.command.join(" ")).toContain("Stop-ScheduledTask");
+		expect(runner.detachedCalls[0]?.command.join(" ")).toContain("Start-ScheduledTask");
+		expect(runner.detachedCalls[0]?.hide).toBe(true);
+	});
+
+	test("a restart that fails inside the grace period reports its stderr under the catalog label", async () => {
+		const runner = fakeRunner(ACTIVE_EXIT_CODE, "", { exited: true, exitCode: BUS_FAILURE_EXIT_CODE, stderr: BUS_ERROR });
+
+		const result = await runService(runner, "windows", "restart", source, ru);
+
+		expect(result).toEqual({ ok: false, error: `${ru.runtime.taskRestartLabel()}: ${BUS_ERROR}` });
 	});
 });

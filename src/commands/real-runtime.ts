@@ -380,7 +380,32 @@ export const ownerStartTime = async (
 	return err(`Process start time is not supported on ${hostName}`);
 };
 
-type ProcessRunner = Pick<ProcessPorts, "run">;
+type ProcessRunner = Pick<ProcessPorts, "run" | "spawnDetached">;
+// Stop-ScheduledTask then Start-ScheduledTask end within a few seconds; a restart still running after this is reported
+// as started, and one that fails earlier reports its exit code and stderr.
+const WINDOWS_RESTART_GRACE_MS = 30_000;
+const RESTART_TEMP_PREFIX = "rig-restart-";
+// The restart powershell may still hold its stderr file for a moment after it ended.
+const REMOVE_RETRIES = 10;
+const RESTART_STDERR_LIMIT = 4000;
+const RESTART_SCRIPT = "Stop-ScheduledTask -TaskName 'telegram-hub' -ErrorAction SilentlyContinue; Start-ScheduledTask -TaskName 'telegram-hub'";
+
+// Stopping the hub's task ends its job object, and this command may itself run inside that job (rig update started from
+// a hub session), so the restart runs detached and outside the caller's job, and survives the stop it performs.
+const restartWindowsTask = async (processPorts: ProcessRunner, description: string): Promise<Result<void>> => {
+	const directory = await fs.mkdtemp(join(tmpdir(), RESTART_TEMP_PREFIX));
+	try {
+		const started = await processPorts.spawnDetached(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", RESTART_SCRIPT], WINDOWS_RESTART_GRACE_MS, RESTART_STDERR_LIMIT, join(directory, "restart-stderr.log"), { windowsHide: true });
+		if (!started.ok) return err(`${description}: ${started.error}`);
+		if (started.value.exited && started.value.exitCode !== PROCESS_SUCCESS_EXIT_CODE) return err(`${description}: ${started.value.stderr}`);
+		return ok(undefined);
+	} catch (error) {
+		return err(`${description}: ${errorText(error)}`);
+	} finally {
+		// A restart still running past the grace period keeps the file open; the temp directory then stays for the OS cleanup.
+		await fs.rm(directory, { recursive: true, force: true, maxRetries: REMOVE_RETRIES }).catch(() => undefined);
+	}
+};
 type UserBusSource = { environment: Readonly<Record<string, string | undefined>>; uid: number | null };
 
 const currentUserBusSource = (): UserBusSource => ({
@@ -415,8 +440,7 @@ export const runService = async (
 	}
 	if (platform === "windows") {
 		if (action === "restart") {
-			const stopped = await processPorts.run("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", "Stop-ScheduledTask -TaskName 'telegram-hub' -ErrorAction SilentlyContinue; Start-ScheduledTask -TaskName 'telegram-hub'"]);
-			return processSuccess(stopped, messages.runtime.taskRestartLabel());
+			return await restartWindowsTask(processPorts, messages.runtime.taskRestartLabel());
 		}
 		const command = action === "start" ? "Start-ScheduledTask -TaskName 'telegram-hub'" : "Stop-ScheduledTask -TaskName 'telegram-hub'";
 		const result = await processPorts.run("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", command]);

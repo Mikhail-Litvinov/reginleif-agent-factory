@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 
-const ALLOWED = new Set(["commands/real-runtime.ts", "node-file-operations.ts", "assets/node-asset-file-system.ts", "commands/process-runner.ts"]);
+const ALLOWED = new Set(["commands/real-runtime.ts", "node-file-operations.ts", "assets/node-asset-file-system.ts", "commands/process-runner.ts", "commands/windows-spawn.ts"]);
 const FORBIDDEN = /(?:from\s*|import\s*\()\s*["']node:(?:fs(?:\/promises)?|child_process|os)["']/;
 
 test("host filesystem, process and OS imports stay in runtime adapters", async () => {

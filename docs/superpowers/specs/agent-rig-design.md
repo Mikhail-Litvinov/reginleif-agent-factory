@@ -443,7 +443,10 @@ success it prints the one-line object `{"mode":"pending","outcome":"checked"}` a
    so the rollback happens 5-10 minutes after the hub restart. The hub waits for idleness without limit and does not
    interrupt the agents' work; after a day of waiting one event arrives. New commits that arrived during the wait are
    applied as usual. The pending restart stores the last pair on which the hub confirmed startup: the rollback returns it,
-   and the last tried pair is recorded as bad. If `telegram` is off, no restart is awaited.
+   and the last tried pair is recorded as bad. If `telegram` is off, no restart is awaited. On Windows the restart of the
+   hub's Scheduled Task runs as a detached start outside the caller's job (the mechanism of rig-exec-design.md), with a
+   30 second grace: a failure inside the grace is reported, a restart still running after it counts as started. Without
+   this, stopping the task would end its job and kill `rig update` and the restart itself.
 8. A feature appeared that is not in `state.json`: it is recorded as off and an event with the enable command is sent.
 
 The parent process of an update is the previous release, and it reads the manifests of the new commit. So the formats of

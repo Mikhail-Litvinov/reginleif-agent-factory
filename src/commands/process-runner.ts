@@ -9,6 +9,7 @@ import { win32 } from "node:path";
 import { cleanEnvironment } from "../clean-environment.js";
 import { err, errorText, ok } from "../result.js";
 import { PROCESS_FAILURE_EXIT_CODE } from "../ports.js";
+import { spawnDetachedWindows } from "./windows-spawn.js";
 
 // An external command (git, claude plugin) that hangs is killed after 15 minutes and counts as failed.
 const MINUTES_PER_TIMEOUT = 15;
@@ -23,6 +24,8 @@ const WINDOWS_PATH_SEPARATOR = ";";
 const CMD_UNSAFE_ARGUMENT = /["%\r\n]/;
 
 export const spawnDetached = async (command: readonly string[], graceMs: number, stderrLimit: number, path: string, options?: { windowsHide?: boolean }): Promise<Result<{ exited: boolean; exitCode: number | null; stderr: string; pid?: number }>> => {
+	// Windows: the process must also leave the caller's job object (see windows-spawn.ts), which node's spawn cannot do.
+	if (hostPlatform() === "win32") return await spawnDetachedWindows({ command, graceMs, stderrLimit, stderrPath: path, hide: options?.windowsHide === true, environment: cleanEnvironment(process.env) });
 	const [executable, ...args] = command;
 	if (!executable) return err("Empty launch command");
 	try {
