@@ -73,6 +73,41 @@ const load = async (r: RuntimePorts, id: string): Promise<ApiResult<RecordData>>
 	} catch (error) { return missing(error) ? apiFail(EXEC_UNKNOWN, m.unknown()) : error instanceof SyntaxError ? apiFail(EXEC_INVALID, m.invalid()) : io(r, error); }
 };
 
+// The runner's identity is missing until the runner has written it; undefined means missing, any other read failure is an I/O error.
+const readIdentity = async (r: RuntimePorts, id: string): Promise<ApiResult<unknown>> => {
+	try { return apiOk(JSON.parse(await r.fs.readText(file(r, id, "identity.json")))); }
+	catch (error) { return missing(error) ? apiOk(undefined) : io(r, error); }
+};
+
+// The runner is alive only while a process with its pid and creation time exists. `absent` means no process holds the pid at all.
+type RunnerState = { alive: true } | { alive: false; pid: number | null; absent: boolean };
+const processAbsent = (found: string | null | undefined): boolean => found === undefined || found === null;
+const runnerState = async (r: RuntimePorts, id: string): Promise<ApiResult<RunnerState>> => {
+	const identity = await readIdentity(r, id);
+	if (!identity.ok) return identity;
+	if (!validIdentity(identity.value)) return apiOk({ alive: false, pid: null, absent: true });
+	const { pid, pidCreated } = identity.value;
+	const created = await r.process.createdAt([pid]);
+	if (!created.ok) return io(r, created.error);
+	const found = created.value[pid];
+	return found === pidCreated ? apiOk({ alive: true }) : apiOk({ alive: false, pid, absent: processAbsent(found) });
+};
+
+// The one place a lost end is written: exclusive, so the first end wins, as for every other end.
+const recordLost = async (r: RuntimePorts, id: string, reason: string): Promise<ApiResult<boolean>> => {
+	const written = await r.fs.writeExclusive(file(r, id, "exit.json"), JSON.stringify({ kind: "lost", code: null, at: r.clock.nowText(), reason }));
+	return written.ok ? apiOk(written.value) : io(r, written.error);
+};
+
+// A dead runner on POSIX leaves its shell and their children running in the runner's process group. A group id of a live group
+// cannot be reused as a pid, so while no process holds the runner's pid the group is still the old one and killing it is safe;
+// a different process holding the pid means the old group is gone. On Windows the runner's kill-on-close job already ended the
+// children when the runner died. The group may be empty already (the shell ended normally), so a failed kill is not an error.
+const reapGroup = async (r: RuntimePorts, state: RunnerState): Promise<void> => {
+	if (state.alive || r.platform === "windows" || state.pid === null || !state.absent) return;
+	await r.process.killGroup(state.pid);
+};
+
 const summary = async (r: RuntimePorts, record: RecordData): Promise<ApiResult<Summary>> => {
 	const base = record.shell === "rig" ? { id: record.id, shell: record.shell, args: record.args, startedAt: record.startedAt } : { id: record.id, shell: record.shell, cwd: record.cwd, startedAt: record.startedAt };
 	const lost = (reason: string): ApiResult<Summary> => apiOk({ ...base, state: "ended", end: { kind: "lost", code: null, at: r.clock.nowText(), reason } });
@@ -84,12 +119,17 @@ const summary = async (r: RuntimePorts, record: RecordData): Promise<ApiResult<S
 				return validEnd(value) ? apiOk({ ...base, state: "ended", end: value }) : lost("invalid-end");
 			} catch { return lost("unreadable-end"); }
 		}
-		let heartbeat: string;
-		try { heartbeat = await r.fs.readText(file(r, record.id, "heartbeat")); } catch { return lost("unreadable-heartbeat"); }
-		const timestamp = Date.parse(heartbeat);
-		if (!Number.isFinite(timestamp)) return lost("invalid-heartbeat");
-		if (r.clock.now().getTime() - timestamp >= EXEC_STALE_MS) return apiOk({ ...base, state: "ended", end: { kind: "lost", code: null, at: r.clock.nowText(), reason: "process-gone" } });
-		return apiOk({ ...base, state: "running" });
+		// An unreadable or invalid heartbeat counts as stale: only the runner's identity decides whether the run is lost.
+		let timestamp = Number.NEGATIVE_INFINITY;
+		try { timestamp = Date.parse(await r.fs.readText(file(r, record.id, "heartbeat"))); } catch { /* counts as stale */ }
+		if (Number.isFinite(timestamp) && r.clock.now().getTime() - timestamp < EXEC_STALE_MS) return apiOk({ ...base, state: "running" });
+		// A stale heartbeat alone is never an end (machine sleep, a long stall): the run is lost only when the runner is gone, and that is recorded once.
+		const runner = await runnerState(r, record.id);
+		if (!runner.ok) return runner;
+		if (runner.value.alive) return apiOk({ ...base, state: "running" });
+		const recorded = await recordLost(r, record.id, "process-gone");
+		if (!recorded.ok) return recorded;
+		return summary(r, record);
 	} catch { return lost("unreadable-end"); }
 };
 
@@ -189,18 +229,19 @@ const rigResult = async (r: RuntimePorts, id: string): Promise<{ result?: JsonVa
 	} catch { return { reason: "invalid-result" }; }
 };
 
-// The identity is missing until the runner has written it; undefined means missing, any other read failure is an I/O error.
-const readIdentity = async (r: RuntimePorts, id: string): Promise<ApiResult<unknown>> => {
-	try { return apiOk(JSON.parse(await r.fs.readText(file(r, id, "identity.json")))); }
-	catch (error) { return missing(error) ? apiOk(undefined) : io(r, error); }
-};
-
 const stop = async (r: RuntimePorts, id: string): Promise<ApiResult<JsonValue>> => {
 	const record = await load(r, id);
 	if (!record.ok) return record;
 	const current = await summary(r, record.value);
 	if (!current.ok) return current;
-	if (current.value.state === "ended") return apiOk({ id, state: "ended" });
+	if (current.value.state === "ended") {
+		if (current.value.end?.kind === "lost") {
+			const runner = await runnerState(r, id);
+			if (!runner.ok) return runner;
+			await reapGroup(r, runner.value);
+		}
+		return apiOk({ id, state: "ended" });
+	}
 	const marker = file(r, id, "stop-request");
 	let identity = await readIdentity(r, id);
 	if (!identity.ok) return identity;
@@ -218,8 +259,10 @@ const stop = async (r: RuntimePorts, id: string): Promise<ApiResult<JsonValue>> 
 	const created = await r.process.createdAt([pid]);
 	if (!created.ok) return apiFail(EXEC_IO, messagesFor(r.language).exec.io(created.error));
 	if (created.value[pid] !== pidCreated) {
-		const written = await r.fs.writeExclusive(file(r, id, "exit.json"), JSON.stringify({ kind: "lost", code: null, at: r.clock.nowText(), reason: "process-gone" }));
-		return written.ok ? apiOk({ id, state: "ended" }) : apiFail(EXEC_IO, messagesFor(r.language).exec.io(written.error));
+		const written = await recordLost(r, id, "process-gone");
+		if (!written.ok) return written;
+		await reapGroup(r, { alive: false, pid, absent: processAbsent(created.value[pid]) });
+		return apiOk({ id, state: "ended" });
 	}
 	const latest = await summary(r, record.value);
 	if (!latest.ok) return latest;

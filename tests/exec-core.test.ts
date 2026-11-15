@@ -158,6 +158,61 @@ describe("exec core", () => {
 		expect((await stopExec(h.runtime, "../bad")).ok).toBe(false);
 	});
 
+	test("a stale heartbeat with a live runner stays running and records nothing", async () => {
+		const h = seed();
+		await startExec(h.runtime, "bash", "/work", "echo hi");
+		h.fs.seed(`${ROOT}/event-1/identity.json`, JSON.stringify({ pid: PID, pidCreated: "born" }));
+		h.runtime.clock.now = () => new Date(Date.parse(NOW) + EXEC_STALE_MS * 10);
+		expect(await statusExec(h.runtime, "event-1", 0)).toMatchObject({ ok: true, value: { state: "running" } });
+		expect(await listExecs(h.runtime)).toMatchObject({ ok: true, value: { runs: [{ state: "running" }] } });
+		expect(h.fs.files.has(`${ROOT}/event-1/exit.json`)).toBe(false);
+	});
+
+	test("a stale heartbeat with the runner gone records lost once, and a later heartbeat does not undo it", async () => {
+		const h = seed();
+		await startExec(h.runtime, "bash", "/work", "echo hi");
+		h.fs.seed(`${ROOT}/event-1/identity.json`, JSON.stringify({ pid: PID, pidCreated: "born" }));
+		h.runtime.process.createdAt = async () => ok({});
+		h.runtime.clock.now = () => new Date(Date.parse(NOW) + EXEC_STALE_MS);
+		expect(await statusExec(h.runtime, "event-1", 0)).toMatchObject({ ok: true, value: { state: "ended", end: { kind: "lost", reason: "process-gone" } } });
+		const recorded = h.fs.files.get(`${ROOT}/event-1/exit.json`);
+		expect(JSON.parse(recorded ?? "{}")).toMatchObject({ kind: "lost" });
+		h.fs.seed(`${ROOT}/event-1/heartbeat`, new Date(Date.parse(NOW) + EXEC_STALE_MS).toISOString());
+		h.runtime.process.createdAt = async () => ok({ [PID]: "born" });
+		expect(await statusExec(h.runtime, "event-1", 0)).toMatchObject({ ok: true, value: { state: "ended", end: { kind: "lost" } } });
+		expect(await listExecs(h.runtime)).toMatchObject({ ok: true, value: { runs: [{ state: "ended", end: { kind: "lost" } }] } });
+		expect(h.fs.files.get(`${ROOT}/event-1/exit.json`)).toBe(recorded);
+	});
+
+	test("stop of a lost run kills the runner's leftover process group on POSIX only, and never a reused pid's", async () => {
+		for (const [platform, held, expected] of [["linux", undefined, [PID]], ["darwin", undefined, [PID]], ["windows", undefined, []], ["linux", "other", []]] as const) {
+			const h = seed(platform);
+			await startExec(h.runtime, "bash", "/work", "echo hi");
+			h.fs.seed(`${ROOT}/event-1/identity.json`, JSON.stringify({ pid: PID, pidCreated: "born" }));
+			const table: Record<string, string | null> = held === undefined ? {} : { [PID]: held };
+			h.runtime.process.createdAt = async () => ok(table);
+			h.runtime.clock.now = () => new Date(Date.parse(NOW) + EXEC_STALE_MS);
+			const killed: number[] = [];
+			h.runtime.process.killGroup = async (pid) => { killed.push(pid); return ok(undefined); };
+			h.runtime.process.killTree = async (pid) => { killed.push(-pid); return ok(undefined); };
+			expect(await stopExec(h.runtime, "event-1")).toMatchObject({ ok: true, value: { state: "ended" } });
+			expect(killed).toEqual([...expected]);
+			expect(await statusExec(h.runtime, "event-1", 0)).toMatchObject({ ok: true, value: { state: "ended", end: { kind: "lost" } } });
+		}
+	});
+
+	test("stop of a run already recorded lost kills the leftover group", async () => {
+		const h = seed();
+		await startExec(h.runtime, "bash", "/work", "echo hi");
+		h.fs.seed(`${ROOT}/event-1/identity.json`, JSON.stringify({ pid: PID, pidCreated: "born" }));
+		h.fs.seed(`${ROOT}/event-1/exit.json`, JSON.stringify({ kind: "lost", code: null, at: NOW, reason: "process-gone" }));
+		h.runtime.process.createdAt = async () => ok({});
+		const killed: number[] = [];
+		h.runtime.process.killGroup = async (pid) => { killed.push(pid); return ok(undefined); };
+		expect(await stopExec(h.runtime, "event-1")).toMatchObject({ ok: true, value: { state: "ended" } });
+		expect(killed).toEqual([PID]);
+	});
+
 	test("a stop before the runner's identity is held: no kill, and the runner ends the run stopped without launching a shell", async () => {
 		const h = seed();
 		await startExec(h.runtime, "bash", "/work", "echo hi");
