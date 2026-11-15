@@ -441,7 +441,8 @@
     "hooks/project-tmp-settings.ps1",
     "tools/patchlib.py",
     "tools/run-report.py",
-    "tools/process-job.py"
+    "tools/process-job.py",
+    "tools/account-allowlist.py"
   ],
   "assets": [],
   "agents": [

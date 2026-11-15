@@ -119,14 +119,14 @@ Sections are headings in `CLAUDE.md` and `~/.codex/AGENTS.md`.
 
 | Part | On at install | Platforms | Files | Hook | Rules |
 |---|---|---|---|---|---|
-| base | always | all | `hooks/project-tmp.sh`, `hooks/project-tmp-settings.ps1` (Windows only), `hooks/compact_history.py`, `hooks/no_ampersand.py`, `hooks/system-temp-guard.py`, `tools/patchlib.py`, `agents/explore.md`, `agents/general-purpose.md` | SessionStart and PreToolUse | see below |
+| base | always | all | `hooks/project-tmp.sh`, `hooks/project-tmp-settings.ps1` (Windows only), `hooks/compact_history.py`, `hooks/no_ampersand.py`, `hooks/system-temp-guard.py`, `tools/patchlib.py`, `tools/account-allowlist.py`, `agents/explore.md`, `agents/general-purpose.md` | SessionStart and PreToolUse | see below |
 | `reflection` | yes | all | `hooks/reflect.py`, `hooks/reflect_prompt.md` | `Stop` | — |
 | `codex` | yes | all | `tools/codex-run.py`, `agents/codex.md`, plugin `codex@openai-codex` | `SessionStart`: `codex-run.py session-hint` | "Delegating to Codex" |
 | `telegram` | yes | all | plugin `telegram-hub` from the hub clone, the hub service, including `/bash` | plugin hooks | "Attention chime", the line about Telegram mode |
 | `rtk` | yes | all | the `rtk` program, `RTK.md` | `PreToolUse`: `rtk hook claude` | — |
 | `superpowers` | yes | all | plugin `superpowers@claude-plugins-official` | — | — |
 | `skills` | yes | all | `skills/measurement-runs`, `skills/mutation-check-new-tests`, `skills/spec-drafting` | — | — |
-| `volunteers` | no | Windows | the `uvx` program, `tools/volunteer-run.py`, `volunteer-models.py`, `volunteer-launch.ps1`, `volunteer-design.md`, `volunteer-probes.md`, `agents/volunteer.md` | — | "Delegating to volunteers" |
+| `volunteers` | no | Windows | the `uvx` program, `tools/volunteer-run.py`, `volunteer-models.py`, `volunteer-launch.ps1`, `volunteer-design.md`, `volunteer-probes.md`, `agents/volunteer.md` | `SessionStart`: `volunteer-run.py session-hint` | "Delegating to volunteers" |
 | `pwsh`, `cmd` | no | Windows | hub commands, depend on `telegram` | — | — |
 | `js-ts-rules` | no | all | — | — | "JS/TS code conventions" |
 
@@ -137,6 +137,24 @@ allows project `.tmp` and home-directory sessions; variable-based and computed s
 
 The repository has no personal paths or project names. The folders in which a volunteer works are listed in the local file
 `~/.agent-rig/volunteer-projects.json` (`{"allowed": ["<folder>"]}`). Without this file the volunteer refuses all folders.
+
+Account allowlist. The local file `~/.agent-rig/account-allowlist.json` (`{"codex": [1, 4], "volunteers": [1, 4]}`)
+lists, per category, the claude-swap (cswap) account numbers that may use the `codex` and `volunteers` features. One
+shared module, `base/tools/account-allowlist.py`, loaded by path by `codex-run.py` and `volunteer-run.py`, resolves the
+session's account and answers whether a category is allowed:
+- The account: no `~/.claude-swap-backup/sequence.json` means no cswap, the account is unknown and nothing is
+  restricted. With `CLAUDE_CONFIG_DIR` unset or resolving to `~/.claude` the account is `activeAccountNumber` of
+  `sequence.json`; with `CLAUDE_CONFIG_DIR` = `.../<N>-<name>` it is `N`; anything else is "cannot be determined".
+- A missing file or a missing category key leaves that category unrestricted. With the category listed and cswap
+  present, an account outside the list, or one that cannot be determined, is refused (fail closed). A malformed file
+  refuses every category and names the file.
+- Enforcement is in the launchers, before any work is spent: `codex-run.py` and `volunteer-run.py` refuse `start` and
+  `reply` (a reply also spends the line's work); `list`, `cancel`, `wait`, `attach` and `prompt-path` stay allowed. The
+  refusal names the category, the account number and the file.
+- Each feature declares a `SessionStart` hook, `<launcher> session-hint`. It prints a context hint (do not launch the
+  subagent of that feature; do the work as the rules describe with the feature off, silently) only when the current
+  account is not allowed, so a session on another account never spends a delegation attempt. The hint is model context,
+  not user output, so it is English like the other hook texts; only a hook's `statusMessage` is translated.
 
 The `codex` supervisor owns each Codex process tree through the shared process-job helper `base/tools/process-job.py`. It
 closes the job after every turn or stop, including normal completion; if cancellation times out, the client stops the

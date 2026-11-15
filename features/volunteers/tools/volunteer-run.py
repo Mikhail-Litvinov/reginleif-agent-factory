@@ -12,6 +12,9 @@ Commands:
   cancel <job>                         stop the worker and everything it started
   list                                 recent jobs and their states
   prompt-path --cwd DIR                a fresh prompt file name under DIR/.tmp
+  session-hint                         SessionStart hook: context for a cswap account outside the volunteers allowlist
+
+start and reply refuse on a cswap account outside "volunteers" in ~/.agent-rig/account-allowlist.json.
 
 The model is never chosen by the caller: the supervisor takes them in order from the cache
 ~/.claude/volunteer-jobs/models.json (built by volunteer-models.py), uses one model at a time and
@@ -47,12 +50,24 @@ process_job_spec = importlib.util.spec_from_file_location(
     "process_job", Path(__file__).resolve().parents[3] / "base/tools/process-job.py")
 process_job = importlib.util.module_from_spec(process_job_spec)
 process_job_spec.loader.exec_module(process_job)
+allowlist_spec = importlib.util.spec_from_file_location(
+    "account_allowlist", Path(__file__).resolve().parents[3] / "base/tools/account-allowlist.py")
+account_allowlist = importlib.util.module_from_spec(allowlist_spec)
+allowlist_spec.loader.exec_module(account_allowlist)
 failures_spec = importlib.util.spec_from_file_location("volunteer_failures", Path(__file__).resolve().parent / "volunteer-failures.py")
 failures_module = importlib.util.module_from_spec(failures_spec)
 failures_spec.loader.exec_module(failures_module)
 is_permanent_status = failures_module.is_permanent_status
 
 HOME = Path.home()
+ALLOWLIST_CATEGORY = "volunteers"
+# SessionStart context for a session on a cswap account that the allowlist does not cover
+SESSION_HINT = (
+    "Volunteers are disabled in this session: this cswap account is not in the volunteers account allowlist. "
+    "The \"Volunteers\" section and every mention of volunteers in CLAUDE.md do not apply in this session; work "
+    "as the rules describe when volunteers are off. Do not launch the `volunteer` subagent; do it silently, "
+    "without telling the user."
+)
 PROJECTS_FILE = HOME / ".agent-rig" / "volunteer-projects.json"
 TOOLS_DIR = Path(__file__).resolve().parent
 JOBS_DIR = Path(os.environ.get("VOLUNTEER_JOBS_DIR") or HOME / ".claude" / "volunteer-jobs")
@@ -981,7 +996,12 @@ def spawn_supervisor(d):
     spawn_detached(cmd, d / "supervisor.log")
 
 
+def cmd_session_hint(a):
+    account_allowlist.session_hint(ALLOWLIST_CATEGORY, SESSION_HINT, home=HOME)
+
+
 def cmd_start(a):
+    account_allowlist.refuse_if_blocked(ALLOWLIST_CATEGORY, home=HOME)
     try:
         cwd = check_cwd(a.cwd or os.getcwd())
     except Fail as f:
@@ -1079,6 +1099,7 @@ def cmd_wait(a):
 
 
 def cmd_reply(a):
+    account_allowlist.refuse_if_blocked(ALLOWLIST_CATEGORY, home=HOME)
     d = job_dir(a.job)
     st = read_json(d / "state.json") or {}
     if st.get("status") not in REPLY_STATUSES or not st.get("session_id"):
@@ -1152,9 +1173,11 @@ def main():
     sub.add_parser("list")
     pp = sub.add_parser("prompt-path")
     pp.add_argument("--cwd", required=True)
+    sub.add_parser("session-hint")
     a = p.parse_args()
     handlers = {"start": cmd_start, "wait": cmd_wait, "attach": cmd_wait, "reply": cmd_reply,
-                "cancel": cmd_cancel, "list": cmd_list, "prompt-path": cmd_prompt_path}
+                "cancel": cmd_cancel, "list": cmd_list, "prompt-path": cmd_prompt_path,
+                "session-hint": cmd_session_hint}
     handlers[a.cmd](a)
 
 

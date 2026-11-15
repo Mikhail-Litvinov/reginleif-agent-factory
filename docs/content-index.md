@@ -96,6 +96,7 @@
 | Hook | `SessionStart` | base | — | all | always | `compact` | `{{PYTHON}}` | `{{CLONE}}/base/hooks/compact_history.py` | 30 | `Saving pre-compaction history` | — |
 | Hook | `SessionStart` | base | — | all | always | — | `{{BASH}}` | `{{CLONE}}/base/hooks/project-tmp.sh` | 60 | — | — |
 | Hook | `SessionStart` | codex | — | all | `codex` on | — | `{{PYTHON}}` | `-I {{CLONE}}/features/codex/tools/codex-run.py session-hint` | 10 | — | — |
+| Hook | `SessionStart` | volunteers | — | Windows | `volunteers` on | — | `{{PYTHON}}` | `-I {{CLONE}}/features/volunteers/tools/volunteer-run.py session-hint` | 10 | — | — |
 | Hook | `PreToolUse` | base | — | all | always | `Bash` | `{{PYTHON}}` | `{{CLONE}}/base/hooks/no_ampersand.py` | — | — | — |
 | Hook | `PreToolUse` | base | — | all | always | `Write\|Edit\|NotebookEdit\|Bash` | `{{PYTHON}}` | `{{CLONE}}/base/hooks/system-temp-guard.py` | — | — | — |
 | Hook | `PreToolUse` | rtk | — | all | `rtk` on | `Bash` | `rtk hook claude` | — | — | — | — |

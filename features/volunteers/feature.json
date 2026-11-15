@@ -105,7 +105,19 @@
       ]
     }
   ],
-  "hooks": [],
+  "hooks": [
+    {
+      "event": "SessionStart",
+      "matcher": "",
+      "command": "{{PYTHON}}",
+      "args": [
+        "-I",
+        "{{CLONE}}/features/volunteers/tools/volunteer-run.py",
+        "session-hint"
+      ],
+      "timeout": 10
+    }
+  ],
   "settings": [],
   "plugins": [],
   "files": [
