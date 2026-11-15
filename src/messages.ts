@@ -27,19 +27,6 @@ export const en = {
 		usageUpdateStep: (): string => "Internal command update-step: apply|check <pid> <start time>",
 		unknownCommand: (args: string): string => `Unknown command or arguments: ${args}`,
 		rigError: (text: string): string => `rig error: ${text}`,
-		checksPassed: (): string => "rig checks passed.",
-		featureLine: (name: string, enabled: boolean, platformAllowed: boolean, description: string): string =>
-			`${name}: ${enabled ? "enabled" : "disabled"}${platformAllowed ? "" : "; not available on this platform"} - ${description}`,
-	},
-	status: {
-		mode: (mode: string): string => `Mode: ${mode}`,
-		unknownVersion: (): string => "unknown",
-		hubRestartPending: (pending: boolean): string => `Hub restart pending: ${pending ? "yes" : "no"}`,
-		featureLine: (name: string, enabled: boolean, platformAllowed: boolean): string =>
-			`Feature ${name}: ${enabled ? "enabled" : "disabled"}${platformAllowed ? "" : " (not available on this platform)"}`,
-		lastUpdate: (time: string, text: string): string => `Last update: ${time} - ${text}`,
-		errorLine: (type: string, text: string): string => `Error ${type}: ${text}`,
-		language: (name: string): string => `Language: ${name}`,
 	},
 	info: {
 		usage: (): string => "Usage: rig info --session <id>",
@@ -58,9 +45,6 @@ export const en = {
 	},
 	apply: {
 		hookProgramMissing: (program: string, feature: string): string => `Cannot resolve hook program ${program} required by feature ${feature}.`,
-		upToDate: (): string => "The rig configuration is already up to date.",
-		updatedFiles: (count: number): string => `Files updated: ${count}.`,
-		updatedPlugins: (count: number): string => `Plugin and marketplace changes: ${count}.`,
 		settingsInvalid: (error: string, settingsPath: string): string =>
 			`settings.json is invalid: ${error}. Fix the file ${settingsPath}; apply wrote nothing.`,
 		blockRestored: (path: string): string => `The rig rules block was restored in ${path}.`,
@@ -93,11 +77,9 @@ export const en = {
 		cannotDisable: (name: string, dependent: string): string => `Cannot disable ${name}; the enabled feature ${dependent} depends on it.`,
 		serviceNotStarted: (error: string): string => `The telegram-hub service did not start: ${error}`,
 		changed: (name: string, enabled: boolean): string => `Feature ${name} ${enabled ? "enabled" : "disabled"}.`,
-		telegramDisabledStopping: (): string => "Feature telegram is disabled; stopping the hub service.",
 		revertFailed: (cause: string, error: string): string => `${cause}; reverting the feature failed: ${error}`,
 	},
 	install: {
-		done: (dev: boolean): string => dev ? "rig installation in dev mode is complete." : "rig installation on the server is complete.",
 		cloneNotFound: (error: string): string => `Could not find the agent-rig clone: ${error}`,
 		notGitClone: (detail: string): string => `The current folder is not a git clone: ${detail}`,
 		clonePathUnknown: (): string => "Could not determine the path of the current agent-rig clone.",
@@ -127,8 +109,6 @@ export const en = {
 		readFailed: (path: string, error: string): string => `Could not read ${path}: ${error}`,
 	},
 	updateCommand: {
-		complete: (): string => "The rig update is complete.",
-		checkDeferred: (): string => "Another rig command is already running; the check is postponed.",
 		stepLockMissing: (): string => "rig update-step runs only from rig update: the rig lock was not found.",
 		stepLockOtherProcess: (): string => "rig update-step runs only from rig update: the rig lock belongs to another process.",
 		stepParentExited: (): string => "rig update-step runs only from rig update: the parent process has already exited.",

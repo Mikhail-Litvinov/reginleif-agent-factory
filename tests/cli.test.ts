@@ -1,3 +1,5 @@
+import type { ProgressEvent } from "../src/output.js";
+
 import { describe, expect, test } from "bun:test";
 import { parseCommand, runCli } from "../src/cli.js";
 import { ok } from "../src/result.js";
@@ -10,7 +12,7 @@ const OWN_PID = 1;
 const OWN_START = 2;
 const POLL_INTERVAL_MS = 1;
 const RELEASE_AFTER_SLEEPS = 3;
-const WAIT_LINE = "Another rig command is running, waiting for it to finish.";
+const LOCK_WAITING_EVENT: ProgressEvent = { code: "lock-waiting" };
 
 describe("CLI", () => {
 	test("parses foundation and later-task command forms", () => {
@@ -44,7 +46,8 @@ describe("CLI", () => {
 		const output: string[] = [];
 		const exitCode = await runCli(["apply"], (line) => output.push(line), harness.runtime);
 		expect(exitCode).toBe(1);
-		expect(output[0]).toContain("state.json");
+		const failure: unknown = JSON.parse(output[0] ?? "");
+		expect(failure).toEqual({ error: { code: "apply-failed", message: expect.stringContaining("state.json") } });
 	});
 
 	test("apply behind a busy lock prints the wait line once, before it waits", async () => {
@@ -65,20 +68,21 @@ describe("CLI", () => {
 			pollIntervalMs: POLL_INTERVAL_MS,
 		};
 		const output: string[] = [];
+		const events: ProgressEvent[] = [];
 
-		await runCli(["apply"], (line) => output.push(line), harness.runtime);
+		await runCli(["apply"], (line) => output.push(line), harness.runtime, undefined, (event) => events.push(event));
 
 		expect(sleeps).toBe(RELEASE_AFTER_SLEEPS);
-		expect(output.filter((line) => line === WAIT_LINE)).toHaveLength(1);
-		expect(output[0]).toBe(WAIT_LINE);
+		expect(events).toEqual([LOCK_WAITING_EVENT]);
+		expect(output.join("\n")).not.toContain("waiting");
 	});
 
-	test("apply with a free lock prints no wait line", async () => {
+	test("apply with a free lock reports no lock-waiting progress", async () => {
 		const harness = createMemoryRuntime();
-		const output: string[] = [];
+		const events: ProgressEvent[] = [];
 
-		await runCli(["apply"], (line) => output.push(line), harness.runtime);
+		await runCli(["apply"], () => undefined, harness.runtime, undefined, (event) => events.push(event));
 
-		expect(output).not.toContain(WAIT_LINE);
+		expect(events).toEqual([]);
 	});
 });

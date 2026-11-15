@@ -7,12 +7,12 @@ import type { UpdateStep } from "./commands/update.js";
 
 import { applyCommand } from "./commands/apply.js";
 import { checkRig } from "./commands/check.js";
-import { changeFeature, listFeatureViews } from "./commands/feature.js";
+import { changeFeature, featureListCommand } from "./commands/feature.js";
 import { infoCommand } from "./commands/info.js";
 import { installRig } from "./commands/install.js";
 import { setLanguage, showLanguage } from "./commands/language.js";
 import { createRealRuntime, readRealLanguage } from "./commands/real-runtime.js";
-import { formatStatus, readStatus } from "./commands/status.js";
+import { readStatus } from "./commands/status.js";
 import { runUpdateStep, updateRig } from "./commands/update.js";
 import { DEFAULT_LANGUAGE, isLanguage, messagesFor } from "./messages.js";
 import {
@@ -207,47 +207,28 @@ const execute = async (command: Command, context: CommandContext): Promise<Comma
 		case "help":
 			return { kind: "json", result: apiOk(HELP) };
 		case "install":
-			return legacy(await installRig(runtime, command.dev, writeLine));
+			return { kind: "json", result: await installRig(runtime, command.dev, context.writeProgress) };
 		case "apply":
-			return legacy(await applyCommand(runtime, writeLine));
+			return { kind: "json", result: await applyCommand(runtime, context.writeProgress) };
 		case "feature-list":
-			return legacy(await listFeatures(runtime, command.json, messages, writeLine));
+			return { kind: "json", result: await featureListCommand(runtime) };
 		case "feature-change":
-			return legacy(await changeFeature(runtime, command.feature, command.action, writeLine));
+			return { kind: "json", result: await changeFeature(runtime, command.feature, command.action, context.writeProgress) };
 		case "update":
-			return legacy(await updateRig(runtime, command.pending, writeLine));
+			return { kind: "json", result: await updateRig(runtime, command.pending, context.writeProgress) };
 		case "status":
-			return legacy(await showStatus(runtime, command.json, writeLine));
+			return { kind: "json", result: await readStatus(runtime) };
 		case "language":
-			return legacy(command.value === null
-				? await showLanguage(runtime, command.json, writeLine)
-				: await setLanguage(runtime, command.value, command.json, writeLine));
+			return { kind: "json", result: command.value === null
+				? await showLanguage(runtime)
+				: await setLanguage(runtime, command.value, context.writeProgress) };
 		case "info":
 			return { kind: "json", result: await infoCommand(runtime, command.session) };
 		case "update-step":
 			return { kind: "internal", exitCode: await runUpdateStep(runtime, command.step, command.owner, writeLine) };
-		case "check": {
-			const checked = await checkRig(runtime);
-			if (checked.ok) writeLine(messages.cli.checksPassed());
-			return legacy(checked);
-		}
+		case "check":
+			return { kind: "json", result: await checkRig(runtime) };
 	}
-};
-
-const listFeatures = async (runtime: RuntimePorts, json: boolean, messages: Messages, writeLine: (line: string) => void): Promise<Result<void>> => {
-	const result = await listFeatureViews(runtime);
-	if (!result.ok) return result;
-	if (json) writeLine(JSON.stringify(result.value));
-	else for (const feature of result.value) writeLine(messages.cli.featureLine(feature.name, feature.enabled, feature.platformAllowed, feature.description));
-	return ok(undefined);
-};
-
-const showStatus = async (runtime: RuntimePorts, json: boolean, writeLine: (line: string) => void): Promise<Result<void>> => {
-	const result = await readStatus(runtime);
-	if (!result.ok) return result;
-	if (json) writeLine(JSON.stringify(result.value));
-	else for (const line of formatStatus(result.value, runtime.language)) writeLine(line);
-	return ok(undefined);
 };
 
 if (import.meta.main) {

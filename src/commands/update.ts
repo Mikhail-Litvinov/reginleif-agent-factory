@@ -1,4 +1,5 @@
 import type { RigState } from "../state.js";
+import type { ApiResult, ProgressEvent } from "../output.js";
 import type { Result } from "../result.js";
 import type {
 	HubFiles,
@@ -18,6 +19,7 @@ import type { RuntimePorts } from "../ports.js";
 import { appendEvent, trimEvents } from "../events.js";
 import { loadFeatures } from "../feature-graph.js";
 import { messagesFor } from "../messages.js";
+import { apiFail, apiOk, PROGRESS_CODE_LOCK_WAITING, PROGRESS_CODE_UPDATE_STEP_OUTPUT } from "../output.js";
 import { joinPath } from "../file-system.js";
 import { err, errorText, ok } from "../result.js";
 import { runPending, runUpdate } from "../update/update.js";
@@ -40,25 +42,34 @@ const UPDATE_STEP_FAILURE_EXIT_CODE = 1;
 const UPDATE_STEP_ENVIRONMENT_EXIT_CODE = 2;
 
 type PersistedUpdateState = Pick<UpdateState, "confirmed" | "transaction" | "lastFailure" | "pendingEvent">;
+// Failure code of `rig update`; the message says what failed.
+export const UPDATE_ERROR_FAILED = "update-failed";
+// What a finished `rig update` reports. `complete`: a full update ran to its end (what it changed is in events.jsonl).
+// `checked`: the pending-restart check ran. `deferred`: the check found the rig lock taken and did nothing.
+export type UpdateOutcome = "complete" | "checked" | "deferred";
+export type UpdateData = { mode: "update" | "pending"; outcome: UpdateOutcome };
+
 type StepOutcome = { ok: true } | { ok: false; error: string; exitCode: number | null };
 
 export const updateRig = async (
 	runtime: RuntimePorts,
 	pendingOnly: boolean,
-	writeLine: (line: string) => void,
-): Promise<Result<void>> => {
-	const operation = async (): Promise<Result<void>> => {
+	writeProgress: (event: ProgressEvent) => void,
+): Promise<ApiResult<UpdateData>> => {
+	const mode = pendingOnly ? "pending" : "update";
+	const done = (outcome: UpdateOutcome): ApiResult<UpdateData> => apiOk({ mode, outcome });
+	const finished = (result: Result<UpdateOutcome>): ApiResult<UpdateData> => result.ok ? done(result.value) : apiFail(UPDATE_ERROR_FAILED, result.error);
+	const operation = async (): Promise<Result<UpdateOutcome>> => {
 		const state = await readRigStateFile(runtime.fs, runtime.home);
 		if (!state.ok) return state;
 		const environmentFailures: Pair[] = [];
-		const ports = makeUpdatePorts(runtime, state.value.paths, pendingOnly, writeLine, environmentFailures);
+		const ports = makeUpdatePorts(runtime, state.value.paths, pendingOnly, writeProgress, environmentFailures);
 		const result = pendingOnly ? await runPending(ports) : await runUpdate(ports);
 		// The update was rolled back, but the pair is not at fault when the check could not query its environment.
 		const forgotten = await forgetBadPairs(runtime, environmentFailures);
 		if (!forgotten.ok) return result.ok ? forgotten : err(`${result.error}\n${forgotten.error}`);
 		if (!result.ok) return result;
-		// The 5-minute pending check stays silent on success: its output goes to update.log, which would grow by a line per run.
-		if (pendingOnly) return ok(undefined);
+		if (pendingOnly) return ok("checked");
 		const trimmed = await trimEvents({
 			fs: runtime.fs,
 			home: runtime.home,
@@ -66,25 +77,21 @@ export const updateRig = async (
 			createId: () => runtime.ids.next(),
 		});
 		if (!trimmed.ok) return trimmed;
-		writeLine(messagesFor(runtime.language).updateCommand.complete());
-		return ok(undefined);
+		return ok("complete");
 	};
-	if (!pendingOnly) return withRigLock(runtime, writeLine, operation);
+	if (!pendingOnly) return finished(await withRigLock(runtime, () => writeProgress({ code: PROGRESS_CODE_LOCK_WAITING }), operation));
 	// Spec: --pending never waits for the lock. A running rig command already handles the pending restart itself.
 	const acquired = await tryAcquireLock(runtime.lock);
-	if (!acquired.ok) return acquired;
-	if (acquired.value === null) {
-		writeLine(messagesFor(runtime.language).updateCommand.checkDeferred());
-		return ok(undefined);
-	}
-	let result: Result<void>;
+	if (!acquired.ok) return apiFail(UPDATE_ERROR_FAILED, acquired.error);
+	if (acquired.value === null) return done("deferred");
+	let result: Result<UpdateOutcome>;
 	try {
 		result = await operation();
 	} catch (error) {
 		result = err(errorText(error));
 	}
 	const released = await acquired.value.release();
-	return released.ok ? result : released;
+	return finished(released.ok ? result : released);
 };
 
 export type UpdateStep = "apply" | "check";
@@ -155,7 +162,7 @@ const runUpdateStepProcess = async (
 	runtime: RuntimePorts,
 	paths: RigState["paths"],
 	step: UpdateStep,
-	writeLine: (line: string) => void,
+	writeProgress: (event: ProgressEvent) => void,
 ): Promise<StepOutcome> => {
 	const { pid, startTime } = runtime.lock.process;
 	const launched = await runtime.process.run(
@@ -166,7 +173,8 @@ const runUpdateStepProcess = async (
 	if (!launched.ok) return { ok: false, error: messagesFor(runtime.language).updateCommand.newCodeNotStarted(step, launched.error), exitCode: null };
 	const output = [launched.value.stdout, launched.value.stderr].map((text) => text.trim()).filter((text) => text.length > 0).join("\n");
 	if (launched.value.exitCode === PROCESS_SUCCESS_EXIT_CODE) {
-		for (const line of output.split(/\r?\n/)) if (line.length > 0) writeLine(line);
+		// The child speaks text (internal protocol); its lines are relayed as progress, never to stdout.
+		for (const line of output.split(/\r?\n/)) if (line.length > 0) writeProgress({ code: PROGRESS_CODE_UPDATE_STEP_OUTPUT, data: { step, line } });
 		return { ok: true };
 	}
 	return {
@@ -188,7 +196,7 @@ const makeUpdatePorts = (
 	runtime: RuntimePorts,
 	paths: RigState["paths"],
 	pendingOnly: boolean,
-	writeLine: (line: string) => void,
+	writeProgress: (event: ProgressEvent) => void,
 	environmentFailures: Pair[],
 ): UpdatePorts => ({
 	messages: messagesFor(runtime.language),
@@ -203,11 +211,11 @@ const makeUpdatePorts = (
 			const result = await applyRig(runtime, { state: state.value, mode: "apply" });
 			return result.ok ? ok(undefined) : result;
 		}
-		const stepped = await runUpdateStepProcess(runtime, paths, "apply", writeLine);
+		const stepped = await runUpdateStepProcess(runtime, paths, "apply", writeProgress);
 		return stepped.ok ? ok(undefined) : err(stepped.error);
 	},
 	check: async () => {
-		const stepped = await runUpdateStepProcess(runtime, paths, "check", writeLine);
+		const stepped = await runUpdateStepProcess(runtime, paths, "check", writeProgress);
 		if (stepped.ok) return ok(undefined);
 		if (stepped.exitCode === UPDATE_STEP_ENVIRONMENT_EXIT_CODE) {
 			const update = await readUpdateState(runtime, paths, !pendingOnly);

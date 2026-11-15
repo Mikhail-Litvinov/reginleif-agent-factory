@@ -289,7 +289,7 @@ Commands that change something take one lock. If it is taken, the command waits 
 also when the process holding it crashes, otherwise the wait would be eternal (`src/lock.ts`). The lock file is created
 exclusively, with the owner's PID and start time. A stale lock is taken over by whoever exclusively created the file
 `<lock>.takeover`: under it the lock is read again and deleted. If the owner's start time cannot be found out, the lock is
-considered taken. When a command starts waiting for the lock, it immediately, before waiting, prints one line `Another rig command is running, waiting for it to finish.` (the message `lock.waiting` in the catalog `src/messages.ts`). The line goes to standard output at once, not at the end of the command. It is printed by `rig update` (without `--pending`), `rig apply`, `rig feature <name> enable|disable`, `rig language en|ru` and `rig install`. If the lock is free or a stale one is taken at once, there is no line. `rig update --pending` does not wait for the lock: if it is taken it exits at once and prints no waiting line. Exit code 0 is success, 1 is failure. The output contract is in "API output": rig is an API for the hub, and a command that is migrated prints only JSON. Until a command is migrated, its success output stays text (and `--json` on `rig feature`, `rig status` and `rig language` is what the hub parses).
+considered taken. When a command starts waiting for the lock, it immediately, before waiting, reports the progress event `lock-waiting` on standard error (see "API output"), at once, not at the end of the command. It is reported by `rig update` (without `--pending`), `rig apply`, `rig feature <name> enable|disable`, `rig language en|ru` and `rig install`. If the lock is free or a stale one is taken at once, there is no event. `rig update --pending` does not wait for the lock: if it is taken it exits at once and reports no waiting event. Exit code 0 is success, 1 is failure. The output contract is in "API output": rig is an API for the hub, and every command prints only JSON.
 
 External commands (`git`, `claude plugin`, `systemctl`) go through the common process runner
 (`src/commands/process-runner.ts`): after 15 minutes they are stopped together with the whole process tree and counted as
@@ -300,17 +300,17 @@ failed; `git` never asks for a login (`GIT_TERMINAL_PROMPT=0`). The `systemctl -
 - `rig install [--dev]`: checks programs, writes the state, enables the default features, runs `apply`, on a server adds
   the cron job. `--dev` turns on developer mode and takes the clone paths from the current location.
 - `rig apply`: rebuild everything from the current state.
-- `rig feature [--json]`: the list of features and their state.
+- `rig feature`: the list of features and their state.
 - `rig feature <name> enable|disable`: switch and apply. If at `rig feature telegram enable` the hub service did not start,
   the enabling is cancelled and the command fails with an error.
-- `rig language [en|ru] [--json]`: show or set the language, see "Language".
+- `rig language [en|ru]`: show or set the language, see "Language".
 - `rig update`: update both repositories, see below. Refuses in mode `dev`. The versions for the update message are read
   from the `package.json` of the rig commit and the `plugin/package.json` of the hub commit; they are not taken from the
   working copy.
-- `rig status [--json]`: versions, features, the last update, the pending hub restart, the language, errors. The human-readable
-  output shows the version from the `package.json` of the rig commit and the `plugin/package.json` of the hub commit
-  together with the full commit hash; if the version is unknown, it shows only the hash. `errors` and the text contain only
-  the errors recorded after the last `update-ok`; older ones stay in `events.jsonl`.
+- `rig status`: versions, features, the last update, the pending hub restart, errors, as one raw object. `releases` holds the
+  version from the `package.json` of the rig commit and the `plugin/package.json` of the hub commit, `versions` the full
+  commit hash; an unknown version is `null`. `errors` holds only the errors recorded after the last `update-ok`; older ones
+  stay in `events.jsonl`.
 - `rig check`: the generated files and imports are in place, `settings.json` parses, every recorded hook matches the
   expected one by event, command, `args` and `matcher`, hooks are run the way Claude Code runs them (a hook with `args`
   is executed directly; a hook without `args` is a command string run through its shell: `bash -c`, or `powershell`
@@ -325,9 +325,9 @@ failed; `git` never asks for a login (`GIT_TERMINAL_PROMPT=0`). The `systemctl -
 
 ## API output
 
-`rig` is an API. The client (the telegram hub) owns formatting, language and display; `rig` returns raw data. There is no
-`--json` switch for the new contract: JSON is the only output of a migrated command. Text in rig's language remains
-only in the `message` of an error and in the generated agent rules.
+`rig` is an API. The client (the telegram hub) owns formatting, language and display; `rig` returns raw data. JSON is the only
+output of every command except the internal `update-step`. Text in rig's language remains only in the `message` of an
+error, in event texts and in the generated agent rules.
 
 - **Success.** Exactly one JSON object on one line on standard output, exit code 0. Times are ISO-8601 UTC strings,
   percents are raw numbers, there are no ages and no display names. A block that a session may not use is absent from the
@@ -335,38 +335,33 @@ only in the `message` of an error and in the generated agent rules.
   still succeeds.
 - **Failure.** Exactly one line `{"error":{"code","message"}}` on standard output, exit code 1. Codes shared by every
   command: `usage` (arguments the parser refuses), `runtime-unavailable` (no home directory or no runtime),
-  `internal-error` (an exception that escaped), `command-failed` (a command that is not migrated and failed; its
-  `message` is its text). A migrated command adds its own codes (`rig info`: `bad-session`, `unknown-session`,
+  `internal-error` (an exception that escaped), `command-failed` (a failure without a code of its own). A command adds its own codes (`rig info`: `bad-session`, `unknown-session`,
   `state-unreadable`). The `message` is for people in the logs; a client branches on `code`.
 - **Progress.** A command that runs long may report steps. Progress goes to standard error as JSON Lines, one
   `{"progress":{"code","data"?}}` per line, rendered by `renderProgress` in `src/output.ts`; standard output carries only
   the final object, so a client that reads it as one JSON value never sees a progress line. A command that has nothing to
   report prints nothing on standard error (`rig info` reports no progress).
-- **`--json`** is still parsed by `rig feature`, `rig status` and `rig language` because their legacy handlers and the
-  hub use it. It is ignored by the output contract and goes away when those commands migrate.
-- **Not yet migrated.** A command in the table below with status "text" still prints text on success; only its failures
-  are JSON. The lock-wait line (`lock.waiting`) stays on standard output until the commands that take the lock migrate;
-  then it becomes a progress event.
+- **`--json`** is a transitional note: `rig feature`, `rig status` and `rig language` still accept it and ignore it, so a
+  client written for the old output keeps working; it goes away with the hub's move to the new contract.
 - **Internal protocol.** `rig update-step` is run as a child by `rig update`, which reads its standard output and exit
   code as text (`runUpdateStepProcess`). It is not part of the API, keeps text failures and is exempt from the contract.
 - **Guard.** `tests/api-output.test.ts` enumerates the commands from the dispatcher (`commandNames` in `src/cli.ts`):
   a command without a fixture fails it. Every command but the internal one must print the JSON error object for a
-  failure and for malformed arguments; every migrated command must print one JSON object on success. The commands not
-  yet migrated are in `PENDING_COMMANDS`; the test fails for a listed command that already prints JSON, so the list
-  shrinks with each migration and cannot rot.
+  failure and for malformed arguments and one JSON object on success. `PENDING_COMMANDS` is empty and stays as the place
+  for a command added before it follows the contract.
 
 | Command | Success output now | What the hub parses today | Status |
 | --- | --- | --- | --- |
 | `rig help` | `{"usage":[...]}` | nothing | JSON |
 | `rig info --session <id>` | `InfoData` object (`src/info-data.ts`) | nothing yet | JSON |
-| `rig status [--json]` | text, or the `--json` object (`schemaVersion: 1`) | `status --json`, strict schema | text |
-| `rig feature [--json]` | text, or the `--json` array | `feature --json`, strict schema | text |
-| `rig language [en\|ru] [--json]` | text, or `{"language"}` | `language --json`, strict schema; `language <x>` as text for Telegram | text |
-| `rig feature <name> enable\|disable` | text | text, shown to the user in Telegram | text |
-| `rig update [--pending]` | text | text, shown to the user in Telegram | text |
-| `rig install [--dev]` | text | nothing | text |
-| `rig apply` | text | nothing | text |
-| `rig check` | text | nothing | text |
+| `rig status` | the `StatusView` object (`schemaVersion: 1`, `mode`, `versions`, `releases`, `features`, `lastUpdate`, `pendingHubRestart`, `errors`; times as recorded in `events.jsonl`); failures `state-unreadable`, `features-unreadable` | `status --json`, strict schema (unchanged fields) | JSON |
+| `rig feature` | `{"features":[{"name","description","enabled","platformAllowed"}]}` (`description` in rig's language); failure code `feature-failed` | `feature --json`, strict schema (expects a bare array, must unwrap `features`) | JSON |
+| `rig language [en\|ru]` | `{"language"}`; setting: `{"language","changed"}`; failure codes `not-installed`, `language-failed`; progress `lock-waiting` | `language --json`, strict schema (unchanged); `language <x>` as text for Telegram | JSON |
+| `rig feature <name> enable\|disable` | `{"feature","enabled"}`; failure codes `base-cannot-toggle`, `unknown-feature`, `feature-change-refused`, `service-not-started`, `feature-failed`; progress `lock-waiting`, `program-install` (`data: {name, command}`), `service-stopping` | text, shown to the user in Telegram | JSON |
+| `rig update [--pending]` | `{"mode":"update"\|"pending","outcome":"complete"\|"checked"\|"deferred"}` (`complete`: a full update ran to its end, what changed is in `events.jsonl`; `checked`: the pending check ran, and it is now printed too, one line per cron run; `deferred`: the check found the lock taken); failure code `update-failed`; progress `lock-waiting` and `update-step-output` (`data: {step, line}`, one text line of the child `update-step`) | text, shown to the user in Telegram | JSON |
+| `rig install [--dev]` | `{"mode","paths":{"repo","hub"},"enabledFeatures":[...],"missingPrograms":[{"name","command"}],"changedFiles":[...],"pluginChanges":{"installed","uninstalled","marketplacesAdded","marketplacesRemoved"},"cron"}` (`cron` is `skipped` on dev, else `unchanged` or `updated`); failure code `install-failed`; progress `lock-waiting` | nothing | JSON |
+| `rig apply` | `{"changedFiles":[...],"pluginChanges":{"installed","uninstalled","marketplacesAdded","marketplacesRemoved"}}` (all lists empty: nothing changed); failure code `apply-failed`; progress `lock-waiting` | nothing | JSON |
+| `rig check` | `{"checked":true}`; a defect is a failure `check-failed` (every problem in `message`, one per line), `check-environment` (only the environment could not be asked), `check-unreadable` (state or features unreadable) | nothing | JSON |
 | `rig update-step` | text | parsed as text by the parent `rig update` | internal |
 
 ## Language
@@ -374,20 +369,20 @@ only in the `message` of an error and in the generated agent rules.
 One shared setting, owned by `rig`: `language` in `~/.agent-rig/state.json`, the value `"en"` or `"ru"`; a missing field
 means `"en"`. `rig` and the hub are English by default and switch to Russian together, only after the human asks.
 
-- `rig language` prints the current language; `rig language en|ru` sets it under the rig lock and emits the event
-  `language-changed` whose text is in the new language. Setting the value that is already set is a no-op, with no event.
-  `rig language --json` prints `{"language":"en"}`. Without `state.json` rig is not installed: `rig language` and
+- `rig language` prints `{"language":"en"}`; `rig language en|ru` sets it under the rig lock, prints
+  `{"language","changed"}` and emits the event `language-changed` whose text is in the new language. Setting the value that
+  is already set is a no-op, with no event. Without `state.json` rig is not installed: `rig language` and
   `rig language en|ru` fail with a message to run `rig install` first. A `language` value that is not `en` or `ru` does not
   make `state.json` invalid: it is read as English everywhere, and `rig language en|ru` replaces it with a valid value
   (a repair, without an event).
-- Every string that `rig` shows the human (command output, the waiting line, event texts, the text the hub shows from `rig`)
+- Every string that `rig` words for a human (error messages, progress, event texts)
   comes from one message catalog with the languages `en` and `ru`; the catalog is typed so that `ru` carries every key of
   `en`, and there is no Russian text in the code outside the `ru` catalog. An event text is written in the language that is
   current when the event is emitted. The exception is rare low-level diagnostics raised deep in the code (an unreadable
   `state.json`, a failed file operation, a failed process read): they are always English, with the system's own text.
 - A feature description in `feature.json` is a plain English string; the other languages go into the optional
-  `translations` field, keyed by language: `{ "ru": { "description": "..." } }`. `rig feature` and `rig feature --json`
-  print the description in the current language, falling back to the English string, and always as a plain string, so the
+  `translations` field, keyed by language: `{ "ru": { "description": "..." } }`. `rig feature`
+  prints the description in the current language, falling back to the English string, and always as a plain string, so the
   contract field stays a string.
 - A hook's `statusMessage` follows the same pattern: the plain string stays English (the previous release reads new
   manifests during `rig update` and ignores unknown keys), the hook's `translations` holds `{ "ru": { "statusMessage":
@@ -395,8 +390,8 @@ means `"en"`. `rig` and the hub are English by default and switch to Russian tog
   translation for it. `rig language en|ru` that changes the language reruns the normal apply (the same `applyRig`, under
   the same rig lock) with the new language, so rig's own hook entries are rewritten; a hook entry the user changed by
   hand follows the usual ownership rules and is kept.
-- `rig status` in text form shows the language on its own line. `rig status --json` is unchanged: it has no language field,
-  because the hub validates this object with a strict schema. The hub learns the language from `rig language --json`.
+- `rig status` has no language field, because the hub validates this object with a strict schema. The hub learns the
+  language from `rig language`.
 - Agent replies (Claude, Codex) are not tied to the setting: the rules tell agents to reply in the user's language. The rule
   about addressing the user informally applies to any language with a formal and an informal "you".
 - The rule texts, the tool documentation and the repository documents are English.
@@ -405,7 +400,7 @@ means `"en"`. `rig` and the hub are English by default and switch to Russian tog
 
 Cron calls `rig update` on the server once an hour, the output goes to `update.log`. A second cron job every 5 minutes calls
 `rig update --pending`: it performs only the check of the pending hub restart from step 7 and exits at once without one. On
-success it prints nothing, so that `update.log` does not grow every 5 minutes.
+success it prints the one-line object `{"mode":"pending","outcome":"checked"}` and exits.
 
 1. Take the lock. Handle the pending hub restart, see step 7.
 2. Fetch `main` of both repositories. Nothing new — exit.
@@ -465,29 +460,28 @@ new name by removing the old identifier and installing the new one.
 
 **Commands.** The hub itself accepts `/feature`, `/feature <name> enable|disable`, `/rig status|update` and
 `/rig language en|ru` from users in `allowFrom`, calls `rig` and shows the output. The messages do not pass through an
-agent. If `rig` is not found, the hub answers that it is missing. The hub shows the `rig` output as it arrives. The lock
-waiting line (see "Commands") arrives at the moment the wait starts, not at the end of the command. The hub does not parse
-this text and does not tell the waiting line from the rest of the output.
+agent. If `rig` is not found, the hub answers that it is missing. The hub reads the final JSON object from standard output and
+the progress events from standard error (see "API output"), and words the reply itself.
 
-**Feature state.** The hub learns it with the command `rig feature --json` at start and on the event `features-changed`.
+**Feature state.** The hub learns it with the command `rig feature` at start and on the event `features-changed`.
 `rig` does not touch the hub configuration. The commands `/pwsh` and `/cmd`, when the feature is off, answer how to turn it
 on.
 
-**Language.** The hub reads the language with `rig language --json` at start and on the event `language-changed`, and shows
+**Language.** The hub reads the language with `rig language` at start and on the event `language-changed`, and shows
 its own messages (replies, buttons, prompts) in that language. `/rig language en|ru` from a user in `allowFrom` calls `rig`
 and shows its output, like `/rig status|update`. The hub does not store the language itself; the single owner is `rig`
 (see "Language").
 
-**JSON contract.** `rig feature --json` prints an array of features; each has exactly the fields `name`, `description`,
+**JSON contract.** `rig feature` prints `{"features":[...]}`; each feature has exactly the fields `name`, `description`,
 `enabled` and `platformAllowed`. `description` is a plain string in the current language. `enabled` is the saved state flag,
-`platformAllowed` shows availability on the current OS. `rig status --json` prints an object of version `schemaVersion: 1`
+`platformAllowed` shows availability on the current OS. `rig status` prints an object of version `schemaVersion: 1`
 with the fields `mode`, `versions`, `releases`, `features`, `lastUpdate`, `pendingHubRestart` and `errors`. `versions`
-contains `rig` and `hub` (a commit string or `null`); `features` uses the same array format as `rig feature --json`;
+contains `rig` and `hub` (a commit string or `null`); `features` uses the same array format as `rig feature`;
 `releases` contains `rig` and `hub` (a version string from the corresponding commit or `null`). The rig version is taken
 from the root `package.json`, the hub version from `plugin/package.json` in the hub clone. `lastUpdate` is the last update
 event or `null`; `pendingHubRestart` is the saved state value or `null`; `errors` is an array of objects
 `{type, time, text}`. The order of feature elements is set by the manifest name, and the order of object keys is fixed by
-the CLI. The hub parses these fields, not the human-readable output. `rig language --json` prints the object
+the CLI. The hub parses these fields. `rig language` prints the object
 `{"language":"en"}` with `"en"` or `"ru"`.
 
 **Events.** `rig` appends lines to `~/.agent-rig/events.jsonl` in one write operation. One line is one JSON:
@@ -569,12 +563,12 @@ Done when everything passed:
 11. After moving existing manual rules and hooks to `rig` entries, rules and settings match the previous ones, apart from the
     confirmed differences.
 12. Default English: on a fresh state (no `language` field) `rig status`, `rig feature`, `rig language` and the event texts are
-    English, and `rig language --json` prints `{"language":"en"}`.
+    English, and `rig language` prints `{"language":"en"}`.
 13. Language switch: `rig language ru` changes the output, feature descriptions and the text of the new event to Russian and
     emits `language-changed`; `rig language ru` again emits nothing; `rig language en` returns everything to English; the hub
     follows the switch (at start and on the event) and accepts `/rig language en|ru` from `allowFrom` users only.
-14. `rig status --json` and `rig feature --json` keep the contract (the same fields and key order in both languages; no new
-    field in `rig status --json`; `description` is a string).
+14. `rig status` and `rig feature` keep the contract (the same fields and key order in both languages; no language
+    field in `rig status`; `description` is a string).
 15. No Russian text in the code outside the `ru` catalog and the `translations` of the manifests.
 16. Every `feature.json` in the repository has a string `description` (the previous release must be able to read it).
 

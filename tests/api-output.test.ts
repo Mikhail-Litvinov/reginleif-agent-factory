@@ -49,7 +49,7 @@ const FIXTURES: Record<string, Fixture> = {
 
 // Commands that still print text on success. A migration step removes a command from this list in the same change that
 // moves it to a typed result; the test below fails for a listed command that already prints JSON, so the list cannot rot.
-const PENDING_COMMANDS: readonly string[] = ["install", "apply", "feature-list", "feature-change", "update", "status", "check", "language"];
+const PENDING_COMMANDS: readonly string[] = [];
 
 // `rig update` runs `update-step` as a child and reads its stdout and exit code as text (runUpdateStepProcess in
 // src/commands/update.ts); it is a process-internal protocol, not part of the API.

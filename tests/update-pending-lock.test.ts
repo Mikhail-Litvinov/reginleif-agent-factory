@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import type { ProgressEvent } from "../src/output.js";
+
 import { updateRig } from "../src/commands/update.js";
 import { ok } from "../src/result.js";
 import { createMemoryRuntime } from "./fakes/memory-runtime.js";
@@ -22,13 +24,13 @@ describe("rig update --pending and the lock", () => {
 			clock: { sleep: async () => { sleeps += 1; throw new Error("--pending must not wait for the lock"); }, now: () => Date.now() },
 			pollIntervalMs: POLL_INTERVAL_MS,
 		};
-		const lines: string[] = [];
+		const progress: ProgressEvent[] = [];
 
-		const result = await updateRig(harness.runtime, true, (line) => lines.push(line));
+		const result = await updateRig(harness.runtime, true, (event) => progress.push(event));
 
-		expect(result.ok).toBe(true);
+		expect(result).toEqual({ ok: true, value: { mode: "pending", outcome: "deferred" } });
 		expect(sleeps).toBe(0);
-		expect(lines.length).toBe(1);
+		expect(progress).toEqual([]);
 		expect(harness.fs.files.get(LOCK_PATH)).toContain(`"pid":${HOLDER_PID}`);
 	});
 });

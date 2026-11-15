@@ -34,10 +34,10 @@ Default values apply only at the first install. New features that appear in upda
 
 - `rig install [--dev]` installs rig: features, programs, plugins, the `rig` command. On a server also two crontab entries. With `--dev` it installs developer mode.
 - `rig apply` rebuilds the rules, hooks and settings from the enabled features.
-- `rig feature` shows the list of features and their state; `rig feature --json` does the same in JSON.
+- `rig feature` prints the list of features and their state as JSON.
 - `rig feature <name> enable` and `rig feature <name> disable` turn a feature on and off. Turning off removes hooks, rules, settings, plugins, and also the agent and skill files copied into `~/.claude`; if you changed an entry, the changed value stays in a `*.bak-<date>` copy. Programs, logins and data stay.
 - `rig update` fetches the fresh `main` of both repositories and applies it. `rig update --pending` checks whether the hub restarted after an update.
-- `rig status` shows the mode, versions, the state of features, the last update and errors; `rig status --json` does the same in JSON.
+- `rig status` prints, as JSON, the mode, versions, the state of features, the last update and errors.
 - `rig check` verifies that the install is intact and the hooks run.
 - `rig language` shows the current language; `rig language en|ru` switches rig and the Telegram bot between English and Russian. English is the default.
 - `rig info --session <id>` prints one JSON object with the raw readings for that session: Claude limits (the freshest reading among sessions of the same account), Codex and volunteer limits when those features are on and the account is allowed, and the context. The client formats it; errors are `{"error":{"code","message"}}` with exit code 1.

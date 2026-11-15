@@ -14,19 +14,6 @@ export const ru: Messages = {
 		usageUpdateStep: (): string => "Служебная команда update-step: apply|check <pid> <время запуска>",
 		unknownCommand: (args: string): string => `Неизвестная команда или аргументы: ${args}`,
 		rigError: (text: string): string => `Ошибка rig: ${text}`,
-		checksPassed: (): string => "Проверки rig пройдены.",
-		featureLine: (name: string, enabled: boolean, platformAllowed: boolean, description: string): string =>
-			`${name}: ${enabled ? "включена" : "выключена"}${platformAllowed ? "" : "; недоступна на этой платформе"} — ${description}`,
-	},
-	status: {
-		mode: (mode: string): string => `Режим: ${mode}`,
-		unknownVersion: (): string => "неизвестно",
-		hubRestartPending: (pending: boolean): string => `Перезапуск хаба ожидается: ${pending ? "да" : "нет"}`,
-		featureLine: (name: string, enabled: boolean, platformAllowed: boolean): string =>
-			`Фича ${name}: ${enabled ? "включена" : "выключена"}${platformAllowed ? "" : " (недоступна на этой платформе)"}`,
-		lastUpdate: (time: string, text: string): string => `Последнее обновление: ${time} — ${text}`,
-		errorLine: (type: string, text: string): string => `Ошибка ${type}: ${text}`,
-		language: (name: string): string => `Язык: ${name}`,
 	},
 	info: {
 		usage: (): string => "Использование: rig info --session <id>",
@@ -45,9 +32,6 @@ export const ru: Messages = {
 	},
 	apply: {
 		hookProgramMissing: (program: string, feature: string): string => `Не найдена программа хука ${program}, нужная для функции ${feature}.`,
-		upToDate: (): string => "Конфигурация rig уже актуальна.",
-		updatedFiles: (count: number): string => `Обновлено файлов: ${count}.`,
-		updatedPlugins: (count: number): string => `Изменений плагинов и маркетплейсов: ${count}.`,
 		settingsInvalid: (error: string, settingsPath: string): string =>
 			`settings.json недопустим: ${error}. Исправь файл ${settingsPath}; apply ничего не записал.`,
 		blockRestored: (path: string): string => `Восстановлен блок правил rig в ${path}.`,
@@ -80,11 +64,9 @@ export const ru: Messages = {
 		cannotDisable: (name: string, dependent: string): string => `Нельзя выключить ${name}: включённая фича ${dependent} зависит от неё.`,
 		serviceNotStarted: (error: string): string => `Служба telegram-hub не запустилась: ${error}`,
 		changed: (name: string, enabled: boolean): string => `Фича ${name} ${enabled ? "включена" : "выключена"}.`,
-		telegramDisabledStopping: (): string => "Фича telegram выключена; останавливаю службу хаба.",
 		revertFailed: (cause: string, error: string): string => `${cause}; откат фичи не удался: ${error}`,
 	},
 	install: {
-		done: (dev: boolean): string => dev ? "Установка rig в режиме dev завершена." : "Установка rig на сервере завершена.",
 		cloneNotFound: (error: string): string => `Не удалось определить клон agent-rig: ${error}`,
 		notGitClone: (detail: string): string => `Текущая папка не является git-клоном: ${detail}`,
 		clonePathUnknown: (): string => "Не удалось определить путь текущего клона agent-rig.",
@@ -114,8 +96,6 @@ export const ru: Messages = {
 		readFailed: (path: string, error: string): string => `Не удалось прочитать ${path}: ${error}`,
 	},
 	updateCommand: {
-		complete: (): string => "Обновление rig завершено.",
-		checkDeferred: (): string => "Другая команда rig уже работает; проверка отложена.",
 		stepLockMissing: (): string => "rig update-step запускается только из rig update: блокировка rig не найдена.",
 		stepLockOtherProcess: (): string => "rig update-step запускается только из rig update: блокировка rig принадлежит другому процессу.",
 		stepParentExited: (): string => "rig update-step запускается только из rig update: родительский процесс уже завершился.",

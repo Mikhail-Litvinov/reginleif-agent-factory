@@ -78,7 +78,8 @@ describe("rig update with real git and a real child process", () => {
 		expect(result.ok).toBe(false);
 		if (result.ok) throw new Error("an update whose check step fails must not succeed");
 		// The error names the failed step, so the failure is the check and not the apply.
-		expect(result.error).toContain("(check)");
+		expect(result.error.code).toBe("update-failed");
+		expect(result.error.message).toContain("(check)");
 		expect(runGit(fixture.clone, ["rev-parse", "HEAD"])).toBe(fixture.firstCommit);
 		const state = await readState(fixture.home);
 		expect(state.badPairs.map((pair) => pair.repo)).toEqual([fixture.secondCommit]);
@@ -93,7 +94,7 @@ describe("rig update with real git and a real child process", () => {
 
 		const result = await updateRig(runtime.value, false, () => undefined);
 
-		expect(result).toEqual({ ok: true, value: undefined });
+		expect(result).toEqual({ ok: true, value: { mode: "update", outcome: "complete" } });
 		expect(runGit(fixture.clone, ["rev-parse", "HEAD"])).toBe(fixture.secondCommit);
 		expect((await readState(fixture.home)).badPairs).toEqual([]);
 	}, REAL_UPDATE_TIMEOUT_MS);

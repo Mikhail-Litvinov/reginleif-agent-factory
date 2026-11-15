@@ -1,3 +1,4 @@
+import type { ProgressEvent } from "../src/output.js";
 import type { RigState } from "../src/state.js";
 import type { Result } from "../src/result.js";
 import type { MemoryRuntimeHarness } from "./fakes/memory-runtime.js";
@@ -40,12 +41,44 @@ describe("rig update runs the new code in a child process under the parent lock"
 
 		const result = await updateRig(harness.runtime, false, () => undefined);
 
-		expect(result.ok).toBe(true);
+		expect(result).toEqual({ ok: true, value: { mode: "update", outcome: "complete" } });
 		expect(git.heads.get(REPO)).toBe(NEW_COMMIT);
 		expect(delegated.map((args) => args.slice(0, 3))).toEqual([
 			[`${REPO}/src/cli.ts`, "update-step", "apply"],
 			[`${REPO}/src/cli.ts`, "update-step", "check"],
 		]);
+	}, HANG_BUDGET_MS);
+
+	test("rig update prints one JSON object on stdout and relays child step lines as progress", async () => {
+		const { harness, git } = setup({});
+		routeChildren(harness, git, []);
+		const routed = harness.runtime.process.run;
+		harness.runtime.process.run = async (command, args, options) => {
+			const launched = await routed(command, args, options);
+			if (args[1] === "update-step" && args[2] === "apply" && launched.ok) return ok({ ...launched.value, stdout: "install-line" });
+			return launched;
+		};
+		const lines: string[] = [];
+		const progress: ProgressEvent[] = [];
+
+		const code = await runCli(["update"], (line) => lines.push(line), harness.runtime, undefined, (event) => progress.push(event));
+
+		expect(lines).toEqual([JSON.stringify({ mode: "update", outcome: "complete" })]);
+		expect(code).toBe(SUCCESS_EXIT_CODE);
+		expect(lines).toEqual([JSON.stringify({ mode: "update", outcome: "complete" })]);
+		expect(progress).toEqual([{ code: "update-step-output", data: { step: "apply", line: "install-line" } }]);
+	}, HANG_BUDGET_MS);
+
+	test("a failed update prints the update-failed error object and exits 1", async () => {
+		const { harness, git } = setup({});
+		routeChildren(harness, git, [], "check");
+		const lines: string[] = [];
+
+		const code = await runCli(["update"], (line) => lines.push(line), harness.runtime);
+
+		expect(code).toBe(FAILURE_EXIT_CODE);
+		expect(lines.length).toBe(1);
+		expect(JSON.parse(lines[0] ?? "")).toMatchObject({ error: { code: "update-failed" } });
 	}, HANG_BUDGET_MS);
 
 	test("a failing child step rolls the update back and records the bad pair", async () => {

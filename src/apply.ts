@@ -50,7 +50,14 @@ export type ApplyOutcome = {
 	state: RigState;
 	changedFiles: string[];
 	// Plugin installs and uninstalls and marketplace adds and removals that apply made through the claude CLI.
-	pluginChanges: number;
+	pluginChanges: PluginChanges;
+};
+
+export type PluginChanges = {
+	installed: string[];
+	uninstalled: string[];
+	marketplacesAdded: string[];
+	marketplacesRemoved: string[];
 };
 
 export const applyRig = async (runtime: RuntimePorts, request: ApplyRequest): Promise<Result<ApplyOutcome>> => {
@@ -261,8 +268,8 @@ export const applyRig = async (runtime: RuntimePorts, request: ApplyRequest): Pr
 		const saved = await saveState(runtime, nextState);
 		if (!saved.ok) return saved;
 	}
-	const pluginChanges = plugins.value.installed.length + plugins.value.uninstalled.length +
-		plugins.value.marketplacesAdded.length + plugins.value.marketplacesRemoved.length;
+	const { installed, uninstalled, marketplacesAdded, marketplacesRemoved } = plugins.value;
+	const pluginChanges: PluginChanges = { installed, uninstalled, marketplacesAdded, marketplacesRemoved };
 	return ok({ state: nextState, changedFiles, pluginChanges });
 };
 

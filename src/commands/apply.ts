@@ -1,21 +1,27 @@
-import type { Result } from "../result.js";
+import type { PluginChanges } from "../apply.js";
+import type { ApiResult, ProgressEvent } from "../output.js";
 import type { RuntimePorts } from "../ports.js";
 
 import { applyRig } from "../apply.js";
-import { messagesFor } from "../messages.js";
-import { ok } from "../result.js";
+import { apiFail, apiOk, PROGRESS_CODE_LOCK_WAITING } from "../output.js";
 import { readRigState, withRigLock } from "./shared.js";
 
-export const applyCommand = async (runtime: RuntimePorts, writeLine: (line: string) => void): Promise<Result<void>> =>
-	withRigLock(runtime, writeLine, async () => {
+// Failure code of `rig apply`; the message is the text of whatever step failed.
+export const APPLY_ERROR_FAILED = "apply-failed";
+
+// What apply changed: absolute paths of the files it wrote or removed, and the plugin and marketplace actions it ran.
+export type ApplyData = { changedFiles: string[]; pluginChanges: PluginChanges };
+
+export const applyCommand = async (
+	runtime: RuntimePorts,
+	writeProgress: (event: ProgressEvent) => void,
+): Promise<ApiResult<ApplyData>> => {
+	const result = await withRigLock(runtime, () => writeProgress({ code: PROGRESS_CODE_LOCK_WAITING }), async () => {
 		const state = await readRigState(runtime);
 		if (!state.ok) return state;
-		const applied = await applyRig(runtime, { state: state.value, mode: "apply" });
-		if (!applied.ok) return applied;
-		const messages = messagesFor(runtime.language);
-		const { changedFiles, pluginChanges } = applied.value;
-		if (changedFiles.length === 0 && pluginChanges === 0) writeLine(messages.apply.upToDate());
-		if (changedFiles.length > 0) writeLine(messages.apply.updatedFiles(changedFiles.length));
-		if (pluginChanges > 0) writeLine(messages.apply.updatedPlugins(pluginChanges));
-		return ok(undefined);
+		return applyRig(runtime, { state: state.value, mode: "apply" });
 	});
+	if (!result.ok) return apiFail(APPLY_ERROR_FAILED, result.error);
+	const { changedFiles, pluginChanges } = result.value;
+	return apiOk({ changedFiles, pluginChanges });
+};

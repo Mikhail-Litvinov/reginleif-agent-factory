@@ -28,3 +28,15 @@ export const renderFailure = (error: ApiError): string => JSON.stringify({ error
 // never to stdout, so stdout stays the one final JSON object. A client may read stderr or ignore it.
 export type ProgressEvent = { code: string; data?: JsonValue };
 export const renderProgress = (event: ProgressEvent): string => JSON.stringify({ progress: event });
+
+// The command waits for the rig lock that another rig process holds; it carries no data.
+export const PROGRESS_CODE_LOCK_WAITING = "lock-waiting";
+
+// `rig update` relays one text line of its child step (`update-step apply|check`, internal protocol); data: {step, line}.
+export const PROGRESS_CODE_UPDATE_STEP_OUTPUT = "update-step-output";
+
+// A system package the enabled feature needs is missing and the user has to install it; data: {name, command}.
+export const PROGRESS_CODE_PROGRAM_INSTALL = "program-install";
+
+// `rig feature telegram disable` is stopping the hub service before it exits; it carries no data.
+export const PROGRESS_CODE_SERVICE_STOPPING = "service-stopping";

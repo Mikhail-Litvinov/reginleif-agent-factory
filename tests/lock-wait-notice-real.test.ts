@@ -8,7 +8,8 @@ import { createRealRuntime } from "../src/commands/real-runtime.js";
 import { acquireLock } from "../src/lock.js";
 
 const TEMP_DIRECTORY_PREFIX = "agent-rig-wait-notice-";
-const WAIT_LINE = "Another rig command is running, waiting for it to finish.";
+// The wait notice is a progress event on stderr, one JSON line (src/output.ts).
+const WAIT_LINE = "{\"progress\":{\"code\":\"lock-waiting\"}}";
 // The child waits for the lock with real process checks on every poll, which is slow on Windows; the budget is generous.
 const CHILD_WAIT_BUDGET_MS = 120_000;
 // The whole test also waits for the child to exit after the lock is released, so its timeout is larger than the budget.
@@ -57,22 +58,22 @@ describe("rig apply waiting for the lock, in real processes", () => {
 		const closed = new Promise<number | null>((resolve) => {
 			child.once("close", (code) => resolve(code));
 		});
-		let stdout = "";
-		child.stdout.setEncoding("utf8");
-		child.stdout.on("data", (chunk: string) => {
-			stdout += chunk;
+		let stderr = "";
+		child.stderr.setEncoding("utf8");
+		child.stderr.on("data", (chunk: string) => {
+			stderr += chunk;
 		});
-		child.stderr.resume();
+		child.stdout.resume();
 
 		try {
-			const sawLine = await waitUntil(() => stdout.includes(WAIT_LINE), CHILD_WAIT_BUDGET_MS);
+			const sawLine = await waitUntil(() => stderr.includes(WAIT_LINE), CHILD_WAIT_BUDGET_MS);
 
 			expect(sawLine).toBe(true);
 			expect(exited).toBe(false);
 			const released = await held.value.release();
 			expect(released.ok).toBe(true);
 			await closed;
-			expect(stdout.split(WAIT_LINE).length - 1).toBe(1);
+			expect(stderr.split(WAIT_LINE).length - 1).toBe(1);
 		} finally {
 			await held.value.release();
 			if (!exited) child.kill();

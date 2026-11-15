@@ -1,10 +1,10 @@
 import type { FeatureView } from "./feature.js";
-import type { Language, Messages } from "../messages.js";
+import type { ApiResult } from "../output.js";
 import type { RigEvent } from "../events.js";
 import type { Result } from "../result.js";
 import type { RuntimePorts } from "../ports.js";
 
-import { messagesFor } from "../messages.js";
+import { apiFail, apiOk } from "../output.js";
 import { err, ok } from "../result.js";
 import { listFeatureViews } from "./feature.js";
 import { PROCESS_SUCCESS_EXIT_CODE } from "../ports.js";
@@ -15,6 +15,10 @@ const UPDATE_EVENT_TYPES = ["update-ok", "update-skipped", "update-failed", "rol
 // The only event that marks a successful update (src/update/update.ts); errors logged before it are settled.
 const SUCCESS_EVENT_TYPE = "update-ok";
 const STATUS_SCHEMA_VERSION = 1;
+
+// Failure codes of `rig status`.
+export const STATUS_ERROR_STATE_UNREADABLE = "state-unreadable";
+export const STATUS_ERROR_FEATURES_UNREADABLE = "features-unreadable";
 
 export type StatusView = {
 	schemaVersion: typeof STATUS_SCHEMA_VERSION;
@@ -27,11 +31,11 @@ export type StatusView = {
 	errors: Array<{ type: string; time: string; text: string }>;
 };
 
-export const readStatus = async (runtime: RuntimePorts): Promise<Result<StatusView>> => {
+export const readStatus = async (runtime: RuntimePorts): Promise<ApiResult<StatusView>> => {
 	const state = await readRigState(runtime);
-	if (!state.ok) return state;
+	if (!state.ok) return apiFail(STATUS_ERROR_STATE_UNREADABLE, state.error);
 	const features = await listFeatureViews(runtime);
-	if (!features.ok) return features;
+	if (!features.ok) return apiFail(STATUS_ERROR_FEATURES_UNREADABLE, features.error);
 	const [rigVersion, hubVersion, events] = await Promise.all([
 		readGitHead(runtime, state.value.paths.repo),
 		readGitHead(runtime, state.value.paths.hub),
@@ -49,7 +53,7 @@ export const readStatus = async (runtime: RuntimePorts): Promise<Result<StatusVi
 	const errors = parsedEvents
 		.filter((event, index) => index > lastSuccessIndex && event.level === "error")
 		.map((event) => ({ type: event.type, time: event.time, text: event.text }));
-	return ok({
+	return apiOk({
 		schemaVersion: STATUS_SCHEMA_VERSION,
 		mode: state.value.mode,
 		versions: { rig: rigVersion.ok ? rigVersion.value : null, hub: hubVersion.ok ? hubVersion.value : null },
@@ -59,27 +63,6 @@ export const readStatus = async (runtime: RuntimePorts): Promise<Result<StatusVi
 		pendingHubRestart: state.value.pendingHubRestart,
 		errors,
 	});
-};
-
-// The language is not part of StatusView (the hub validates its JSON strictly); the text form gets it as an argument.
-export const formatStatus = (status: StatusView, language: Language): string[] => {
-	const messages = messagesFor(language);
-	const lines = [
-		messages.status.mode(status.mode),
-		`agent-rig: ${formatRepositoryVersion(status.releases.rig, status.versions.rig, messages)}`,
-		`hub: ${formatRepositoryVersion(status.releases.hub, status.versions.hub, messages)}`,
-		messages.status.hubRestartPending(status.pendingHubRestart !== null),
-		messages.status.language(messages.languageNames[language]),
-	];
-	for (const feature of status.features) lines.push(messages.status.featureLine(feature.name, feature.enabled, feature.platformAllowed));
-	if (status.lastUpdate !== null) lines.push(messages.status.lastUpdate(status.lastUpdate.time, status.lastUpdate.text));
-	for (const error of status.errors) lines.push(messages.status.errorLine(error.type, error.text));
-	return lines;
-};
-
-const formatRepositoryVersion = (release: string | null, commit: string | null, messages: Messages): string => {
-	if (commit === null) return messages.status.unknownVersion();
-	return release === null ? commit : `${release} (${commit})`;
 };
 
 const readGitHead = async (runtime: RuntimePorts, path: string): Promise<Result<string>> => {

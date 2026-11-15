@@ -1,3 +1,4 @@
+import type { ProgressEvent } from "../src/output.js";
 import type { MemoryRuntimeHarness } from "./fakes/memory-runtime.js";
 
 import { describe, expect, test } from "bun:test";
@@ -43,10 +44,10 @@ const writeState = (harness: MemoryRuntimeHarness, language?: string): void => {
 };
 
 // The real runtime reads the language from state.json when it is built; this does the same for the memory runtime.
-const run = async (harness: MemoryRuntimeHarness, args: string[]): Promise<Run> => {
+const run = async (harness: MemoryRuntimeHarness, args: string[], progress: ProgressEvent[] = []): Promise<Run> => {
 	const output: string[] = [];
 	harness.runtime.language = await readStoredLanguage(harness.fs, HOME);
-	const code = await runCli(args, (line) => output.push(line), harness.runtime);
+	const code = await runCli(args, (line) => output.push(line), harness.runtime, undefined, (event) => progress.push(event));
 	return { code, output };
 };
 
@@ -70,26 +71,26 @@ describe("rig language", () => {
 
 		const result = await run(harness, ["language"]);
 
-		expect(result).toEqual({ code: SUCCESS_EXIT_CODE, output: ["Language: English."] });
+		expect(result).toEqual({ code: SUCCESS_EXIT_CODE, output: ['{"language":"en"}'] });
 	});
 
-	test("prints the current language in Russian when the state says ru", async () => {
+	test("prints the current language as raw data when the state says ru", async () => {
 		const harness = setup("ru");
 
 		const result = await run(harness, ["language"]);
 
-		expect(result).toEqual({ code: SUCCESS_EXIT_CODE, output: ["Язык: русский."] });
+		expect(result).toEqual({ code: SUCCESS_EXIT_CODE, output: ['{"language":"ru"}'] });
 	});
 
-	test("setting ru stores it, emits language-changed in the new language and prints that text", async () => {
+	test("setting ru stores it, emits language-changed in the new language and answers the raw language", async () => {
 		const harness = setup();
 
 		const result = await run(harness, ["language", "ru"]);
 
-		expect(result).toEqual({ code: SUCCESS_EXIT_CODE, output: ["Язык: русский."] });
+		expect(result).toEqual({ code: SUCCESS_EXIT_CODE, output: ['{"language":"ru","changed":true}'] });
 		expect(storedLanguageValue(harness)).toBe("ru");
-		expect(readEvents(harness)).toEqual([{ type: "language-changed", text: "Язык: русский." }]);
-		expect((await run(harness, ["language"])).output).toEqual(["Язык: русский."]);
+		expect(readEvents(harness)).toEqual([{ type: "language-changed", text: "\u042f\u0437\u044b\u043a: \u0440\u0443\u0441\u0441\u043a\u0438\u0439." }]);
+		expect((await run(harness, ["language"])).output).toEqual(['{"language":"ru"}']);
 	});
 
 	test("setting en back emits the event in English", async () => {
@@ -97,7 +98,7 @@ describe("rig language", () => {
 
 		const result = await run(harness, ["language", "en"]);
 
-		expect(result).toEqual({ code: SUCCESS_EXIT_CODE, output: ["Language: English."] });
+		expect(result).toEqual({ code: SUCCESS_EXIT_CODE, output: ['{"language":"en","changed":true}'] });
 		expect(storedLanguageValue(harness)).toBe("en");
 		expect(readEvents(harness)).toEqual([{ type: "language-changed", text: "Language: English." }]);
 	});
@@ -109,12 +110,12 @@ describe("rig language", () => {
 		const same = await run(harness, ["language", "en"]);
 
 		expect(same.code).toBe(SUCCESS_EXIT_CODE);
-		expect(same.output).toEqual(["Language: English."]);
+		expect(same.output).toEqual(['{"language":"en","changed":false}']);
 		expect(readEvents(harness)).toEqual([]);
 		expect(harness.fs.files.get(STATE_PATH)).toBe(before);
 	});
 
-	test("--json prints exactly the language object and nothing else", async () => {
+	test("--json is accepted and changes nothing: the language object and nothing else", async () => {
 		const harness = setup();
 
 		expect(await run(harness, ["language", "--json"])).toEqual({ code: SUCCESS_EXIT_CODE, output: ['{"language":"en"}'] });
@@ -170,99 +171,85 @@ describe("rig language", () => {
 			pollIntervalMs: 1,
 		};
 
-		const result = await run(harness, ["language", "ru"]);
+		const progress: ProgressEvent[] = [];
+		const result = await run(harness, ["language", "ru"], progress);
 
 		expect(sleeps).toBe(1);
-		expect(result.output[0]).toBe("Another rig command is running, waiting for it to finish.");
-		expect(result.output[1]).toBe("Язык: русский.");
+		expect(result.output).toEqual(['{"language":"ru","changed":true}']);
+		expect(progress).toEqual([{ code: "lock-waiting" }]);
 	});
 });
 
 describe("output follows the stored language", () => {
-	test("status text is English by default and Russian after switching, with a language line", async () => {
-		const harness = setup();
-
-		const english = await run(harness, ["status"]);
-		expect(english.output).toContain("Mode: dev");
-		expect(english.output).toContain("Hub restart pending: no");
-		expect(english.output).toContain("Language: English");
-
-		await run(harness, ["language", "ru"]);
-		const russian = await run(harness, ["status"]);
-		expect(russian.output).toContain("Режим: dev");
-		expect(russian.output).toContain("Перезапуск хаба ожидается: нет");
-		expect(russian.output).toContain("Язык: русский");
-	});
-
-	test("status --json keeps its exact shape in both languages", async () => {
+	test("status is raw data with the same shape in both languages, with or without --json", async () => {
 		const harness = setup();
 		const keys = ["schemaVersion", "mode", "versions", "releases", "features", "lastUpdate", "pendingHubRestart", "errors"];
 
-		const english = await run(harness, ["status", "--json"]);
+		const english = await run(harness, ["status"]);
+		expect((await run(harness, ["status", "--json"])).output).toEqual(english.output);
 		await run(harness, ["language", "ru"]);
-		const russian = await run(harness, ["status", "--json"]);
+		const russian = await run(harness, ["status"]);
 
 		for (const result of [english, russian]) {
+			expect(result.code).toBe(SUCCESS_EXIT_CODE);
 			expect(result.output).toHaveLength(1);
 			const parsed: unknown = JSON.parse(result.output[0] ?? "");
 			expect(typeof parsed === "object" && parsed !== null ? Object.keys(parsed) : []).toEqual(keys);
+			expect(parsed).toMatchObject({ mode: "dev", pendingHubRestart: null });
 		}
 	});
 
-	test("rig feature prints the description in the current language and --json keeps a plain string", async () => {
+	test("rig feature prints the raw list with the description in the current language, with or without --json", async () => {
 		const harness = setup();
 
 		const english = await run(harness, ["feature"]);
-		expect(english.output).toContain("demo: disabled - Feature demo");
-		expect(english.output).toContain("windows-only: disabled; not available on this platform - Feature windows-only");
-		const englishJson = await run(harness, ["feature", "--json"]);
-		expect(JSON.parse(englishJson.output[0] ?? "")).toEqual([
+		expect(english.output).toHaveLength(1);
+		expect(JSON.parse(english.output[0] ?? "")).toEqual({ features: [
 			{ name: "demo", description: "Feature demo", enabled: false, platformAllowed: true },
 			{ name: "windows-only", description: "Feature windows-only", enabled: false, platformAllowed: false },
-		]);
+		] });
+		expect((await run(harness, ["feature", "--json"])).output).toEqual(english.output);
 
 		await run(harness, ["language", "ru"]);
-		const russian = await run(harness, ["feature"]);
-		expect(russian.output).toContain("demo: выключена — Feature demo (ru)");
-		const russianJson = await run(harness, ["feature", "--json"]);
-		expect(JSON.parse(russianJson.output[0] ?? "")).toEqual([
+		const russian = await run(harness, ["feature", "--json"]);
+		expect(JSON.parse(russian.output[0] ?? "")).toEqual({ features: [
 			{ name: "demo", description: "Feature demo (ru)", enabled: false, platformAllowed: true },
 			{ name: "windows-only", description: "Feature windows-only (ru)", enabled: false, platformAllowed: false },
-		]);
+		] });
 	});
 
-	test("a feature event is written and printed in the stored language", async () => {
+	test("a feature change prints raw data in both languages and writes its event in the stored language", async () => {
 		const english = setup();
 		const englishRun = await run(english, ["feature", "demo", "enable"]);
-		expect(englishRun.output).toContain("Feature demo enabled.");
+		expect(englishRun.output).toEqual(['{"feature":"demo","enabled":true}']);
 		expect(readEvents(english).map((event) => event.text)).toContain("Feature demo enabled.");
 
 		const russian = setup("ru");
 		const russianRun = await run(russian, ["feature", "demo", "enable"]);
-		expect(russianRun.output).toContain("Фича demo включена.");
-		expect(readEvents(russian).map((event) => event.text)).toContain("Фича demo включена.");
+		expect(russianRun.output).toEqual(['{"feature":"demo","enabled":true}']);
+		expect(readEvents(russian).map((event) => event.text)).toContain("\u0424\u0438\u0447\u0430 demo \u0432\u043a\u043b\u044e\u0447\u0435\u043d\u0430.");
 	});
 
 	test("the update command reports its dev-mode failure in the stored language", async () => {
 		const english = setup();
 		const englishRun = await run(english, ["update"]);
 		expect(englishRun.code).not.toBe(SUCCESS_EXIT_CODE);
-		expect(englishRun.output).toEqual([failure("command-failed", messagesFor("en").update.devUnavailable())]);
+		expect(englishRun.output).toEqual([failure("update-failed", messagesFor("en").update.devUnavailable())]);
 
 		const russian = setup("ru");
 		const russianRun = await run(russian, ["update"]);
-		expect(russianRun.output).toEqual([failure("command-failed", messagesFor("ru").update.devUnavailable())]);
+		expect(russianRun.output).toEqual([failure("update-failed", messagesFor("ru").update.devUnavailable())]);
 		expect(messagesFor("ru").update.devUnavailable()).not.toBe(messagesFor("en").update.devUnavailable());
 	});
 
 	test("errors are printed in the stored language", async () => {
 		const english = setup();
 		const englishRun = await run(english, ["feature", "missing", "enable"]);
-		expect(englishRun.output).toEqual([failure("command-failed", messagesFor("en").feature.unknown("missing"))]);
+		expect(englishRun.output).toEqual([failure("unknown-feature", messagesFor("en").feature.unknown("missing"))]);
 
 		const russian = setup("ru");
 		const russianRun = await run(russian, ["feature", "missing", "enable"]);
-		expect(russianRun.output).toEqual([failure("command-failed", messagesFor("ru").feature.unknown("missing"))]);
+		expect(russianRun.output).toEqual([failure("unknown-feature", messagesFor("ru").feature.unknown("missing"))]);
 		expect(messagesFor("ru").feature.unknown("missing")).not.toBe(messagesFor("en").feature.unknown("missing"));
 	});
 
@@ -281,8 +268,7 @@ describe("output follows the stored language", () => {
 		const features = await run(harness, ["feature"]);
 
 		expect(status.code).toBe(SUCCESS_EXIT_CODE);
-		expect(status.output).toContain("Language: English");
-		expect(shown).toEqual({ code: SUCCESS_EXIT_CODE, output: ["Language: English."] });
+		expect(shown).toEqual({ code: SUCCESS_EXIT_CODE, output: ['{"language":"en"}'] });
 		expect(features.code).toBe(SUCCESS_EXIT_CODE);
 		expect(harness.fs.files.get(STATE_PATH)).toBe(stateBefore);
 		expect(harness.fs.files.has(EVENTS_PATH)).toBe(false);
@@ -294,7 +280,7 @@ describe("output follows the stored language", () => {
 
 		const result = await run(harness, ["language", "en"]);
 
-		expect(result).toEqual({ code: SUCCESS_EXIT_CODE, output: ["Language: English."] });
+		expect(result).toEqual({ code: SUCCESS_EXIT_CODE, output: ['{"language":"en","changed":false}'] });
 		expect(storedLanguageValue(harness)).toBe("en");
 		expect(readEvents(harness)).toEqual([]);
 	});
@@ -305,9 +291,9 @@ describe("output follows the stored language", () => {
 
 		const result = await run(harness, ["language", "ru"]);
 
-		expect(result).toEqual({ code: SUCCESS_EXIT_CODE, output: ["Язык: русский."] });
+		expect(result).toEqual({ code: SUCCESS_EXIT_CODE, output: ['{"language":"ru","changed":true}'] });
 		expect(storedLanguageValue(harness)).toBe("ru");
-		expect(readEvents(harness)).toEqual([{ type: "language-changed", text: "Язык: русский." }]);
+		expect(readEvents(harness)).toEqual([{ type: "language-changed", text: "\u042f\u0437\u044b\u043a: \u0440\u0443\u0441\u0441\u043a\u0438\u0439." }]);
 	});
 
 	test("before install (no state.json) `rig language` says rig is not installed, in the current language, and writes nothing", async () => {
@@ -320,7 +306,7 @@ describe("output follows the stored language", () => {
 				const code = await runCli(args, (line) => output.push(line), harness.runtime);
 
 				const messages = messagesFor(language);
-				expect({ args, code, output }).toEqual({ args, code: FAILURE_EXIT_CODE, output: [failure("command-failed", messages.language.notInstalled())] });
+				expect({ args, code, output }).toEqual({ args, code: FAILURE_EXIT_CODE, output: [failure("not-installed", messages.language.notInstalled())] });
 				expect(harness.fs.files.has(STATE_PATH)).toBe(false);
 				expect(harness.fs.files.has(EVENTS_PATH)).toBe(false);
 			}
@@ -335,7 +321,7 @@ describe("output follows the stored language", () => {
 
 		const code = await runCli(["language"], (line) => output.push(line), harness.runtime);
 
-		expect({ code, output }).toEqual({ code: SUCCESS_EXIT_CODE, output: ["Язык: русский."] });
+		expect({ code, output }).toEqual({ code: SUCCESS_EXIT_CODE, output: ['{"language":"ru"}'] });
 	});
 
 	test("help and a parse error are printed in the language the factory read, without building the runtime", async () => {

@@ -1,5 +1,6 @@
 import type { FeatureManifest } from "../feature.js";
 import type { Messages } from "../messages.js";
+import type { ApiResult } from "../output.js";
 import type { Result } from "../result.js";
 import type { RigState } from "../state.js";
 import type { RuntimePorts } from "../ports.js";
@@ -11,6 +12,7 @@ import { resolvePlaceholders } from "../placeholders.js";
 import { resolveHookPrograms, resolvedHookCommand } from "../hook-programs.js";
 import { mergeSettings } from "../settings/merge-settings.js";
 import { messagesFor } from "../messages.js";
+import { apiFail, apiOk } from "../output.js";
 import { err, errorText, ok } from "../result.js";
 import { PROCESS_SUCCESS_EXIT_CODE } from "../ports.js";
 import { checkPrograms } from "./programs.js";
@@ -54,11 +56,21 @@ const shellInvocation = (shell: string, platform: RuntimePorts["platform"], bash
 // `environmentProblems` are failures to ask the environment (such as the service manager), not defects of the installed rig.
 export type RigInspection = { problems: string[]; environmentProblems: string[] };
 
-export const checkRig = async (runtime: RuntimePorts): Promise<Result<void>> => {
+// Failure codes of `rig check`: the installed rig is defective, the environment could not be asked, or the check could not start.
+export const CHECK_ERROR_FAILED = "check-failed";
+export const CHECK_ERROR_ENVIRONMENT = "check-environment";
+export const CHECK_ERROR_UNREADABLE = "check-unreadable";
+
+// A passed check has no data beyond the fact; every problem is a failure whose message lists them, one per line.
+export type CheckData = { checked: true };
+
+export const checkRig = async (runtime: RuntimePorts): Promise<ApiResult<CheckData>> => {
 	const inspection = await inspectRig(runtime);
-	if (!inspection.ok) return inspection;
-	const all = [...inspection.value.problems, ...inspection.value.environmentProblems];
-	return all.length === 0 ? ok(undefined) : err(all.join("\n"));
+	if (!inspection.ok) return apiFail(CHECK_ERROR_UNREADABLE, inspection.error);
+	const { problems, environmentProblems } = inspection.value;
+	if (problems.length > 0) return apiFail(CHECK_ERROR_FAILED, [...problems, ...environmentProblems].join("\n"));
+	if (environmentProblems.length > 0) return apiFail(CHECK_ERROR_ENVIRONMENT, environmentProblems.join("\n"));
+	return apiOk({ checked: true });
 };
 
 export const inspectRig = async (runtime: RuntimePorts): Promise<Result<RigInspection>> => {

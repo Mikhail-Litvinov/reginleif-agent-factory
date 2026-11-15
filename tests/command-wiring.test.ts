@@ -11,7 +11,7 @@ import { checkRig, inspectRig } from "../src/commands/check.js";
 import { changeFeature, listFeatureViews } from "../src/commands/feature.js";
 import { installRig } from "../src/commands/install.js";
 import { readRigState } from "../src/commands/shared.js";
-import { formatStatus, readStatus } from "../src/commands/status.js";
+import { readStatus } from "../src/commands/status.js";
 import { PROCESS_SUCCESS_EXIT_CODE } from "../src/ports.js";
 import { err, ok } from "../src/result.js";
 import {
@@ -56,7 +56,8 @@ describe("command wiring", () => {
 		const blocked = await changeFeature(harness.runtime, "telegram", "disable", () => undefined);
 		expect(blocked.ok).toBe(false);
 		if (blocked.ok) return;
-		expect(blocked.error).toContain("depends on it");
+		expect(blocked.error.code).toBe("feature-change-refused");
+		expect(blocked.error.message).toContain("depends on it");
 
 		const disabled = await changeFeature(harness.runtime, "worker", "disable", () => undefined);
 		expect(disabled.ok).toBe(true);
@@ -72,7 +73,8 @@ describe("command wiring", () => {
 		const result = await changeFeature(harness.runtime, "volunteers", "enable", () => undefined);
 		expect(result.ok).toBe(false);
 		if (result.ok) return;
-		expect(result.error).toContain("only on Windows");
+		expect(result.error.code).toBe("feature-change-refused");
+		expect(result.error.message).toContain("only on Windows");
 		expect(harness.fs.files.get(STATE_PATH)).toContain('"volunteers": false');
 		const features = await listFeatureViews(harness.runtime);
 		expect(features).toEqual({
@@ -94,19 +96,20 @@ describe("command wiring", () => {
 		}));
 		harness.fs.seed(`${HOME}/.claude/settings.json`, "{}\n");
 		harness.unavailableCommands.add("tmux");
-		const output: string[] = [];
 
-		const first = await installRig(harness.runtime, true, (line) => output.push(line));
-		const second = await installRig(harness.runtime, true, (line) => output.push(line));
+		const first = await installRig(harness.runtime, true, () => undefined);
+		const second = await installRig(harness.runtime, true, () => undefined);
 		expect(first.ok).toBe(true);
 		expect(second.ok).toBe(true);
-		expect(output.some((line) => line.includes("sudo apt-get install tmux"))).toBe(true);
+		expect(first.ok && first.value.missingPrograms).toEqual([{ name: "tmux", command: "sudo apt-get install tmux" }]);
+		expect(second.ok && second.value.missingPrograms).toEqual([{ name: "tmux", command: "sudo apt-get install tmux" }]);
+		expect(first.ok && first.value.cron).toBe("skipped");
 		expect(harness.fs.files.get(STATE_PATH)).toContain('"server-tools": true');
 
 		const checked = await checkRig(harness.runtime);
 		expect(checked.ok).toBe(false);
 		if (checked.ok) return;
-		expect(checked.error).toContain("sudo apt-get install tmux");
+		expect(checked.error.message).toContain("sudo apt-get install tmux");
 	});
 
 	test("a dev install stores the clone and hub paths with forward slashes even when the platform resolves paths with backslashes", async () => {
@@ -230,7 +233,8 @@ describe("command wiring", () => {
 		const result = await changeFeature(runtime, "telegram", "enable", () => undefined);
 		expect(result.ok).toBe(false);
 		if (result.ok) return;
-		expect(result.error).toContain("unit failed");
+		expect(result.error.code).toBe("service-not-started");
+		expect(result.error.message).toContain("unit failed");
 		expect(harness.fs.files.get(STATE_PATH)).toContain('"telegram": false');
 		expect(harness.fs.files.get(`${HOME}/.agent-rig/events.jsonl`) ?? "").not.toContain("features-changed");
 	});
@@ -269,7 +273,7 @@ describe("command wiring", () => {
 		const result = await checkRig(harness.runtime);
 		expect(result.ok).toBe(false);
 		if (result.ok) return;
-		expect(result.error).toContain(`The built rules block was not found: ${HOME}/.codex/AGENTS.md`);
+		expect(result.error.message).toContain(`The built rules block was not found: ${HOME}/.codex/AGENTS.md`);
 	});
 
 	test("check fails when settings.json does not carry an enabled feature's hook", async () => {
@@ -282,7 +286,7 @@ describe("command wiring", () => {
 		const result = await checkRig(harness.runtime);
 		expect(result.ok).toBe(false);
 		if (result.ok) return;
-		expect(result.error).toContain("The hook reflection/Stop is not recorded in settings.json.");
+		expect(result.error.message).toContain("The hook reflection/Stop is not recorded in settings.json.");
 	});
 
 	test("check fails when settings.json records an enabled feature's hook under another matcher", async () => {
@@ -295,7 +299,7 @@ describe("command wiring", () => {
 		const result = await checkRig(harness.runtime);
 		expect(result.ok).toBe(false);
 		if (result.ok) return;
-		expect(result.error).toContain("The hook reflection/Stop is not recorded in settings.json.");
+		expect(result.error.message).toContain("The hook reflection/Stop is not recorded in settings.json.");
 	});
 
 	test("a PreToolUse test event carries a tool name and a tool input so the hook logic runs", async () => {
@@ -380,7 +384,7 @@ describe("command wiring", () => {
 		const failed = await checkRig(unknown.runtime);
 		expect(failed.ok).toBe(false);
 		if (failed.ok) return;
-		expect(failed.error).toContain("zsh");
+		expect(failed.error.message).toContain("zsh");
 	});
 
 	test("a running hub is asked once and needs no restart pause", async () => {
@@ -424,7 +428,7 @@ describe("command wiring", () => {
 		const result = await checkRig(harness.runtime);
 		expect(result.ok).toBe(false);
 		if (result.ok) return;
-		expect(result.error).toContain(SERVICE_STOPPED_TEXT);
+		expect(result.error.message).toContain(SERVICE_STOPPED_TEXT);
 		expect(asked).toBe(ASKS_WHEN_STOPPED);
 		expect(harness.sleeps).toEqual([RESTART_WAIT_MS, RESTART_WAIT_MS]);
 	});
@@ -528,7 +532,7 @@ describe("command wiring", () => {
 		expect(status.value.errors.map((error) => error.text)).toEqual(["first error", "second error"]);
 	});
 
-	test("status reads each release from the manifest at the current commit and shows it beside the commit", async () => {
+	test("status reads each release from the manifest at the current commit next to the commit", async () => {
 		const harness = createMemoryRuntime();
 		seedFeature(harness.fs, REPO, baseManifest());
 		seedState(harness.fs, {});
@@ -543,12 +547,9 @@ describe("command wiring", () => {
 		if (!status.ok) return;
 		expect(status.value.versions).toEqual({ rig: "rig-commit", hub: "rig-commit" });
 		expect(status.value.releases).toEqual({ rig: "0.2.0", hub: "1.4.0" });
-		const lines = formatStatus(status.value, "en");
-		expect(lines).toContain("agent-rig: 0.2.0 (rig-commit)");
-		expect(lines).toContain("hub: 1.4.0 (rig-commit)");
 	});
 
-	test("status shows the commit alone when the manifest has no usable version", async () => {
+	test("status has a null release when the manifest has no usable version", async () => {
 		const harness = createMemoryRuntime();
 		seedFeature(harness.fs, REPO, baseManifest());
 		seedState(harness.fs, {});
@@ -558,27 +559,9 @@ describe("command wiring", () => {
 		expect(status.ok).toBe(true);
 		if (!status.ok) return;
 		expect(status.value.releases).toEqual({ rig: null, hub: null });
-		const lines = formatStatus(status.value, "en");
-		expect(lines).toContain("agent-rig: old-commit");
-		expect(lines).toContain("hub: old-commit");
 	});
 
-	test("status text says yes or no about a pending hub restart and keeps the raw value for the JSON form", async () => {
-		const harness = createMemoryRuntime();
-		seedFeature(harness.fs, REPO, baseManifest());
-		seedState(harness.fs, {});
-		const status = await readStatus(harness.runtime);
-		expect(status.ok).toBe(true);
-		if (!status.ok) return;
-		const raw = '{"hubCommit":"abc"}';
-
-		expect(formatStatus(status.value, "en")).toContain("Hub restart pending: no");
-		const waiting = formatStatus({ ...status.value, pendingHubRestart: raw }, "en");
-		expect(waiting).toContain("Hub restart pending: yes");
-		expect(waiting.join("\n")).not.toContain(raw);
-	});
-
-	test("status says the version is unknown when git cannot name the commit", async () => {
+	test("status has null versions when git cannot name the commit", async () => {
 		const harness = createMemoryRuntime();
 		seedFeature(harness.fs, REPO, baseManifest());
 		seedState(harness.fs, {});
@@ -588,7 +571,7 @@ describe("command wiring", () => {
 		expect(status.ok).toBe(true);
 		if (!status.ok) return;
 		expect(status.value.releases).toEqual({ rig: null, hub: null });
-		expect(formatStatus(status.value, "en")).toContain("agent-rig: unknown");
+		expect(status.value.versions).toEqual({ rig: null, hub: null });
 	});
 });
 

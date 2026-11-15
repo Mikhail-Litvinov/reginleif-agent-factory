@@ -1,13 +1,17 @@
+import type { PluginChanges } from "../apply.js";
 import type { FeatureManifest } from "../feature.js";
+import type { ApiResult, ProgressEvent } from "../output.js";
 import type { RigState } from "../state.js";
 import type { Result } from "../result.js";
 import type { RuntimePorts } from "../ports.js";
+import type { MissingSystemProgram } from "./programs.js";
 
 import { applyRig } from "../apply.js";
 import { toSlashPath } from "../file-system.js";
 import { loadFeatures } from "../feature-graph.js";
 import { buildCronEntries, mergeCronEntries } from "../update/cron.js";
 import { messagesFor } from "../messages.js";
+import { apiFail, apiOk, PROGRESS_CODE_LOCK_WAITING } from "../output.js";
 import { parseState } from "../state.js";
 import { err, errorText, ok } from "../result.js";
 import { PROCESS_SUCCESS_EXIT_CODE } from "../ports.js";
@@ -22,12 +26,37 @@ const CRON_INSTALL_COMMAND = "sudo apt-get install cron";
 const CRON_LIST_LOCALE = "C";
 const UPDATE_LOG_PATH = ".agent-rig/update.log";
 
+// Failure code of `rig install`; the message is the text of whatever step failed.
+export const INSTALL_ERROR_FAILED = "install-failed";
+
+// What the crontab step did: `skipped` on a dev install, `unchanged` when the entries were already there.
+export type CronOutcome = "skipped" | "unchanged" | "updated";
+
+// What install did. `missingPrograms` are system packages the user must install (name and the command that does it).
+export type InstallData = {
+	mode: RigState["mode"];
+	paths: { repo: string; hub: string };
+	enabledFeatures: string[];
+	missingPrograms: MissingSystemProgram[];
+	changedFiles: string[];
+	pluginChanges: PluginChanges;
+	cron: CronOutcome;
+};
+
 export const installRig = async (
 	runtime: RuntimePorts,
 	dev: boolean,
-	writeLine: (line: string) => void,
-): Promise<Result<void>> => withRigLock(runtime, writeLine, async () => {
-	const messages = messagesFor(runtime.language);
+	writeProgress: (event: ProgressEvent) => void,
+): Promise<ApiResult<InstallData>> => {
+	const result = await installLocked(runtime, dev, writeProgress);
+	return result.ok ? apiOk(result.value) : apiFail(INSTALL_ERROR_FAILED, result.error);
+};
+
+const installLocked = (
+	runtime: RuntimePorts,
+	dev: boolean,
+	writeProgress: (event: ProgressEvent) => void,
+): Promise<Result<InstallData>> => withRigLock(runtime, () => writeProgress({ code: PROGRESS_CODE_LOCK_WAITING }), async () => {
 	const paths = dev
 		? await resolveDevPaths(runtime)
 		: ok({ repo: pathJoin(runtime.home, SERVER_REPO_PATH), hub: pathJoin(runtime.home, SERVER_HUB_PATH) });
@@ -51,17 +80,21 @@ export const installRig = async (
 	const enabled = enabledNames(initialized, loaded.value);
 	const programs = await installMissingPrograms(runtime, loaded.value, new Set(enabled));
 	if (!programs.ok) return programs;
-	for (const missing of programs.value) writeLine(messages.programs.installPackage(missing.name, missing.command));
 	const applied = await applyRig(runtime, { state: initialized, mode: "install" });
 	if (!applied.ok) return applied;
 	const shim = await installShim(runtime, paths.value.repo);
 	if (!shim.ok) return shim;
-	if (!dev) {
-		const cron = await installCron(runtime, paths.value.repo);
-		if (!cron.ok) return cron;
-	}
-	writeLine(messages.install.done(dev));
-	return ok(undefined);
+	const cron = dev ? ok<CronOutcome>("skipped") : await installCron(runtime, paths.value.repo);
+	if (!cron.ok) return cron;
+	return ok({
+		mode: initialized.mode,
+		paths: paths.value,
+		enabledFeatures: enabled,
+		missingPrograms: programs.value,
+		changedFiles: applied.value.changedFiles,
+		pluginChanges: applied.value.pluginChanges,
+		cron: cron.value,
+	});
 });
 
 const resolveDevPaths = async (runtime: RuntimePorts): Promise<Result<{ repo: string; hub: string }>> => {
@@ -104,7 +137,7 @@ const installShim = async (runtime: RuntimePorts, repoPath: string): Promise<Res
 	return runtime.writeExecutable(pathJoin(binPath, "rig"), content);
 };
 
-const installCron = async (runtime: RuntimePorts, repoPath: string): Promise<Result<void>> => {
+const installCron = async (runtime: RuntimePorts, repoPath: string): Promise<Result<CronOutcome>> => {
 	const messages = messagesFor(runtime.language);
 	if (!await runtime.process.isAvailable("crontab")) {
 		return err(messages.install.crontabMissing(CRON_INSTALL_COMMAND));
@@ -123,10 +156,10 @@ const installCron = async (runtime: RuntimePorts, repoPath: string): Promise<Res
 	}
 	const existing = listed.value.exitCode === PROCESS_SUCCESS_EXIT_CODE ? listed.value.stdout : "";
 	const merged = mergeCronEntries(existing, entries.value);
-	if (merged === existing) return ok(undefined);
+	if (merged === existing) return ok("unchanged");
 	const updated = await runtime.process.run("crontab", ["-"], { input: merged });
 	return updated.ok && updated.value.exitCode === PROCESS_SUCCESS_EXIT_CODE
-		? ok(undefined)
+		? ok("updated")
 		: err(updated.ok ? messages.install.crontabWriteFailed(updated.value.stderr || updated.value.stdout) : updated.error);
 };
 

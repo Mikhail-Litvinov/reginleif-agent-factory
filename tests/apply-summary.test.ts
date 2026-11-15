@@ -1,3 +1,5 @@
+import type { PluginChanges } from "../src/apply.js";
+import type { ApplyData } from "../src/commands/apply.js";
 import type { RigState } from "../src/state.js";
 import type { MemoryRuntimeHarness } from "./fakes/memory-runtime.js";
 
@@ -18,11 +20,12 @@ const RIG_PLUGIN_PATH = `${REPO}/plugins/window-demo`;
 const MARKETPLACE = "demo-market";
 const STALE_MARKETPLACE = "old-market";
 const PROCESS_SUCCESS_EXIT_CODE = 0;
-const UP_TO_DATE_LINE = "The rig configuration is already up to date.";
+const NO_PLUGIN_CHANGES: PluginChanges = { installed: [], uninstalled: [], marketplacesAdded: [], marketplacesRemoved: [] };
+const UP_TO_DATE: ApplyData = { changedFiles: [], pluginChanges: NO_PLUGIN_CHANGES };
 
 type Scenario = {
 	harness: MemoryRuntimeHarness;
-	run: () => Promise<string[]>;
+	run: () => Promise<ApplyData>;
 };
 
 const seedDemo = (harness: MemoryRuntimeHarness, plugins: string[]): void => {
@@ -49,10 +52,9 @@ const createScenario = async (): Promise<Scenario> => {
 	return {
 		harness,
 		run: async () => {
-			const lines: string[] = [];
-			const result = await applyCommand(harness.runtime, (line) => lines.push(line));
-			if (!result.ok) throw new Error(result.error);
-			return lines;
+			const result = await applyCommand(harness.runtime, () => undefined);
+			if (!result.ok) throw new Error(result.error.message);
+			return result.value;
 		},
 	};
 };
@@ -71,21 +73,20 @@ const reportMarketplaces = (harness: MemoryRuntimeHarness, entries: Array<{ name
 describe("the apply summary counts every change apply made", () => {
 	test("a truly no-op apply reports up to date", async () => {
 		const scenario = await createScenario();
-		expect(await scenario.run()).toEqual([UP_TO_DATE_LINE]);
+		expect(await scenario.run()).toEqual(UP_TO_DATE);
 	});
 
 	test("an apply whose only change is a plugin install and a marketplace add does not report up to date", async () => {
 		const scenario = await createScenario();
 		seedDemo(scenario.harness, [RIG_PLUGIN]);
 
-		const lines = await scenario.run();
+		const data = await scenario.run();
 
 		expect([...scenario.harness.installedPlugins]).toEqual([`window-demo@${MARKETPLACE}`]);
-		expect(lines).not.toContain(UP_TO_DATE_LINE);
-		expect(lines).toHaveLength(1);
+		expect(data).toEqual({ changedFiles: [], pluginChanges: { ...NO_PLUGIN_CHANGES, installed: [`window-demo@${MARKETPLACE}`], marketplacesAdded: [MARKETPLACE] } });
 		// The fake claude list does not remember added marketplaces, so the second run is told about it.
 		reportMarketplaces(scenario.harness, [{ name: MARKETPLACE }]);
-		expect(await scenario.run()).toEqual([UP_TO_DATE_LINE]);
+		expect(await scenario.run()).toEqual(UP_TO_DATE);
 	});
 
 	test("an apply whose only change is a marketplace cleanup does not report up to date", async () => {
@@ -94,11 +95,10 @@ describe("the apply summary counts every change apply made", () => {
 		await scenario.run();
 		reportMarketplaces(scenario.harness, [{ name: MARKETPLACE }, { name: STALE_MARKETPLACE, path: RIG_PLUGIN_PATH }]);
 
-		const lines = await scenario.run();
+		const data = await scenario.run();
 
 		expect(scenario.harness.processCalls.some((call) => call.args.join(" ") === `plugin marketplace remove ${STALE_MARKETPLACE}`)).toBe(true);
-		expect(lines).not.toContain(UP_TO_DATE_LINE);
-		expect(lines).toHaveLength(1);
+		expect(data).toEqual({ changedFiles: [], pluginChanges: { ...NO_PLUGIN_CHANGES, marketplacesRemoved: [STALE_MARKETPLACE] } });
 	});
 
 	test("an apply whose only change is a written asset does not report up to date", async () => {
@@ -106,11 +106,11 @@ describe("the apply summary counts every change apply made", () => {
 		seedFeature(scenario.harness.fs, REPO, featureManifest("demo", { assets: [{ sourcePath: "assets/note.md", targetPath: "notes/note.md" }] }));
 		scenario.harness.fs.seed(`${REPO}/features/demo/assets/note.md`, "Note");
 
-		const lines = await scenario.run();
+		const data = await scenario.run();
 
 		expect(scenario.harness.fs.files.get(`${HOME}/.claude/notes/note.md`)).toBe("Note");
-		expect(lines).toEqual(["Files updated: 1."]);
-		expect(await scenario.run()).toEqual([UP_TO_DATE_LINE]);
+		expect(data).toEqual({ changedFiles: [`${HOME}/.claude/notes/note.md`], pluginChanges: NO_PLUGIN_CHANGES });
+		expect(await scenario.run()).toEqual(UP_TO_DATE);
 	});
 
 	test("an apply whose only change is a plugin uninstall does not report up to date", async () => {
@@ -118,9 +118,9 @@ describe("the apply summary counts every change apply made", () => {
 		seedDemo(scenario.harness, [RIG_PLUGIN]);
 		await scenario.run();
 		seedDemo(scenario.harness, []);
-		const lines = await scenario.run();
+		const data = await scenario.run();
 
 		expect([...scenario.harness.installedPlugins]).toEqual([]);
-		expect(lines).not.toContain(UP_TO_DATE_LINE);
+		expect(data.pluginChanges.uninstalled).toEqual([`window-demo@${MARKETPLACE}`]);
 	});
 });
