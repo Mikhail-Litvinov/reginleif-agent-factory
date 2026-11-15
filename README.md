@@ -77,7 +77,7 @@ Everything else in these files rig does not touch and keeps on every apply and u
 
 Raise the version in `package.json` in the same commit that changes what the user sees.
 
-If the clone is in `.worktrees/`, the project root is the directory above `.worktrees/`. Tests run with `bun test`, types are checked by `bun run typecheck`. Tests in Docker are run by `scripts/test-docker.sh`.
+If the clone is in `.worktrees/`, the project root is the directory above `.worktrees/`. Tests run with `bun test`, types are checked by `bun run typecheck`. Tests in Docker are run by `scripts/test-docker.sh`. The live check of `rig session rename`, `compact` and `cleanup` against a real headless Claude Code session (it calls a model and costs a few cents) is skipped by `bun test` and runs only as `RIG_LIVE=1 bun test tests/live`.
 
 ## Scripts
 
