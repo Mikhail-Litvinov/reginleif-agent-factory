@@ -21,6 +21,10 @@ describe("CLI", () => {
 		});
 		expect(parseCommand(["update", "--pending"])).toEqual({ ok: true, command: { name: "update", pending: true } });
 		expect(parseCommand(["unknown"]).ok).toBe(false);
+		expect(parseCommand(["info", "--session", "abc"])).toEqual({ ok: true, command: { name: "info", session: "abc" } });
+		expect(parseCommand(["info"]).ok).toBe(false);
+		expect(parseCommand(["info", "--session"]).ok).toBe(false);
+		expect(parseCommand(["info", "--session", "a", "b"]).ok).toBe(false);
 	});
 
 	test("parses the internal update-step command and rejects malformed forms", () => {

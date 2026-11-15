@@ -132,16 +132,24 @@ def build_parser():
     query.add_argument("category", choices=CATEGORIES)
     query.add_argument("--config-dir", default="",
                        help="the CLAUDE_CONFIG_DIR of the session; empty or omitted is the main login")
+    account = commands.add_parser("account", help="print the cswap account of a Claude config dir")
+    account.add_argument("--config-dir", default="",
+                         help="the CLAUDE_CONFIG_DIR of the session; empty or omitted is the main login")
     return parser
 
 
 def main(argv=None):
     """`check <category> --config-dir <dir>`: one line of JSON {"allowed", "reason"}, exit 0 in both cases.
+    `account --config-dir <dir>`: one line of JSON {"present", "account"} (account is null when unknown).
 
     The process's own CLAUDE_CONFIG_DIR is ignored: --config-dir alone names the session's config dir.
     """
     args = build_parser().parse_args(argv)
     env = {"CLAUDE_CONFIG_DIR": args.config_dir} if args.config_dir else {}
+    if args.command == "account":
+        present, number = current_account(env)
+        print(json.dumps({"present": present, "account": number}, ensure_ascii=True))
+        return 0
     allowed, reason = check(args.category, env)
     print(json.dumps({"allowed": allowed, "reason": reason}, ensure_ascii=True))
     return 0

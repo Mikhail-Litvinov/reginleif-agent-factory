@@ -58,6 +58,39 @@ Rejected without running: a body that is not JSON, not an object, with a differe
 that is not an object get an error response. A file whose name is not `<safe id>.json` is ignored entirely: no
 response, no removal.
 
+## `rig info --session <id>`
+
+Prints the finished text of the hub's `/info` for one session, in rig's language; the hub shows it unchanged. One
+`writeLine` call, blocks separated by one empty line, only the headers in **bold**:
+
+```
+**Claude limits** (data 10 min old)
+5 hours: 25.5% (resets in 1 h)
+Week: 41% (resets in 3 d)
+
+**Codex limits** (data 1 h old)
+5 hours: 12% (resets in 30 min)
+Week: 0%
+
+**Volunteer limits** (data 6 min old)
+Day: 42% (resets in 1 h 54 min)
+OpenRouter: 3/10
+
+**Context**
+120/300k
+```
+
+- Claude limits: the freshest `usage.json` `rateLimits` among the sessions whose config dir has the same cswap account
+  (`account-allowlist.py account --config-dir <dir>`). An account that cannot be determined means only the session's own.
+- Codex block: only when the feature `codex` is on in rig state and `account-allowlist.py check codex --config-dir <dir>`
+  allows it. Limits come from the newest `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` with a rate-limit event; a window
+  whose reset has passed reads 0%.
+- Volunteer block: the same gate with the feature `volunteers`; data from `volunteer-models.py limits --json`.
+- Context: this session's `usage.json` context (`120/300k`, `≈` when estimated, `1.5M` without auto-compact).
+- "(data N old)" appears when the data is 5 minutes old or more.
+- A block without data is one line: `<Name>: no data, <reason>`. A failing source never fails the command.
+- Exit codes: 0 on success (also with no-data blocks); 1 for a malformed session id, an unknown session or wrong usage.
+
 ## Reload
 
 The module keeps no state on disk besides the files above. Its own variables start over when the engine reloads the

@@ -40,6 +40,7 @@ Default values apply only at the first install. New features that appear in upda
 - `rig status` shows the mode, versions, the state of features, the last update and errors; `rig status --json` does the same in JSON.
 - `rig check` verifies that the install is intact and the hooks run.
 - `rig language` shows the current language; `rig language en|ru` switches rig and the Telegram bot between English and Russian. English is the default.
+- `rig info --session <id>` prints the finished text of the Telegram bot's `/info` for that session: Claude limits (the freshest reading among sessions of the same account), Codex and volunteer limits when those features are on and the account is allowed, and the context. The text is in rig's language.
 - `rig help` prints the list of commands.
 
 ## Updates and rollback

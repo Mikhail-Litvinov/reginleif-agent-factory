@@ -7,6 +7,7 @@ import type { UpdateStep } from "./commands/update.js";
 import { applyCommand } from "./commands/apply.js";
 import { checkRig } from "./commands/check.js";
 import { changeFeature, listFeatureViews } from "./commands/feature.js";
+import { infoCommand } from "./commands/info.js";
 import { installRig } from "./commands/install.js";
 import { setLanguage, showLanguage } from "./commands/language.js";
 import { createRealRuntime, readRealLanguage } from "./commands/real-runtime.js";
@@ -29,6 +30,7 @@ export type Command =
 	| { name: "status"; json: boolean }
 	| { name: "check" }
 	| { name: "language"; value: Language | null; json: boolean }
+	| { name: "info"; session: string }
 	| { name: "update-step"; step: UpdateStep; owner: LockOwner };
 // A parse error is a function of the catalog: the language is known only after the runtime is built, and parsing stays pure.
 export type ParsedCommand = { ok: true; command: Command } | { ok: false; error: (messages: Messages) => string };
@@ -48,6 +50,9 @@ export const parseCommand = (args: string[]): ParsedCommand => {
 	if (head === "status" && (rest.length === 0 || (rest.length === 1 && rest[0] === "--json"))) return { ok: true, command: { name: "status", json: rest.includes("--json") } };
 	if (head === "check" && rest.length === 0) return { ok: true, command: { name: "check" } };
 	if (head === "language") return parseLanguage(rest);
+	if (head === "info") return rest.length === 2 && rest[0] === "--session"
+		? { ok: true, command: { name: "info", session: rest[1] } }
+		: { ok: false, error: (messages) => messages.info.usage() };
 	if (head === "update-step") return parseUpdateStep(rest) ?? { ok: false, error: (messages) => messages.cli.usageUpdateStep() };
 	return { ok: false, error: (messages) => messages.cli.unknownCommand(args.join(" ")) };
 };
@@ -140,6 +145,7 @@ const execute = async (command: Command, runtime: RuntimePorts, writeLine: (line
 			: await setLanguage(runtime, command.value, command.json, writeLine);
 		return report(result, messages, writeLine);
 	}
+	if (command.name === "info") return report(await infoCommand(runtime, command.session, writeLine), messages, writeLine);
 	if (command.name === "update-step") return runUpdateStep(runtime, command.step, command.owner, writeLine);
 	const checked = await checkRig(runtime);
 	if (!checked.ok) return report(checked, messages, writeLine);

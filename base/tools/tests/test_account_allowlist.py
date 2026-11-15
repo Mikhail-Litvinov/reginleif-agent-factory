@@ -303,5 +303,38 @@ class CliTest(unittest.TestCase):
             self.assertEqual(proc.stdout, "", argv)
 
 
+class AccountCliTest(CliTest):
+    """`account --config-dir <dir>` prints {"present", "account"} as one JSON line."""
+
+    def account(self, home, config_dir=None):
+        argv = ["account"]
+        if config_dir is not None:
+            argv += ["--config-dir", config_dir]
+        proc = self.run_cli(home, argv)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(len(proc.stdout.splitlines()), 1, proc.stdout)
+        return json.loads(proc.stdout)
+
+    def test_side_profile_prints_its_number(self):
+        home = Home(self)
+        home.sequence()
+        self.assertEqual(self.account(home, home.side_dir("2-x")), {"present": True, "account": 2})
+
+    def test_empty_or_omitted_config_dir_is_the_active_main_login(self):
+        home = Home(self)
+        home.sequence(active=3)
+        self.assertEqual(self.account(home, ""), {"present": True, "account": 3})
+        self.assertEqual(self.account(home), {"present": True, "account": 3})
+
+    def test_undeterminable_dir_prints_null_account(self):
+        home = Home(self)
+        home.sequence()
+        self.assertEqual(self.account(home, home.side_dir("odd")), {"present": True, "account": None})
+
+    def test_no_cswap_prints_not_present(self):
+        home = Home(self)
+        self.assertEqual(self.account(home, ""), {"present": False, "account": None})
+
+
 if __name__ == "__main__":
     unittest.main()
