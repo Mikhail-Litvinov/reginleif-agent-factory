@@ -103,7 +103,7 @@ const create = (messages: Messages): Result<Job> => {
 				}
 				return ok(new DataView(accounting.buffer).getUint32(ACTIVE_PROCESSES_OFFSET, true));
 			} catch (error) {
-				return err(errorText(error));
+				return err(messages.failure.jobObjectFailed(errorText(error)));
 			}
 		};
 		// The ids of the job's processes, or an error. A buffer too small answers ERROR_MORE_DATA with the real count in its header.
@@ -135,11 +135,11 @@ const create = (messages: Messages): Result<Job> => {
 				}
 				return ok(undefined);
 			} catch (error) {
-				return err(errorText(error));
+				return err(messages.failure.jobObjectFailed(errorText(error)));
 			}
 		};
 		return ok({ activeProcesses, terminateOthers });
 	} catch (error) {
-		return err(errorText(error));
+		return err(messages.failure.jobObjectFailed(errorText(error)));
 	}
 };

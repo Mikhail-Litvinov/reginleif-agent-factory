@@ -46,7 +46,7 @@ export const withRigLock = async <T>(
 	try {
 		result = await operation();
 	} catch (error) {
-		result = err(errorText(error));
+		result = err(messagesFor(runtime.language).failure.unexpectedFailure(errorText(error)));
 	}
 	if (keepLockForProcessExit && result.ok) return result;
 	const released = await acquired.value.release();

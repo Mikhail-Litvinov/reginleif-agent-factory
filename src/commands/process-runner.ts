@@ -44,14 +44,14 @@ export const spawnDetached = async (command: readonly string[], graceMs: number,
 				resolve(result);
 			};
 			const timer = setTimeout(() => finish(child.pid === undefined ? err(messagesFor(language).failure.missingProcessId()) : ok({ exited: false, exitCode: null, stderr: "", pid: child.pid })), graceMs);
-			child.once("error", (error) => { finish(err(error.message)); });
+			child.once("error", (error) => { finish(err(messagesFor(language).failure.processSpawnFailed(errorText(error)))); });
 			child.once("exit", (code) => {
 				let stderr = "";
 				if (!settled && code !== 0) { try { stderr = readFileSync(path, "utf8").trim().slice(0, stderrLimit); } catch { /* No stderr available. */ } }
 				finish(ok({ exited: true, exitCode: code, stderr, pid: child.pid }));
 			});
 		});
-	} catch (error) { return err(errorText(error)); }
+	} catch (error) { return err(messagesFor(language).failure.processSpawnFailed(errorText(error))); }
 };
 
 export type RunnerKind = "windows" | "posix";
@@ -179,7 +179,7 @@ export const runProcess = (
 		child.stderr.setEncoding("utf8");
 		child.stdout.on("data", (chunk: unknown) => { stdout += String(chunk); });
 		child.stderr.on("data", (chunk: unknown) => { stderr += String(chunk); });
-		child.on("error", (error) => settle(err(errorText(error))));
+		child.on("error", (error) => settle(err(messages.failure.processSpawnFailed(errorText(error)))));
 		// The killed child can report close before the killer returns, and that exit is still the timeout.
 		child.on("close", (code) => settle(timedOut ? timeoutFailure() : ok({ stdout, stderr, exitCode: code ?? PROCESS_FAILURE_EXIT_CODE })));
 		disarm = limits.timer.start(timeoutMs, () => {
@@ -194,6 +194,6 @@ export const runProcess = (
 		if (options.input === undefined) child.stdin.end();
 		else child.stdin.end(options.input);
 	} catch (error) {
-		settle(err(errorText(error)));
+		settle(err(messages.failure.processSpawnFailed(errorText(error))));
 	}
 });

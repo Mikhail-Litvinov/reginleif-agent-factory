@@ -1,6 +1,7 @@
+import type { FileContent } from "../content-hash.js";
+import type { Messages } from "../messages.js";
 import type { Result } from "../result.js";
 import type { FileSystem } from "./installer.js";
-import type { FileContent } from "../content-hash.js";
 
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
@@ -16,14 +17,14 @@ const ANY_EXECUTE_BITS = 0o111;
 const NO_BITS = 0;
 
 // Files are moved as bytes with their exec bit: a skill may carry a picture, a font or a script.
-export function createNodeAssetFileSystem(): FileSystem {
+export function createNodeAssetFileSystem(messages: Messages): FileSystem {
   return {
     readFile: async (path) => {
       try {
         const [bytes, stat] = await Promise.all([fs.readFile(path), fs.stat(path)]);
         return ok({ bytes: new Uint8Array(bytes), executable: (stat.mode & ANY_EXECUTE_BITS) !== NO_BITS });
       } catch (error) {
-        return err(isMissing(error) ? "not-found" : errorText(error));
+        return err(isMissing(error) ? "not-found" : messages.failure.readFailed(path, errorText(error)));
       }
     },
     listFiles: async (path) => {
@@ -32,16 +33,16 @@ export function createNodeAssetFileSystem(): FileSystem {
         await collectFiles(path, files);
         return ok(files);
       } catch (error) {
-        return err(errorText(error));
+        return err(messages.failure.listDirectoryFailed(path, errorText(error)));
       }
     },
-    writeFileAtomic: (path, content) => writeBytesAtomic(path, content),
+    writeFileAtomic: (path, content) => writeBytesAtomic(path, content, messages),
     removeFile: async (path) => {
       try {
         await fs.unlink(path);
         return ok(undefined);
       } catch (error) {
-        return err(errorText(error));
+        return err(messages.failure.removeFailed(path, errorText(error)));
       }
     },
     makeDirectory: async (path) => {
@@ -49,20 +50,20 @@ export function createNodeAssetFileSystem(): FileSystem {
         await fs.mkdir(path, { recursive: true });
         return ok(undefined);
       } catch (error) {
-        return err(errorText(error));
+        return err(messages.failure.createFailed(path, errorText(error)));
       }
     },
     realPath: async (path) => {
       try {
         return ok(await fs.realpath(path));
       } catch (error) {
-        return err(isMissing(error) ? "not-found" : errorText(error));
+        return err(isMissing(error) ? "not-found" : messages.failure.pathResolveFailed(path, errorText(error)));
       }
     },
   };
 }
 
-async function writeBytesAtomic(path: string, content: FileContent): Promise<Result<void>> {
+async function writeBytesAtomic(path: string, content: FileContent, messages: Messages): Promise<Result<void>> {
   const temporary = join(dirname(path), `${path.split(/[\\/]/).pop() ?? "file"}.tmp-${randomUUID()}`);
   try {
     await fs.mkdir(dirname(path), { recursive: true });
@@ -73,7 +74,7 @@ async function writeBytesAtomic(path: string, content: FileContent): Promise<Res
     return ok(undefined);
   } catch (error) {
     await fs.rm(temporary, { force: true }).catch(() => undefined);
-    return err(errorText(error));
+    return err(messages.failure.atomicWriteFailed(errorText(error)));
   }
 }
 

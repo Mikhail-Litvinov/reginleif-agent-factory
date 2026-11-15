@@ -31,7 +31,7 @@ import {
 	renderSuccess,
 	SUCCESS_EXIT_CODE,
 } from "./output.js";
-import { ok } from "./result.js";
+import { errorText, ok } from "./result.js";
 
 const UPDATE_STEP_ARGUMENT_COUNT = 3;
 // The syntax of every command, as `rig help` returns it. Raw data: no language, a client formats it.
@@ -217,7 +217,7 @@ export const runCli = async (
 		writeLine(renderSuccess(outcome.result.value));
 		return SUCCESS_EXIT_CODE;
 	} catch (error) {
-		return reportFailure(command, runtime.language, { code: ERROR_CODE_INTERNAL, message: error instanceof Error ? error.message : String(error) }, writeLine);
+		return reportFailure(command, runtime.language, { code: ERROR_CODE_INTERNAL, message: messagesFor(runtime.language).failure.unexpectedFailure(errorText(error)) }, writeLine);
 	}
 };
 

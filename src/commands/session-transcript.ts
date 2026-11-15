@@ -105,6 +105,6 @@ export const cleanTranscript = async (runtime: RuntimePorts, path: string, repla
 	} catch (error) {
 		if (backupWritten) await runtime.fs.remove(backup).catch(() => undefined);
 		if (tempWritten) await runtime.fs.remove(temp).catch(() => undefined);
-		return err(errorText(error));
+		return err(messagesFor(runtime.language).session.io(errorText(error)));
 	}
 };

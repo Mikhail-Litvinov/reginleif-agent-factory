@@ -118,11 +118,11 @@ describe("hub restart on Windows", () => {
 		expect(runner.detachedCalls[0]?.hide).toBe(true);
 	});
 
-	test("a restart that fails inside the grace period reports its stderr under the catalog label", async () => {
+	test("a restart that fails inside the grace period reports its stderr in the catalogue sentence", async () => {
 		const runner = fakeRunner(ACTIVE_EXIT_CODE, "", { exited: true, exitCode: BUS_FAILURE_EXIT_CODE, stderr: BUS_ERROR });
 
 		const result = await runService(runner, "windows", "restart", source, ru);
 
-		expect(result).toEqual({ ok: false, error: `${ru.runtime.taskRestartLabel()}: ${BUS_ERROR}` });
+		expect(result).toEqual({ ok: false, error: ru.runtime.taskRestartFailed(BUS_ERROR) });
 	});
 });

@@ -127,7 +127,7 @@ const spawnLaunch = async (runtime: RuntimePorts, command: string[]): Promise<Ap
 			// A concurrent launch needs its stderr until its grace period has elapsed.
 			if (!entry.directory && match && now - Number(match[1]) >= LAUNCH_EXIT_GRACE_MS) await runtime.fs.remove(joinPath(directory, entry.name)).catch(() => undefined);
 		}
-	} catch (error) { return apiFail(LAUNCH_FAILED, errorText(error)); }
+	} catch (error) { return apiFail(LAUNCH_FAILED, messagesFor(runtime.language).session.io(errorText(error))); }
 	const result = await runtime.process.spawnDetached(command, LAUNCH_EXIT_GRACE_MS, STDERR_LIMIT, path);
 	// On Windows the child may still hold the file; the next launch retries it.
 	await runtime.fs.remove(path).catch(() => undefined);

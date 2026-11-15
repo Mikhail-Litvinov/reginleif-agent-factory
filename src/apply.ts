@@ -167,7 +167,7 @@ export const applyRig = async (runtime: RuntimePorts, request: ApplyRequest): Pr
 				await runtime.fs.rename(from, to);
 				return ok(undefined);
 			} catch (error) {
-				return err(errorText(error));
+				return err(messages.failure.renameFailed(from, to, errorText(error)));
 			}
 		},
 		clock: () => today,

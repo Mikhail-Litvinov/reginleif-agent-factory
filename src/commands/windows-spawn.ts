@@ -6,7 +6,7 @@ import { readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dlopen, FFIType, ptr } from "bun:ffi";
 
-import { isLanguage, messagesFor } from "../messages.js";
+import { DEFAULT_LANGUAGE, isLanguage, messagesFor } from "../messages.js";
 import { err, errorText, ok } from "../result.js";
 
 // Detached processes on Windows that outlive the job of whoever starts them.
@@ -153,9 +153,9 @@ const openInheritable = (api: Kernel, path: string, access: number, disposition:
 const startOutsideJob = (request: DetachedRequest): OutsideJobStart => {
 	const handles: bigint[] = [];
 	let api: Kernel | undefined;
+	const messages = messagesFor(request.language);
 	try {
 		const opened = kernel();
-		const messages = messagesFor(request.language);
 		api = opened;
 		const stdin = openInheritable(opened, NUL_DEVICE, GENERIC_READ, OPEN_EXISTING, messages);
 		if (!stdin.ok) return { kind: "failed", error: stdin.error };
@@ -168,7 +168,7 @@ const startOutsideJob = (request: DetachedRequest): OutsideJobStart => {
 		handles.push(stderr.value);
 		return createProcess(opened, request, handles);
 	} catch (error) {
-		return { kind: "failed", error: errorText(error) };
+		return { kind: "failed", error: messages.failure.processSpawnFailed(errorText(error)) };
 	} finally {
 		if (api !== undefined) for (const handle of handles) api.symbols.CloseHandle(handle);
 	}
@@ -284,7 +284,7 @@ const spawnThroughBroker = async (request: DetachedRequest): Promise<Result<Deta
 			await sleep(BROKER_POLL_MS);
 		}
 	} catch (error) {
-		return err(errorText(error));
+		return err(messages.failure.brokerFailed(errorText(error)));
 	} finally {
 		cleanup();
 	}
@@ -299,7 +299,7 @@ const runBrokerLauncher = (brokerCommand: string, messages: Messages): Promise<R
 		stdio: ["ignore", "ignore", "pipe"],
 	});
 	child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString("utf8"); });
-	child.once("error", (error) => { resolve(err(error.message)); });
+	child.once("error", (error) => { resolve(err(messages.failure.brokerLaunchFailed(errorText(error)))); });
 	child.once("close", (code) => { resolve(code === 0 ? ok(undefined) : err(stderr.trim() || messages.failure.powershellExited(code))); });
 });
 
@@ -313,13 +313,15 @@ const parseBrokerResult = (text: string, messages: Messages): Result<DetachedOut
 		if (typeof parsed === "object" && parsed !== null && "outcome" in parsed && isOutcome(parsed.outcome)) return ok(parsed.outcome);
 		return err(messages.failure.brokerInvalidResult());
 	} catch (error) {
-		return err(errorText(error));
+		return err(messages.failure.brokerResultUnreadable(errorText(error)));
 	}
 };
 
 /** The broker process: reads its spec, starts the real process outside every job, writes the outcome, exits. */
 export const runBroker = async (specPath: string): Promise<number> => {
 	let resultPath = "";
+	// The broker's own failures are reported in the request's language once the request has been validated.
+	let language: Language = DEFAULT_LANGUAGE;
 	try {
 		const spec: unknown = JSON.parse(readFileSync(specPath, "utf8"));
 		rmSync(specPath, { force: true });
@@ -327,6 +329,7 @@ export const runBroker = async (specPath: string): Promise<number> => {
 		resultPath = spec.resultPath;
 		const request = spec.request;
 		if (!isRequest(request)) return 1;
+		language = request.language;
 		const started = startOutsideJob(request);
 		let result: { outcome: DetachedOutcome } | { error: string };
 		if (started.kind === "started") {
@@ -340,7 +343,7 @@ export const runBroker = async (specPath: string): Promise<number> => {
 		renameSync(temporary, resultPath);
 		return 0;
 	} catch (error) {
-		if (resultPath !== "") { try { writeFileSync(`${resultPath}${BROKER_RESULT_TEMP_SUFFIX}`, JSON.stringify({ error: errorText(error) })); renameSync(`${resultPath}${BROKER_RESULT_TEMP_SUFFIX}`, resultPath); } catch { /* The caller times out. */ } }
+		if (resultPath !== "") { try { writeFileSync(`${resultPath}${BROKER_RESULT_TEMP_SUFFIX}`, JSON.stringify({ error: messagesFor(language).failure.unexpectedFailure(errorText(error)) })); renameSync(`${resultPath}${BROKER_RESULT_TEMP_SUFFIX}`, resultPath); } catch { /* The caller times out. */ } }
 		return 1;
 	}
 };

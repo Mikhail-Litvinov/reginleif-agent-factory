@@ -453,7 +453,7 @@ export const runExecRunner = async (r: RuntimePorts, id: string, build: ShellBui
 			const stdout: Uint8Array[] = [];
 			const command: CommandState = { result: null };
 			const settled = r.process.runStreaming(launch.value.argv, record.value.shell === "rig" ? rigHome(r) : record.value.cwd, launch.value.env, (bytes) => r.fs.appendBytes(file(r, id, "log"), bytes), launch.value.verbatimArguments ?? false, rig === null ? undefined : async (bytes) => { stdout.push(bytes.slice()); })
-				.then((value) => { command.result = value; }, (error: unknown) => { command.result = err(errorText(error)); });
+				.then((value) => { command.result = value; }, (error: unknown) => { command.result = err(messagesFor(r.language).failure.unexpectedFailure(errorText(error))); });
 			// The run is one unit: it stays running while any process of it lives, and ends with the command's own code
 			// once the last one is gone. Output keeps arriving meanwhile.
 			const supervised = await superviseRun(r, id, command, settled);
@@ -464,5 +464,5 @@ export const runExecRunner = async (r: RuntimePorts, id: string, build: ShellBui
 			const ended = await finish(end);
 			return drained.ok && ended ? 0 : 1;
 		} finally { cancel(); }
-	} catch (error) { await finish({ kind: "exit", code: null, at: r.clock.nowText(), reason: errorText(error) }); return 1; }
+	} catch (error) { await finish({ kind: "exit", code: null, at: r.clock.nowText(), reason: messagesFor(r.language).failure.unexpectedFailure(errorText(error)) }); return 1; }
 };

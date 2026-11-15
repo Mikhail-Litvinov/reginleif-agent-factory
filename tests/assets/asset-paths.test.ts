@@ -209,7 +209,7 @@ describe("the real adapter on this machine", () => {
     const target = forward(join(root, "home", ".claude", "skills", "one"));
 
     const result = await applyAssets(
-      { fs: createNodeAssetFileSystem(), now: () => DAY, messages: TEST_MESSAGES },
+      { fs: createNodeAssetFileSystem(TEST_MESSAGES), now: () => DAY, messages: TEST_MESSAGES },
       [{ ...plan([{ sourcePath: forward(source), targetPath: target }]), clonePath: forward(join(root, "clone")), homePath: forward(join(root, "home")) }],
       {},
     );
@@ -224,7 +224,7 @@ describe("the real adapter on this machine", () => {
     await mkdir(join(root, "dir", "nested"), { recursive: true });
     await writeFile(join(root, "dir", "nested", "a.txt"), "a");
 
-    const listed = await createNodeAssetFileSystem().listFiles(join(root, "dir"));
+    const listed = await createNodeAssetFileSystem(TEST_MESSAGES).listFiles(join(root, "dir"));
 
     expect(listed.ok && listed.value).toEqual([`${join(root, "dir").replaceAll("\\", "/")}/nested/a.txt`]);
   });

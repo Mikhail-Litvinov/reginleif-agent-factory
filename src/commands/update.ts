@@ -89,7 +89,7 @@ export const updateRig = async (
 	try {
 		result = await operation();
 	} catch (error) {
-		result = err(errorText(error));
+		result = err(messagesFor(runtime.language).failure.unexpectedFailure(errorText(error)));
 	}
 	const released = await acquired.value.release();
 	return finished(released.ok ? result : released);

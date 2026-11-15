@@ -246,7 +246,7 @@ const checkProjectTmp = async (runtime: RuntimePorts, state: RigState, temporary
 
 // Checks that settings.json records each expected hook with the same event, matcher, command and args.
 const missingSettingsHooks = (text: string, hooks: readonly ExpectedHook[], messages: Messages): string[] => {
-	const settings = parseJson(text);
+	const settings = parseJson(text, messages);
 	if (!settings.ok) return [messages.check.settingsNotJson(settings.error)];
 	return hooks
 		.filter((hook) => !isRecordedHook(settings.value, hook))
@@ -254,7 +254,7 @@ const missingSettingsHooks = (text: string, hooks: readonly ExpectedHook[], mess
 };
 
 const missingHookPrograms = async (runtime: RuntimePorts, text: string, messages: Messages): Promise<string[]> => {
-	const parsed = parseJson(text);
+	const parsed = parseJson(text, messages);
 	if (!parsed.ok || !isRecord(parsed.value) || !isRecord(parsed.value.hooks)) return [];
 	const paths = new Set<string>();
 	for (const groups of Object.values(parsed.value.hooks)) {
@@ -275,11 +275,11 @@ const missingHookPrograms = async (runtime: RuntimePorts, text: string, messages
 	return missing;
 };
 
-const parseJson = (text: string): Result<unknown> => {
+const parseJson = (text: string, messages: Messages): Result<unknown> => {
 	try {
 		return ok(JSON.parse(text));
 	} catch (error) {
-		return err(errorText(error));
+		return err(messages.failure.jsonParseFailed(errorText(error)));
 	}
 };
 

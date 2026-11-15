@@ -47,7 +47,7 @@ describe("real file system adapter (A8)", () => {
       files: [{ sourcePath: source, targetPath: target }],
     };
 
-    const applied = await applyAssets({ fs: createNodeAssetFileSystem(), now: () => DAY, messages: TEST_MESSAGES }, [plan], {});
+    const applied = await applyAssets({ fs: createNodeAssetFileSystem(TEST_MESSAGES), now: () => DAY, messages: TEST_MESSAGES }, [plan], {});
 
     expect(applied.ok).toBe(true);
     expect(new Uint8Array(await readFile(join(target, "nested", "logo.png")))).toEqual(BINARY_BYTES);
@@ -62,7 +62,7 @@ describe("real file system adapter (A8)", () => {
     const path = join(root, "logo.png");
     await writeFile(path, BINARY_BYTES);
 
-    const read = await createNodeAssetFileSystem().readFile(path);
+    const read = await createNodeAssetFileSystem(TEST_MESSAGES).readFile(path);
 
     expect(read.ok && read.value.bytes).toEqual(BINARY_BYTES);
   });

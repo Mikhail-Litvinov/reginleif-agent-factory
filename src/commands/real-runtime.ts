@@ -82,7 +82,7 @@ export const createRealRuntime = async (options: RealRuntimeOptions = {}): Promi
 	const pythonCommand = platform === "windows" ? "python" : "python3";
 	const runtime: RuntimePorts = {
 		fs: fileSystem,
-		assetFs: createNodeAssetFileSystem(),
+		assetFs: createNodeAssetFileSystem(startMessages),
 		process: processPorts,
 		environment: { get: (name) => process.env[name], entries: () => Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined)) },
 		stdin: { read: async () => await Bun.stdin.text() },
@@ -125,7 +125,7 @@ export const createRealRuntime = async (options: RealRuntimeOptions = {}): Promi
 				try {
 					return ok(await fs.mkdtemp(join(tmpdir(), prefix)));
 				} catch (error) {
-					return err(errorText(error));
+					return err(startMessages.failure.temporaryCreateFailed(errorText(error)));
 				}
 			},
 			removeDirectory: async (path) => {
@@ -133,7 +133,7 @@ export const createRealRuntime = async (options: RealRuntimeOptions = {}): Promi
 					await fs.rm(path, { recursive: true, force: true });
 					return ok(undefined);
 				} catch (error) {
-					return err(errorText(error));
+					return err(startMessages.failure.temporaryRemoveFailed(path, errorText(error)));
 				}
 			},
 		},
@@ -287,14 +287,14 @@ const createProcessPorts = (pathEnvironment: string, language: Language): Proces
 			const settle = (value: Result<StreamingRun>): void => { if (!settled) { settled = true; resolve(value); } };
 			try {
 				const child = spawn(command, args, { cwd, env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true, windowsVerbatimArguments: verbatimArguments });
-				const write = (bytes: Uint8Array): void => { pending = pending.then(() => append(bytes)).catch((error: unknown) => { failure = errorText(error); }); };
-				const writeStdout = (bytes: Uint8Array): void => { pending = pending.then(() => (appendStdout ?? append)(bytes)).catch((error: unknown) => { failure = errorText(error); }); };
+				const write = (bytes: Uint8Array): void => { pending = pending.then(() => append(bytes)).catch((error: unknown) => { failure = messages.failure.outputSaveFailed(errorText(error)); }); };
+				const writeStdout = (bytes: Uint8Array): void => { pending = pending.then(() => (appendStdout ?? append)(bytes)).catch((error: unknown) => { failure = messages.failure.outputSaveFailed(errorText(error)); }); };
 				child.stdout.on("data", appendStdout === undefined ? write : writeStdout);
 				child.stderr.on("data", write);
 				const pipeClosed = (): void => { openPipes -= 1; if (openPipes === 0) pipesClosed(); };
 				child.stdout.once("close", pipeClosed);
 				child.stderr.once("close", pipeClosed);
-				child.once("error", (error) => { failure = error.message; settle(err(error.message)); });
+				child.once("error", (error) => { const text = messages.failure.processSpawnFailed(errorText(error)); failure = text; settle(err(text)); });
 				// The command's own exit settles the call; the pipes may stay open for as long as a background process of the run holds them.
 				child.once("exit", (code) => settle(ok({ code, finishOutput: async (): Promise<Result<void>> => {
 					await waitUpTo(drained, OUTPUT_DRAIN_MS);
@@ -303,7 +303,7 @@ const createProcessPorts = (pathEnvironment: string, language: Language): Proces
 					await pending;
 					return failure === null ? ok(undefined) : err(failure);
 				} })));
-			} catch (error) { settle(err(errorText(error))); }
+			} catch (error) { settle(err(messages.failure.processSpawnFailed(errorText(error)))); }
 		});
 	},
 	runMembers: async (): Promise<Result<number>> => {
@@ -407,7 +407,7 @@ export const ownerStartTime = async (
 			const startTicks = Number(fields[LINUX_PROC_START_TIME_INDEX]);
 			return Number.isFinite(startTicks) ? ok(startTicks) : err(messages.failure.procStartUnreadable(pid));
 		} catch (error) {
-			return isNotFound(error) ? ok(null) : err(errorText(error));
+			return isNotFound(error) ? ok(null) : err(messages.failure.readFailed(`/proc/${pid}/stat`, errorText(error)));
 		}
 	}
 	if (hostName === "win32") {
@@ -445,15 +445,15 @@ const RESTART_SCRIPT = "Stop-ScheduledTask -TaskName 'telegram-hub' -ErrorAction
 
 // Stopping the hub's task ends its job object, and this command may itself run inside that job (rig update started from
 // a hub session), so the restart runs detached and outside the caller's job, and survives the stop it performs.
-const restartWindowsTask = async (processPorts: ProcessRunner, description: string): Promise<Result<void>> => {
+const restartWindowsTask = async (processPorts: ProcessRunner, messages: Messages): Promise<Result<void>> => {
 	const directory = await fs.mkdtemp(join(tmpdir(), RESTART_TEMP_PREFIX));
 	try {
 		const started = await processPorts.spawnDetached(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", RESTART_SCRIPT], WINDOWS_RESTART_GRACE_MS, RESTART_STDERR_LIMIT, join(directory, "restart-stderr.log"), { windowsHide: true });
-		if (!started.ok) return err(`${description}: ${started.error}`);
-		if (started.value.exited && started.value.exitCode !== PROCESS_SUCCESS_EXIT_CODE) return err(`${description}: ${started.value.stderr}`);
+		if (!started.ok) return err(messages.runtime.taskRestartFailed(started.error));
+		if (started.value.exited && started.value.exitCode !== PROCESS_SUCCESS_EXIT_CODE) return err(messages.runtime.taskRestartFailed(started.value.stderr));
 		return ok(undefined);
 	} catch (error) {
-		return err(`${description}: ${errorText(error)}`);
+		return err(messages.runtime.taskRestartFailed(errorText(error)));
 	} finally {
 		// A restart still running past the grace period keeps the file open; the temp directory then stays for the OS cleanup.
 		await fs.rm(directory, { recursive: true, force: true, maxRetries: REMOVE_RETRIES }).catch(() => undefined);
@@ -493,7 +493,7 @@ export const runService = async (
 	}
 	if (platform === "windows") {
 		if (action === "restart") {
-			return await restartWindowsTask(processPorts, messages.runtime.taskRestartLabel());
+			return await restartWindowsTask(processPorts, messages);
 		}
 		const command = action === "start" ? "Start-ScheduledTask -TaskName 'telegram-hub'" : "Stop-ScheduledTask -TaskName 'telegram-hub'";
 		const result = await processPorts.run("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", command]);
@@ -570,7 +570,7 @@ const installRtk = async (binDirectory: string, platform: RuntimePorts["platform
 		const extractedResult = processSuccess(extracted, messages.runtime.rtkExtractLabel());
 		if (!extractedResult.ok) return extractedResult;
 		const sourcePath = join(temporary.value, targetName);
-		const binary = await readBytes(sourcePath);
+		const binary = await readBytes(sourcePath, messages);
 		if (!binary.ok) return err(messages.runtime.rtkBinaryMissing(targetName, binary.error));
 		await fs.mkdir(binDirectory, { recursive: true });
 		const targetPath = join(binDirectory, targetName);
@@ -639,7 +639,7 @@ const fetchText = async (url: string, messages: Messages): Promise<Result<string
 		const response = await fetch(url, { headers: { "User-Agent": "agent-rig" } });
 		return response.ok ? ok(await response.text()) : err(messages.failure.downloadFailed(response.status));
 	} catch (error) {
-		return err(errorText(error));
+		return err(messages.failure.fetchFailed(errorText(error)));
 	}
 };
 
@@ -648,15 +648,15 @@ const fetchBytes = async (url: string, messages: Messages): Promise<Result<Uint8
 		const response = await fetch(url, { headers: { "User-Agent": "agent-rig" } });
 		return response.ok ? ok(new Uint8Array(await response.arrayBuffer())) : err(messages.failure.downloadFailed(response.status));
 	} catch (error) {
-		return err(errorText(error));
+		return err(messages.failure.fetchFailed(errorText(error)));
 	}
 };
 
-const readBytes = async (path: string): Promise<Result<Uint8Array>> => {
+const readBytes = async (path: string, messages: Messages): Promise<Result<Uint8Array>> => {
 	try {
 		return ok(await fs.readFile(path));
 	} catch (error) {
-		return err(errorText(error));
+		return err(messages.failure.readFailed(path, errorText(error)));
 	}
 };
 
