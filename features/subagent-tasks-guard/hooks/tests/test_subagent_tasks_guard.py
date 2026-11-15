@@ -126,7 +126,7 @@ class SubagentTasksGuardTests(unittest.TestCase):
 
     def test_a_non_ascii_label_is_written_as_utf8_whatever_the_console_encoding(self):
         # Windows hooks inherit a non-UTF-8 console encoding; a Cyrillic description must not crash the refusal.
-        label = "слежу за логом"
+        label = "\u0441\u043b\u0435\u0436\u0443 \u0437\u0430 \u043b\u043e\u0433\u043e\u043c"  # Russian: "watching the log"
         self.write(start_monitor("toolu_1", "mon00001", label))
         env = {**os.environ, "PYTHONIOENCODING": "ascii"}
         payload = self.base("SubagentStop", agent_transcript_path=str(self.own_transcript), stop_hook_active=False,
