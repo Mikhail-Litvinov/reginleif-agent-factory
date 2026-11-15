@@ -1,6 +1,6 @@
 import type { FileSystem } from "../file-system.js";
 import type { Language, Messages } from "../messages.js";
-import type { RuntimePorts, ProcessOptions, ProcessOutput, ProcessPorts } from "../ports.js";
+import type { RuntimePorts, ProcessOptions, ProcessOutput, ProcessPorts, StreamingRun } from "../ports.js";
 import type { HostPlatform } from "../node-file-operations.js";
 import type { Result } from "../result.js";
 import type { RigState } from "../state.js";
@@ -21,13 +21,23 @@ import { err, errorText, ok } from "../result.js";
 import { readStoredLanguage } from "../state.js";
 import { PROCESS_SUCCESS_EXIT_CODE } from "../ports.js";
 import { runProcess, spawnDetached } from "./process-runner.js";
-import { confineToKillOnCloseJob } from "./windows-job.js";
+import { countGroupMembers, PROCESS_TABLE_ARGUMENTS } from "./run-members.js";
+import { confineToKillOnCloseJob, jobMembersOtherThanSelf } from "./windows-job.js";
 import { parseVersion, VERSION_PATHS } from "../version-manifest.js";
 
 // This keeps lock waits responsive without spinning while another command owns the lock.
 const LOCK_POLL_INTERVAL_MS = 250;
 const EXECUTABLE_FILE_MODE = 0o755;
 const sleepFor = (milliseconds: number): Promise<void> => new Promise((resolveSleep) => setTimeout(resolveSleep, milliseconds));
+// Once a run holds no process but its runner, the pipes of its command close at once; only a process that escaped the run
+// (setsid, job breakaway) can still hold one open, and its output is outside the run. So the wait for the pipes is short.
+const OUTPUT_DRAIN_MS = 2_000;
+// Resolves when the promise does or after the bound, whichever is first; the timer never outlives the wait.
+const waitUpTo = async (promise: Promise<void>, milliseconds: number): Promise<void> => {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const bound = new Promise<void>((resolveBound) => { timer = setTimeout(resolveBound, milliseconds); });
+	try { await Promise.race([promise, bound]); } finally { clearTimeout(timer); }
+};
 const LINUX_PROC_START_TIME_INDEX = 19;
 const RTK_RELEASE_API = "https://api.github.com/repos/rtk-ai/rtk/releases/latest";
 const CODEX_PACKAGE = "@openai/codex";
@@ -262,16 +272,39 @@ const createProcessPorts = (pathEnvironment: string): ProcessPorts => {
 		return await new Promise((resolve) => {
 			let pending = Promise.resolve();
 			let failure: string | null = null;
+			let settled = false;
+			let openPipes = 2;
+			let pipesClosed: () => void = () => {};
+			const drained = new Promise<void>((resolveDrained) => { pipesClosed = resolveDrained; });
+			const settle = (value: Result<StreamingRun>): void => { if (!settled) { settled = true; resolve(value); } };
 			try {
 				const child = spawn(command, args, { cwd, env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true, windowsVerbatimArguments: verbatimArguments });
 				const write = (bytes: Uint8Array): void => { pending = pending.then(() => append(bytes)).catch((error: unknown) => { failure = errorText(error); }); };
-					const writeStdout = (bytes: Uint8Array): void => { pending = pending.then(() => (appendStdout ?? append)(bytes)).catch((error: unknown) => { failure = errorText(error); }); };
+				const writeStdout = (bytes: Uint8Array): void => { pending = pending.then(() => (appendStdout ?? append)(bytes)).catch((error: unknown) => { failure = errorText(error); }); };
 				child.stdout.on("data", appendStdout === undefined ? write : writeStdout);
 				child.stderr.on("data", write);
-				child.once("error", (error) => { failure = error.message; });
-				child.once("close", (code) => { void pending.then(() => resolve(failure === null ? ok(code) : err(failure))); });
-			} catch (error) { resolve(err(errorText(error))); }
+				const pipeClosed = (): void => { openPipes -= 1; if (openPipes === 0) pipesClosed(); };
+				child.stdout.once("close", pipeClosed);
+				child.stderr.once("close", pipeClosed);
+				child.once("error", (error) => { failure = error.message; settle(err(error.message)); });
+				// The command's own exit settles the call; the pipes may stay open for as long as a background process of the run holds them.
+				child.once("exit", (code) => settle(ok({ code, finishOutput: async (): Promise<Result<void>> => {
+					await waitUpTo(drained, OUTPUT_DRAIN_MS);
+					child.stdout.destroy();
+					child.stderr.destroy();
+					await pending;
+					return failure === null ? ok(undefined) : err(failure);
+				} })));
+			} catch (error) { settle(err(errorText(error))); }
 		});
+	},
+	runMembers: async (): Promise<Result<number>> => {
+		if (hostPlatform() === "win32") return jobMembersOtherThanSelf();
+		const table = await ports.run("ps", PROCESS_TABLE_ARGUMENTS);
+		if (!table.ok) return table;
+		if (table.value.exitCode !== PROCESS_SUCCESS_EXIT_CODE) return err(table.value.stderr || "Process table query failed");
+		// The runner leads its own process group (it is started detached), so the group id is its own pid.
+		return ok(countGroupMembers(table.value.stdout, process.pid, process.pid));
 	},
 	killTree: async (pid, force = false): Promise<Result<void>> => {
 		if (hostPlatform() === "win32") {

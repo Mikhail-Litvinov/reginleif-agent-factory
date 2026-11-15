@@ -23,10 +23,23 @@ export type ProcessOptions = {
 	timeoutMs?: number;
 };
 
+// A command started by runStreaming, as seen at its own exit. The command's output may still be arriving then (a
+// background process of the run holds the pipes), so it is collected until the caller ends it with finishOutput.
+export type StreamingRun = {
+	// The command's own exit code (null when it was ended by a signal).
+	code: number | null;
+	// Called once the run holds no process but the caller: waits (bounded) for the pipes to close, flushes every pending
+	// append, and fails when an append failed. Output of a process that escaped the run is not collected after it.
+	finishOutput(): Promise<Result<void>>;
+};
+
 export type ProcessPorts = {
 	run(command: string, args: readonly string[], options?: ProcessOptions): Promise<Result<ProcessOutput>>;
 	spawnDetached(command: readonly string[], graceMs: number, stderrLimit: number, stderrPath: string, options?: { windowsHide?: boolean }): Promise<Result<{ exited: boolean; exitCode: number | null; stderr: string; pid?: number }>>;
-	runStreaming(argv: readonly string[], cwd: string, env: Record<string, string>, append: (bytes: Uint8Array) => Promise<void>, verbatimArguments: boolean, appendStdout?: (bytes: Uint8Array) => Promise<void>): Promise<Result<number | null>>;
+	runStreaming(argv: readonly string[], cwd: string, env: Record<string, string>, append: (bytes: Uint8Array) => Promise<void>, verbatimArguments: boolean, appendStdout?: (bytes: Uint8Array) => Promise<void>): Promise<Result<StreamingRun>>;
+	// How many processes of the caller's own run, other than the caller itself, are alive: the runner's job on Windows,
+	// the runner's process group on POSIX. A process that left the run on purpose (setsid, job breakaway) is not counted.
+	runMembers(): Promise<Result<number>>;
 	isAvailable(command: string): Promise<boolean>;
 	createdAt(pids: readonly number[]): Promise<Result<Record<string, string | null>>>;
 	killTree(pid: number, force?: boolean): Promise<Result<void>>;

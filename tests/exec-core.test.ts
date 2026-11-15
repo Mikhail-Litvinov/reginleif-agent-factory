@@ -4,7 +4,7 @@ import { runExecCommand } from "../src/commands/exec.js";
 import { EXEC_LOG_CHUNK_BYTES, EXEC_MAX_RUNS, EXEC_STALE_MS, listExecs, runExecRunner, startExec, startRigExec, statusExec, stopExec } from "../src/exec-core.js";
 import { apiOk } from "../src/output.js";
 import { err, ok } from "../src/result.js";
-import { createMemoryRuntime } from "./fakes/memory-runtime.js";
+import { createMemoryRuntime, streamed } from "./fakes/memory-runtime.js";
 
 const HOME = "/home/test";
 const ROOT = `${HOME}/.agent-rig/exec`;
@@ -48,7 +48,7 @@ describe("exec core", () => {
 		h.environment.set("CLAUDE_CONFIG_DIR", "/account");
 		await startRigExec(h.runtime, ["language"]);
 		let seen: Record<string, string> = {};
-		h.runtime.process.runStreaming = async (_argv, _cwd, env) => { seen = env; return ok(0); };
+		h.runtime.process.runStreaming = async (_argv, _cwd, env) => { seen = env; return streamed(0); };
 		expect(await runExecRunner(h.runtime, "event-1", noBuild)).toBe(0);
 		expect(seen).toEqual({ PATH: "/bin" });
 	});
@@ -61,7 +61,7 @@ describe("exec core", () => {
 			seen.call = { argv, cwd, env };
 			await append(new TextEncoder().encode("{\"progress\":1}\n"));
 			await appendStdout?.(new TextEncoder().encode("{\"language\":\"en\"}\n"));
-			return ok(0);
+			return streamed(0);
 		};
 		expect(await runExecRunner(h.runtime, "event-1", noBuild)).toBe(0);
 		expect(seen.call).toEqual({ argv: [h.runtime.executablePath, "/repo/src/cli.ts", "language"], cwd: `${HOME}/.agent-rig`, env: {} });
@@ -74,7 +74,7 @@ describe("exec core", () => {
 		for (const [out, reason] of [["", "empty-result"], ["not json", "invalid-result"], ["[1]", "invalid-result"], ["7", "invalid-result"]] as const) {
 			const h = seed();
 			await startRigExec(h.runtime, ["status"]);
-			h.runtime.process.runStreaming = async (_argv, _cwd, _env, _append, _verbatim, appendStdout) => { if (out !== "") await appendStdout?.(new TextEncoder().encode(out)); return ok(1); };
+			h.runtime.process.runStreaming = async (_argv, _cwd, _env, _append, _verbatim, appendStdout) => { if (out !== "") await appendStdout?.(new TextEncoder().encode(out)); return streamed(1); };
 			await runExecRunner(h.runtime, "event-1", noBuild);
 			const done = await statusExec(h.runtime, "event-1", 0);
 			expect(done.ok && done.value).toMatchObject({ state: "ended", end: { kind: "exit", code: 1, reason } });
@@ -224,7 +224,7 @@ describe("exec core", () => {
 		expect(h.fs.files.has(`${ROOT}/event-1/stop-request`)).toBe(true);
 		let built = false;
 		let launched = false;
-		h.runtime.process.runStreaming = async () => { launched = true; return ok(0); };
+		h.runtime.process.runStreaming = async () => { launched = true; return streamed(0); };
 		expect(await runExecRunner(h.runtime, "event-1", async () => { built = true; return apiOk({ argv: ["fake"], env: {}, files: [] }); })).toBe(0);
 		expect(built).toBe(false);
 		expect(launched).toBe(false);
@@ -275,7 +275,7 @@ describe("exec core", () => {
 	test("runner uses the injected builder and records output and exit", async () => {
 		const h = seed();
 		await startExec(h.runtime, "bash", "/work", "echo hi");
-		h.runtime.process.runStreaming = async (_argv, _cwd, _env, append) => { await append(new TextEncoder().encode("one\ntwo\n")); return ok(3); };
+		h.runtime.process.runStreaming = async (_argv, _cwd, _env, append) => { await append(new TextEncoder().encode("one\ntwo\n")); return streamed(3); };
 		expect(await runExecRunner(h.runtime, "event-1", async () => apiOk({ argv: ["fake"], env: {}, files: [] }))).toBe(0);
 		const state = await statusExec(h.runtime, "event-1", 0);
 		expect(state.ok && state.value).toMatchObject({ end: { kind: "exit", code: 3 }, log: { text: "one\ntwo\n" } });
@@ -328,7 +328,7 @@ describe("exec core", () => {
 		h.fs.seed(`${ROOT}/event-1/result`, "{\"stale\":true}\n");
 		h.runtime.process.runStreaming = async (_argv, _cwd, _env, _append, _verbatim, appendStdout) => {
 			await appendStdout?.(new TextEncoder().encode("{\"language\":\"en\"}\n"));
-			return ok(0);
+			return streamed(0);
 		};
 		expect(await runExecRunner(h.runtime, "event-1", noBuild)).toBe(0);
 		const done = await statusExec(h.runtime, "event-1", 0);
@@ -374,7 +374,7 @@ describe("exec core", () => {
 			expect(h.fs.files.get(`${ROOT}/event-1/identity.json`)).toBe(JSON.stringify({ pid: PID, pidCreated: "born" }));
 			launched();
 			await new Promise<void>((resolve) => { closeChild = resolve; });
-			return ok(0);
+			return streamed(0);
 		};
 		const runner = runExecRunner(h.runtime, "event-1", async () => apiOk({ argv: ["fake"], env: {}, files: [] }));
 		await ready;

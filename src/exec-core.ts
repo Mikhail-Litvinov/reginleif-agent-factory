@@ -17,6 +17,12 @@ export const EXEC_MAX_RUNS = 50;
 export const EXEC_LOG_CHUNK_BYTES = 64 * 1024;
 // Keep startup diagnostics bounded to the same 64 KiB diagnostic budget independently of log paging.
 const EXEC_RUNNER_STDERR_LIMIT = 64 * 1024;
+// How often the runner checks whether a run still holds a process after its command has exited. The wait for the last
+// process is not busy: this bounds the delay of the recorded end (at most this long after the last process is gone)
+// against the cost of a check (one `ps` start per check on POSIX); one second is far below the heartbeat interval.
+export const EXEC_RUN_POLL_MS = 1_000;
+// Written by the runner (atomically) with the time at which the run held no process but the runner; `stop` reads it.
+const EXEC_RUN_EMPTY_FILE = "run-empty";
 // Exit code of a failed runner, and the reason of the last-resort end recorded when the end itself cannot be written.
 const EXEC_RUNNER_FAILED_CODE = 1;
 const EXEC_END_WRITE_FAILED = "end-write-failed";
@@ -253,7 +259,7 @@ const stop = async (r: RuntimePorts, id: string): Promise<ApiResult<JsonValue>> 
 	if (!identity.ok) return identity;
 	if (identity.value === undefined) {
 		// The runner has not written its identity yet: record the stop, which the runner checks after writing it and before launching the shell.
-		try { await r.fs.writeText(marker, ""); } catch (error) { return io(r, error); }
+		try { await r.fs.writeText(marker, r.clock.nowText()); } catch (error) { return io(r, error); }
 		// The runner may have written its identity after the first read and checked before the request existed: then kill as usual.
 		identity = await readIdentity(r, id);
 		if (!identity.ok) return identity;
@@ -273,7 +279,10 @@ const stop = async (r: RuntimePorts, id: string): Promise<ApiResult<JsonValue>> 
 	const latest = await summary(r, record.value);
 	if (!latest.ok) return latest;
 	if (latest.value.state === "ended") return apiOk({ id, state: "ended" });
-	try { await r.fs.writeText(marker, ""); } catch (error) { return io(r, error); }
+	const requestAt = r.clock.nowText();
+	try { await r.fs.writeText(marker, requestAt); } catch (error) { return io(r, error); }
+	// Every process of the run had already ended before this request: the run ends by itself with its real end, which the runner is recording now; nothing is killed.
+	if (stopCameAfterEmpty(requestAt, await readRunEmpty(r, id))) return apiOk({ id, stopping: true });
 	// The run is one unit: a kill-on-close job on Windows, the runner's own process group on POSIX.
 	const killed = r.platform === "windows" ? await r.process.killTree(pid, true) : await r.process.killGroup(pid);
 	if (!killed.ok) {
@@ -311,14 +320,48 @@ const joinChunks = (chunks: Uint8Array[]): Uint8Array => {
 	return joined;
 };
 
+// A stop request ends a run as stopped unless every process of the run had already ended before the request was
+// written: then the run ended on its own and keeps its real end. Both times come from the injected clock. A tie, a
+// missing run-empty time and a time that does not parse all count as a stop (the safe side: the request was honoured).
+export const stopCameAfterEmpty = (requestAt: string, emptyAt: string | null): boolean => {
+	if (emptyAt === null) return false;
+	const request = Date.parse(requestAt);
+	const empty = Date.parse(emptyAt);
+	return Number.isFinite(request) && Number.isFinite(empty) && empty < request;
+};
+
+// The time at which the run was observed empty, or null while no such time is recorded (or it cannot be read).
+const readRunEmpty = async (r: RuntimePorts, id: string): Promise<string | null> => {
+	try {
+		const text = await r.fs.readText(file(r, id, EXEC_RUN_EMPTY_FILE));
+		return text.length === 0 ? null : text;
+	} catch { return null; }
+};
+
+// Waits until the run holds no process but the runner, and returns the time that was observed (also written to the
+// run-empty file for `stop`). A run that cannot be counted counts as empty: the command already exited, so waiting on a
+// count that cannot be read would hold the run forever.
+const awaitRunEmpty = async (r: RuntimePorts, id: string): Promise<string> => {
+	for (;;) {
+		const members = await r.process.runMembers();
+		if (!members.ok || members.value === 0) break;
+		await r.clock.sleep(EXEC_RUN_POLL_MS);
+	}
+	const emptyAt = r.clock.nowText();
+	await atomicWrite(r.fs, file(r, id, EXEC_RUN_EMPTY_FILE), emptyAt);
+	return emptyAt;
+};
+
 export const runExecRunner = async (r: RuntimePorts, id: string, build: ShellBuilder): Promise<number> => {
 	const record = await load(r, id);
 	if (!record.ok) return 1;
 	const path = dir(r, id);
 	// Records the end and reports true when that end (or the stop recorded instead) is written. When it cannot be written, a last-resort end names the failure and this reports false; it never throws.
-	const finish = async (end: End): Promise<boolean> => {
+	// emptyAt is the time the run was observed empty (null when the command never ran): a stop request written after it does not turn the end into a stop.
+	const finish = async (end: End, emptyAt: string | null = null): Promise<boolean> => {
 		try {
-			const stopped = await r.fs.stat(file(r, id, "stop-request")) !== null;
+			const request = await r.fs.stat(file(r, id, "stop-request")) !== null ? await r.fs.readText(file(r, id, "stop-request")) : null;
+			const stopped = request !== null && !stopCameAfterEmpty(request, emptyAt);
 			const written = await r.fs.writeExclusive(file(r, id, "exit.json"), JSON.stringify(stopped ? { kind: "stopped", code: null, at: r.clock.nowText() } : end));
 			if (written.ok) return true;
 		} catch { /* The last-resort end below records the failure. */ }
@@ -347,10 +390,16 @@ export const runExecRunner = async (r: RuntimePorts, id: string, build: ShellBui
 		try {
 			// The result is one JSON object: its stdout is collected and written whole once the run has ended.
 			const stdout: Uint8Array[] = [];
-			const result = await r.process.runStreaming(launch.value.argv, record.value.shell === "rig" ? rigHome(r) : record.value.cwd, launch.value.env, (bytes) => r.fs.appendBytes(file(r, id, "log"), bytes), launch.value.verbatimArguments ?? false, rig === null ? undefined : async (bytes) => { stdout.push(bytes.slice()); });
+			const started = await r.process.runStreaming(launch.value.argv, record.value.shell === "rig" ? rigHome(r) : record.value.cwd, launch.value.env, (bytes) => r.fs.appendBytes(file(r, id, "log"), bytes), launch.value.verbatimArguments ?? false, rig === null ? undefined : async (bytes) => { stdout.push(bytes.slice()); });
+			if (!started.ok) { await finish({ kind: "exit", code: null, at: r.clock.nowText(), reason: started.error }); return 1; }
+			// The run is one unit: it stays running while any process of it lives, and ends with the command's own code
+			// (remembered here, at the command's exit) once the last one is gone. Output keeps arriving meanwhile.
+			const code = started.value.code;
+			const emptyAt = await awaitRunEmpty(r, id);
+			const drained = await started.value.finishOutput();
 			if (rig !== null) await r.fs.writeBytes(file(r, id, "result"), joinChunks(stdout));
-			const ended = await finish(result.ok ? { kind: "exit", code: result.value, at: r.clock.nowText() } : { kind: "exit", code: null, at: r.clock.nowText(), reason: result.error });
-			return result.ok && ended ? 0 : 1;
+			const ended = await finish(drained.ok ? { kind: "exit", code, at: r.clock.nowText() } : { kind: "exit", code: null, at: r.clock.nowText(), reason: drained.error }, emptyAt);
+			return drained.ok && ended ? 0 : 1;
 		} finally { cancel(); }
 	} catch (error) { await finish({ kind: "exit", code: null, at: r.clock.nowText(), reason: errorText(error) }); return 1; }
 };

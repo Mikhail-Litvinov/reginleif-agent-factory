@@ -1,5 +1,5 @@
 import type { DirectoryEntry, FileStat, FileSystem } from "../../src/file-system.js";
-import type { RuntimePorts, ProcessOptions, ProcessOutput } from "../../src/ports.js";
+import type { RuntimePorts, ProcessOptions, ProcessOutput, StreamingRun } from "../../src/ports.js";
 import type { Result } from "../../src/result.js";
 import type { FileContent } from "../../src/content-hash.js";
 
@@ -14,6 +14,9 @@ const FAKE_OWNER_START_TIME = 20;
 const FAKE_LOCK_POLL_INTERVAL_MS = 1;
 const FAKE_TEMP_DIRECTORY = "/virtual-temp/rig-check";
 const FAKE_TIME = "2026-10-30T00:00:00.000Z";
+
+// A command that exited with this code and has no output left to collect.
+export const streamed = (code: number | null): Result<StreamingRun> => ok({ code, finishOutput: async () => ok(undefined) });
 
 export class MissingPathError extends Error {
 	readonly code = "ENOENT";
@@ -313,7 +316,8 @@ export const createMemoryRuntime = (platform: RuntimePorts["platform"] = "linux"
 		assetFs,
 		process: {
 			spawnDetached: async (_command, _graceMs, _stderrLimit, _stderrPath, _options) => ok({ exited: false, exitCode: null, stderr: "", pid: 100 }),
-			runStreaming: async () => ok(0),
+			runStreaming: async () => streamed(0),
+			runMembers: async () => ok(0),
 			createdAt: async () => ok({}),
 			killTree: async () => ok(undefined),
 			killGroup: async () => ok(undefined),
