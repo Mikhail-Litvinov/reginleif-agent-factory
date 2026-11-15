@@ -141,6 +141,25 @@ describe("real process ports", () => {
 		expect(result.value.stderr).toContain(STDERR_MARKER);
 	}, TEST_BOUND_MS);
 
+	test("spawnDetached starts the command without the secret-bearing variables", async () => {
+		const root = makeDirectory();
+		const scriptPath = join(root, "env.js");
+		const outPath = join(root, "env.json");
+		writeFileSync(scriptPath, `require("node:fs").writeFileSync(process.argv[2], JSON.stringify(Object.keys(process.env)));\n`);
+		const names = ["CLAUDE_CONFIG_DIR", "TELEGRAM_HUB_BOT_TOKEN", "ANTHROPIC_API_KEY", "RIG_KEEP_ME"];
+		const saved = names.map((name) => process.env[name]);
+		for (const name of names) process.env[name] = "x";
+		try {
+			const result = await ports.spawnDetached([process.execPath, scriptPath, outPath], FAIL_GRACE_MS, STDERR_LIMIT, join(root, "stderr.log"));
+			expect(result.ok && result.value.exitCode).toBe(0);
+		} finally {
+			names.forEach((name, index) => { const value = saved[index]; if (value === undefined) delete process.env[name]; else process.env[name] = value; });
+		}
+		const seen: string[] = JSON.parse(readFileSync(outPath, "utf8"));
+		expect(seen).toContain("RIG_KEEP_ME");
+		expect(seen.filter((name) => /^(CLAUDE|TELEGRAM_HUB_|ANTHROPIC_)/i.test(name))).toEqual([]);
+	}, TEST_BOUND_MS);
+
 	test("spawnDetached reports a surviving command as started", async () => {
 		const root = makeDirectory();
 		const scriptPath = join(root, "sleep.js");

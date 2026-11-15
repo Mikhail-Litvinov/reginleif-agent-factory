@@ -6,6 +6,7 @@ import { closeSync, existsSync, openSync, readFileSync } from "node:fs";
 import { platform as hostPlatform } from "node:os";
 import { win32 } from "node:path";
 
+import { cleanEnvironment } from "../clean-environment.js";
 import { err, errorText, ok } from "../result.js";
 import { PROCESS_FAILURE_EXIT_CODE } from "../ports.js";
 
@@ -27,7 +28,7 @@ export const spawnDetached = async (command: readonly string[], graceMs: number,
 	try {
 		const fd = openSync(path, "w");
 		let child;
-		try { child = spawn(executable, args, { detached: true, windowsHide: options?.windowsHide, stdio: ["ignore", "ignore", fd] }); } finally { closeSync(fd); }
+		try { child = spawn(executable, args, { env: cleanEnvironment(process.env), detached: true, windowsHide: options?.windowsHide, stdio: ["ignore", "ignore", fd] }); } finally { closeSync(fd); }
 		return await new Promise((resolve) => {
 			let settled = false;
 			const finish = (result: Result<{ exited: boolean; exitCode: number | null; stderr: string; pid?: number }>): void => {

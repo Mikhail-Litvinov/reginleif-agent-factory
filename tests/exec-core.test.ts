@@ -40,6 +40,19 @@ describe("exec core", () => {
 		expect(listed.ok && listed.value.runs).toEqual([{ id: "event-1", shell: "rig", args: ["feature", "x", "enable"], state: "running", startedAt: NOW }]);
 	});
 
+	test("the rig runner's child lacks the secret-bearing variables and keeps the rest", async () => {
+		const h = seed();
+		h.environment.set("PATH", "/bin");
+		h.environment.set("TELEGRAM_HUB_BOT_TOKEN", "secret");
+		h.environment.set("ANTHROPIC_API_KEY", "secret");
+		h.environment.set("CLAUDE_CONFIG_DIR", "/account");
+		await startRigExec(h.runtime, ["language"]);
+		let seen: Record<string, string> = {};
+		h.runtime.process.runStreaming = async (_argv, _cwd, env) => { seen = env; return ok(0); };
+		expect(await runExecRunner(h.runtime, "event-1", noBuild)).toBe(0);
+		expect(seen).toEqual({ PATH: "/bin" });
+	});
+
 	test("the rig runner runs the rig CLI in the rig home with the runner environment; stdout goes to result and status returns it", async () => {
 		const h = seed();
 		await startRigExec(h.runtime, ["language"]);
@@ -51,7 +64,7 @@ describe("exec core", () => {
 			return ok(0);
 		};
 		expect(await runExecRunner(h.runtime, "event-1", noBuild)).toBe(0);
-		expect(seen.call).toEqual({ argv: [h.runtime.executablePath, "/repo/src/cli.ts", "language"], cwd: `${HOME}/.agent-rig`, env: h.runtime.environment.entries() });
+		expect(seen.call).toEqual({ argv: [h.runtime.executablePath, "/repo/src/cli.ts", "language"], cwd: `${HOME}/.agent-rig`, env: {} });
 		const done = await statusExec(h.runtime, "event-1", 0);
 		expect(done.ok && done.value).toMatchObject({ shell: "rig", args: ["language"], state: "ended", end: { kind: "exit", code: 0 }, result: { language: "en" }, log: { text: "{\"progress\":1}\n" } });
 		expect(done.ok && JSON.stringify(done.value)).not.toContain("reason");

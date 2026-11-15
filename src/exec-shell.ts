@@ -1,6 +1,7 @@
 import type { RuntimePorts } from "./ports.js";
 import type { ApiResult } from "./output.js";
 
+import { cleanEnvironment } from "./clean-environment.js";
 import { messagesFor } from "./messages.js";
 import { apiFail, apiOk, ERROR_CODE_USAGE } from "./output.js";
 
@@ -12,7 +13,6 @@ const REG_TIMEOUT_MS = 10_000;
 const MACHINE_KEY = "HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment";
 const USER_KEY = "HKCU\\Environment";
 const VOLATILE_KEY = "HKCU\\Volatile Environment";
-const OWN_VARS = /^(CLAUDE|TELEGRAM_HUB_|ANTHROPIC_)/i;
 const REG_LINE = /^ {4}(.+?) {4}(REG_SZ|REG_EXPAND_SZ)(?: {4}(.*))?$/;
 const VAR_REF = /%([^%]+)%/g;
 const SYSTEM_VARS = new Set([
@@ -26,9 +26,6 @@ const SYSTEM_VARS = new Set([
 
 type RegValue = { type: "REG_SZ" | "REG_EXPAND_SZ"; value: string };
 type Launch = { argv: string[]; env: Record<string, string>; files: { path: string; bytes: Uint8Array }[]; verbatimArguments: boolean };
-
-const clean = (env: Record<string, string>): Record<string, string> =>
-  Object.fromEntries(Object.entries(env).filter(([name]) => !OWN_VARS.test(name)));
 
 const parseRegistry = (output: string): Record<string, RegValue> => {
   const values: Record<string, RegValue> = {};
@@ -68,12 +65,12 @@ const mergeEnvironment = (base: Record<string, string>, machine: Record<string, 
   const userPath = Object.entries(user).find(([name]) => isPath(name));
   const pathName = machinePath?.[0] ?? userPath?.[0];
   if (pathName !== undefined) set(pathName, [machinePath, userPath].flatMap((entry) => entry === undefined ? [] : [resolve(entry[1])]).join(";"));
-  return clean(env);
+  return cleanEnvironment(env);
 };
 
 const freshEnvironment = async (runtime: RuntimePorts): Promise<Record<string, string>> => {
   const parent = runtime.environment.entries();
-  if (runtime.platform !== "windows") return clean(parent);
+  if (runtime.platform !== "windows") return cleanEnvironment(parent);
   const query = async (key: string): Promise<Record<string, RegValue> | undefined> => {
     const result = await runtime.process.run("reg", ["query", key], { timeoutMs: REG_TIMEOUT_MS });
     if (!result.ok || result.value.exitCode !== 0) return undefined;
@@ -81,7 +78,7 @@ const freshEnvironment = async (runtime: RuntimePorts): Promise<Record<string, s
   };
   const machine = await query(MACHINE_KEY);
   const user = await query(USER_KEY);
-  if (machine === undefined || user === undefined) return clean(parent);
+  if (machine === undefined || user === undefined) return cleanEnvironment(parent);
   const volatile = await query(VOLATILE_KEY) ?? {};
   return mergeEnvironment(parent, machine, user, volatile);
 };

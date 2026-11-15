@@ -2,6 +2,7 @@ import type { ApiResult, JsonValue } from "./output.js";
 import type { RuntimePorts } from "./ports.js";
 
 import { ID_PATTERN } from "../plugins/agent-rig-window/mod/queue-protocol.js";
+import { cleanEnvironment } from "./clean-environment.js";
 import { atomicWrite, joinPath } from "./file-system.js";
 import { messagesFor } from "./messages.js";
 import { apiFail, apiOk, ERROR_CODE_USAGE, EXEC_BAD_ID, EXEC_INVALID, EXEC_IO, EXEC_LAUNCH, EXEC_UNAVAILABLE, EXEC_UNKNOWN } from "./output.js";
@@ -244,11 +245,11 @@ export const listExecs = async (r: RuntimePorts): Promise<ApiResult<{ runs: Summ
 	return listed.ok ? apiOk({ runs: listed.value.runs }) : listed;
 };
 
-// Rig's own CLI runs with the runner's own environment: its commands need it; the cleaning is for typed shell commands only.
+// Rig's own CLI runs with the runner's environment minus the secret-bearing variables: its commands read none of them.
 const rigLaunch = async (r: RuntimePorts, args: readonly string[]): Promise<ApiResult<ShellLaunch>> => {
 	const state = await readState(r.fs, r.home);
 	if (!state.ok) return apiFail(EXEC_IO, messagesFor(r.language).exec.io(state.error));
-	return apiOk({ argv: [r.executablePath, r.resolvePath(state.value.paths.repo, "src", "cli.ts"), ...args], env: r.environment.entries(), files: [] });
+	return apiOk({ argv: [r.executablePath, r.resolvePath(state.value.paths.repo, "src", "cli.ts"), ...args], env: cleanEnvironment(r.environment.entries()), files: [] });
 };
 
 export const runExecRunner = async (r: RuntimePorts, id: string, build: ShellBuilder): Promise<number> => {
