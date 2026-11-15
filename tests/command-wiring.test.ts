@@ -29,7 +29,7 @@ const STATE_PATH = `${HOME}/.agent-rig/state.json`;
 const EVENTS_PATH = `${HOME}/.agent-rig/events.jsonl`;
 const REFLECT_TEST_TIMEOUT_SECONDS = 5;
 const NO_FILE_OPERATIONS = 0;
-// RestartSec=2 in the hub's install-hub-service.sh, plus the 1 s recheck margin in check.ts.
+// The 2 s restart pause from check.ts (the wait before a restarted hub starts again), plus the 1 s recheck margin.
 const RESTART_WAIT_MS = 3000;
 const SERVICE_STOPPED_TEXT = "The telegram-hub service is not running.";
 const BUS_FAILURE_TEXT = "Failed to connect to bus: No medium found";

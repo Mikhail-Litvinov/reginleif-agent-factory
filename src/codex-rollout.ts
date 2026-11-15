@@ -5,9 +5,9 @@ import { joinPath } from "./file-system.js";
 import { isoOrNull } from "./info-data.js";
 
 // Codex writes `<codex home>/sessions/YYYY/MM/DD/rollout-*.jsonl`; the newest rollout with a rate-limit event wins.
-// Same limits as the hub's reader: at most this many files, looked at from the newest date directory down.
+// At most this many rollout files are looked at, from the newest date directory down, so one lookup's file reads stay bounded.
 const MAX_FILES = 20;
-// Rollouts grow to many MB, so they are read backwards in blocks of this size (the hub's reader used 64 KiB too).
+// Rollouts grow to many MB, so they are read backwards in blocks of this size (64 KiB), so a lookup reads only the tail it needs.
 export const TAIL_BLOCK_BYTES = 64 * 1024;
 const NEWLINE_BYTE = 0x0a;
 const NO_NEWLINE = -1;

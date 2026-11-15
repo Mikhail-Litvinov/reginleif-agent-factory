@@ -10,11 +10,13 @@ import { apiFail, apiOk, ERROR_CODE_USAGE, EXEC_BAD_ID, EXEC_INVALID, EXEC_IO, E
 import { err, errorText } from "./result.js";
 import { readState } from "./state.js";
 
-// Hub exec-runner.ts HEARTBEAT_MS and exec.ts HEARTBEAT_STALE_MS / MAX_EXECS.
+// The runner rewrites its heartbeat file this often (ms); the age of that file is how status judges a run is still alive.
 export const EXEC_HEARTBEAT_MS = 10_000;
+// A heartbeat this old (three intervals) is stale: a run is `lost` only when its runner is gone too; with a live runner it stays `running`.
 export const EXEC_STALE_MS = 3 * EXEC_HEARTBEAT_MS;
+// Ended runs kept on disk: a start prunes the oldest beyond this; running runs are never pruned. The value is the retention rig-exec-design.md sets.
 export const EXEC_MAX_RUNS = 50;
-// The hub reads at most 64 KiB for a log tail; use the same bound per API response.
+// One status response carries at most this many log bytes (64 KiB), so its size stays bounded whatever the log size; the caller polls for the rest.
 export const EXEC_LOG_CHUNK_BYTES = 64 * 1024;
 // How often a status call with `--wait` checks the log and the end. New output reaches the caller at most this late; each
 // check reads the heartbeat and stats the log (and reads its bytes). 250 ms bounds the delay under a quarter second against
@@ -202,7 +204,7 @@ const start = async (r: RuntimePorts, target: StartTarget): Promise<ApiResult<Js
 		if (!ID_PATTERN.test(id)) return apiFail(EXEC_BAD_ID, m.badId());
 		const path = dir(r, id);
 		await r.fs.ensureDirectory(path);
-			const startedAt = r.clock.nowText();
+		const startedAt = r.clock.nowText();
 		const record: RecordData = target.kind === "rig" ? { id, shell: "rig", args: [...target.args], startedAt } : { id, shell: target.shell, cwd: resolved, text: target.text, startedAt };
 		await r.fs.writeText(file(r, id, "heartbeat"), record.startedAt);
 		await r.fs.writeText(file(r, id, "log"), "");

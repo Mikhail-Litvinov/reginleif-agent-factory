@@ -11,7 +11,7 @@ import { errorText } from "./result.js";
 // The window polls once per second; allow three polls for read-only operations.
 export const SESSION_POLL_MS = 1000;
 export const READ_TIMEOUT_MS = 3 * SESSION_POLL_MS;
-// Hub CLEANUP_COMPACT_MS (plugin/src/hub/hub.ts:87); rename also waits for the turn to end.
+// Ten minutes at one poll per second: rig's allowance for a compaction. Rename also waits for the turn to end, so it gets the same allowance.
 export const COMPACT_TIMEOUT_MS = 10 * 60 * SESSION_POLL_MS;
 export const RENAME_TIMEOUT_MS = COMPACT_TIMEOUT_MS;
 // Like rename: the command waits for the turn to end, so it gets the same allowance.

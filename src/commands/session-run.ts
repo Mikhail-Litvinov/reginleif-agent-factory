@@ -16,15 +16,17 @@ import { accountOf, INFO_ERROR_STATE_UNREADABLE } from "./info.js";
 import { readRigState } from "./shared.js";
 import { stopSession } from "./session-stop.js";
 
-// Hub launch.ts: exit grace, stderr limit and transcript block size.
+// How long a launch waits to see whether its process exits at once (ms); the launch file is removed only once older than this.
 const LAUNCH_EXIT_GRACE_MS = 2000;
+// Most stderr bytes a failed launch returns.
 const STDERR_LIMIT = 1000;
+// The transcript's mode is searched backwards in blocks of this size (1 MiB).
 const MODE_BLOCK_BYTES = 1024 * 1024;
-// Hub config.ts launchSchema default.
+// Seconds a session run waits when the command gives no timeout of its own.
 const DEFAULT_TIMEOUT_SEC = 90;
 const POSIX_PATH_SEPARATOR = ":";
 const WINDOWS_PATH_SEPARATOR = ";";
-// Windows file types cmd.exe /c runs for a bare name, in the order of process-runner.ts; PATH order comes first.
+// File types cmd.exe /c tries for a bare name, in its lookup order; PATH order comes first.
 const WINDOWS_EXECUTABLE_SUFFIXES = [".exe", ".com", ".cmd", ".bat"] as const;
 const MS_PER_SECOND = 1000;
 const MODES = ["manual", "auto", "acceptEdits", "plan", "dontAsk"] as const;

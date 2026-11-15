@@ -26,7 +26,7 @@ const TEST_HOOK_NAME = "rig-check";
 const TOOL_EVENTS = ["PreToolUse", "PostToolUse"] as const;
 const TOOL_TEST_NAME = "Bash";
 const TOOL_TEST_COMMAND = "echo rig-check";
-// RestartSec=2 in the hub's install-hub-service.sh: systemd waits this long before it starts a restarted hub again.
+// Two seconds: the pause systemd keeps before it starts a restarted hub again, so one pause covers a restart in progress.
 const HUB_RESTART_PAUSE_MS = 2000;
 // The next start execs after the pause; this margin covers that exec.
 const SERVICE_RECHECK_MARGIN_MS = 1000;

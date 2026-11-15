@@ -9,7 +9,7 @@ export const runExecCommand = async (runtime: RuntimePorts, name: string, args: 
 	const usage = (): ApiResult<never> => apiFail(ERROR_CODE_USAGE, messagesFor(runtime.language).exec.usage());
 	if (name === "list") return args.length === 0 ? listExecs(runtime) : usage();
 	if (name === "start") {
-			if (args[0] === "rig") return args[1] === "--" ? startRigExec(runtime, args.slice(2)) : usage();
+		if (args[0] === "rig") return args[1] === "--" ? startRigExec(runtime, args.slice(2)) : usage();
 		const [shell, flag, cwd] = args;
 		if (args.length !== 3 || (shell !== "pwsh" && shell !== "cmd" && shell !== "bash") || flag !== "--cwd" || cwd === "") return usage();
 		return startExec(runtime, shell, cwd, await runtime.stdin.read());

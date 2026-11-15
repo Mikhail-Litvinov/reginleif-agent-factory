@@ -6,7 +6,7 @@ import { findOnPath } from "./executable-path.js";
 import { messagesFor } from "./messages.js";
 import { apiFail, apiOk, ERROR_CODE_USAGE, EXEC_UNAVAILABLE } from "./output.js";
 
-// Git for Windows installs bash here; this is the hub's WINDOWS_BASH path.
+// Git for Windows installs bash here; on Windows the exec shell runs this bash by its full path.
 const WINDOWS_BASH = "C:\\Program Files\\Git\\bin\\bash.exe";
 const CMD_LINE_VAR = "RIG_EXEC_LINE";
 const POSIX_PATH_SEPARATOR = ":";
@@ -14,7 +14,7 @@ const WINDOWS_PATH_SEPARATOR = ";";
 // Both live under the Windows system directory (SystemRoot); pwsh is searched on PATH first, these are the fallbacks.
 const WINDOWS_CMD_FILE = ["System32", "cmd.exe"];
 const WINDOWS_POWERSHELL_FILE = ["System32", "WindowsPowerShell", "v1.0", "powershell.exe"];
-// The hub's registry timeout, in milliseconds.
+// Limit on one `reg query` call, in milliseconds: a hung registry read must not hang an exec start.
 const REG_TIMEOUT_MS = 10_000;
 const MACHINE_KEY = "HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment";
 const USER_KEY = "HKCU\\Environment";

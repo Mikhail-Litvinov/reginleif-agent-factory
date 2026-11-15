@@ -6,9 +6,9 @@ import { apiFail, apiOk, SESSION_IO, SESSION_STOP_TIMEOUT } from "../output.js";
 import { messagesFor } from "../messages.js";
 import { compactSessionCore, requestSession, sessionLive, SESSION_POLL_MS, SESSION_TIMEOUTS } from "../session-core.js";
 
-// Hub plugin/src/mod/commands.ts STOP_COMPACT_TOKENS.
+// A stop compacts the session first only when it holds more tokens than this. The threshold is rig's own; its origin is not recorded in this repo.
 const STOP_COMPACT_TOKENS = 120_000;
-// Hub plugin/src/hub/hub.ts STOP_TIMEOUT_MS.
+// The stop waits at most this long (ms) for the session to end.
 const STOP_TIMEOUT_MS = 15_000;
 
 type Compact = { tokensBefore: number; tokensAfter: number } | { skip: string } | { error: string };

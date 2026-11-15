@@ -16,7 +16,7 @@ import { readRigState } from "./shared.js";
 
 const SAFE_SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const MS_PER_SECOND = 1000;
-// A python helper that hangs must not hang `rig info`; the hub gave the volunteer script the same 5 s (volunteerLimitsTimeoutMs).
+// A python helper that hangs must not hang `rig info`, so each helper call (account and volunteer limits) gets five seconds.
 const HELPER_TIMEOUT_MS = 5 * MS_PER_SECOND;
 const CODEX_HOME_VARIABLE = "CODEX_HOME";
 const ACCOUNT_SCRIPT = "base/tools/account-allowlist.py";

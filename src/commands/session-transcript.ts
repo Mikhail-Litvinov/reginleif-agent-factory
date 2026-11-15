@@ -5,10 +5,13 @@ import { joinPath, toSlashPath } from "../file-system.js";
 import { messagesFor } from "../messages.js";
 import { err, errorText, ok } from "../result.js";
 
-// Hub plugin/src/hub/skill-cleanup.ts: chunk size, backup retention and Windows rename retries.
+// The transcript is read and copied in chunks of this size (1 MiB), so a large file never sits whole in memory.
 const CHUNK_BYTES = 1024 * 1024;
+// Backups kept after a cleanup; older ones are removed.
 const KEEP_BACKUPS = 3;
+// A rename that fails on a busy file (EPERM, EBUSY or EACCES) is tried this many times...
 const RENAME_TRIES = 10;
+// ...with this pause between tries (ms), about two seconds in all.
 const RENAME_RETRY_MS = 200;
 const LF = 10;
 const CR = 13;
