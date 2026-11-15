@@ -32,6 +32,31 @@ const canSymlink = async (): Promise<boolean> => {
 	}
 };
 
+describe("stat and ranged reads of the real file system", () => {
+	test("stat reports size and mtime, null for a missing file or a directory", async () => {
+		const path = join(directory, "a.txt").replaceAll("\\", "/");
+		await writeFile(path, "hello");
+		const fs = createFileSystem();
+
+		const found = await fs.stat(path);
+
+		expect(found?.size).toBe(5);
+		expect(typeof found?.mtimeMs).toBe("number");
+		expect(await fs.stat(`${path}.missing`)).toBeNull();
+		expect(await fs.stat(directory.replaceAll("\\", "/"))).toBeNull();
+	});
+
+	test("readRange returns the requested bytes and fewer at the end of the file", async () => {
+		const path = join(directory, "b.txt").replaceAll("\\", "/");
+		await writeFile(path, "0123456789");
+		const fs = createFileSystem();
+
+		expect(new TextDecoder().decode(await fs.readRange(path, 2, 3))).toBe("234");
+		expect(new TextDecoder().decode(await fs.readRange(path, 8, 100))).toBe("89");
+		expect((await fs.readRange(path, 10, 5)).length).toBe(0);
+	});
+});
+
 describe("atomic write through the in-memory file system", () => {
 	test("writes durably and keeps the mode of the file it replaces", async () => {
 		const fs = new MemoryFileSystem();

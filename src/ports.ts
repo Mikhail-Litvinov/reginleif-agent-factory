@@ -18,6 +18,9 @@ export type ProcessOptions = {
 	cwd?: string;
 	input?: string;
 	environment?: Record<string, string>;
+	// Overrides the runner's default limit for this call; a command that outlives it is killed with its whole process
+	// tree and the call fails with an error.
+	timeoutMs?: number;
 };
 
 export type ProcessPorts = {
@@ -29,6 +32,8 @@ export type RuntimePorts = {
 	fs: FileSystem;
 	assetFs: AssetFileSystem;
 	process: ProcessPorts;
+	// Reads of the process environment (CODEX_HOME and the like); commands never touch process.env directly.
+	environment: { get(name: string): string | undefined };
 	lock: LockDependencies;
 	home: string;
 	currentDirectory: string;

@@ -3,9 +3,15 @@ import type { Result } from "./result.js";
 import { err, errorText, ok } from "./result.js";
 
 export type DirectoryEntry = { name: string; directory: boolean };
+export type FileStat = { size: number; mtimeMs: number };
 
 export type FileSystem = {
 	readText(path: string): Promise<string>;
+	// Size and modification time of a file; null when it does not exist.
+	stat(path: string): Promise<FileStat | null>;
+	// At most `length` bytes starting at byte `start`; fewer at the end of the file. For files that grow without bound
+	// (Codex rollouts), where reading the whole file is not an option.
+	readRange(path: string, start: number, length: number): Promise<Uint8Array>;
 	writeText(path: string, value: string): Promise<void>;
 	appendText(path: string, value: string): Promise<void>;
 	rename(from: string, to: string): Promise<void>;

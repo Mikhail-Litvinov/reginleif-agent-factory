@@ -1,5 +1,5 @@
 import type { EventDependencies } from "../src/events.js";
-import type { FileSystem } from "../src/file-system.js";
+import type { FileStat, FileSystem } from "../src/file-system.js";
 import type { LockDependencies } from "../src/lock.js";
 import type { Result } from "../src/result.js";
 
@@ -40,6 +40,8 @@ class MemoryFileSystem implements FileSystem {
 	async resolveTarget(path: string): Promise<string> { return path; }
 	async modeOf(): Promise<number | null> { return null; }
 	async writeDurable(path: string, value: string): Promise<void> { this.files.set(path, value); }
+	async stat(): Promise<FileStat | null> { return null; }
+	async readRange(): Promise<Uint8Array> { return new Uint8Array(0); }
 	async listDirectory(): Promise<Array<{ name: string; directory: boolean }>> { return []; }
 	uniqueSuffix(): string { this.sequence += 1; return String(this.sequence); }
 }

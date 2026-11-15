@@ -1,4 +1,4 @@
-import type { FileSystem } from "../src/file-system.js";
+import type { FileStat, FileSystem } from "../src/file-system.js";
 import type { FeatureManifest } from "../src/feature.js";
 import type { Result } from "../src/result.js";
 
@@ -43,6 +43,8 @@ class FeatureFileSystem implements FileSystem {
 	async resolveTarget(path: string): Promise<string> { return path; }
 	async modeOf(): Promise<number | null> { return null; }
 	async writeDurable(): Promise<void> {}
+	async stat(): Promise<FileStat | null> { return null; }
+	async readRange(): Promise<Uint8Array> { return new Uint8Array(0); }
 	async listDirectory(): Promise<Array<{ name: string; directory: boolean }>> {
 		return [{ name: "codex", directory: true }, { name: "ignored.txt", directory: false }];
 	}

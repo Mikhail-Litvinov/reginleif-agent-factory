@@ -12,6 +12,7 @@ import { PROCESS_FAILURE_EXIT_CODE } from "../ports.js";
 // An external command (git, claude plugin) that hangs is killed after 15 minutes and counts as failed.
 const MINUTES_PER_TIMEOUT = 15;
 const MILLISECONDS_PER_MINUTE = 60_000;
+const MILLISECONDS_PER_SECOND = 1000;
 export const PROCESS_TIMEOUT_MS = MINUTES_PER_TIMEOUT * MILLISECONDS_PER_MINUTE;
 // Order in which Windows resolves a bare command name that has no extension.
 const WINDOWS_EXECUTABLE_EXTENSIONS = [".exe", ".com", ".cmd", ".bat"] as const;
@@ -73,6 +74,12 @@ export const planSpawn = (
 	return ok({ command: "cmd.exe", args: ["/d", "/s", "/c", `"${parts.map(quoteForCmd).join(" ")}"`], verbatim: true });
 };
 
+const describeDuration = (milliseconds: number): string =>
+	milliseconds >= MILLISECONDS_PER_MINUTE
+		? `${Math.round(milliseconds / MILLISECONDS_PER_MINUTE)} minutes`
+		: `${Math.round(milliseconds / MILLISECONDS_PER_SECOND)} seconds`;
+
+// Kills the child and its descendants by PID (taskkill /T on Windows, the process group elsewhere), never by image name.
 const killTree: ProcessKiller = (child, kind) => new Promise((resolveKill) => {
 	const pid = child.pid;
 	if (pid === undefined) {
@@ -112,8 +119,8 @@ export const runProcess = (
 	let settled = false;
 	let timedOut = false;
 	let disarm: () => void = () => undefined;
-	const timeoutFailure = (): Result<ProcessOutput> =>
-		err(`${command} did not finish within ${Math.round(limits.timeoutMs / MILLISECONDS_PER_MINUTE)} minutes and was killed.`);
+	const timeoutMs = options.timeoutMs ?? limits.timeoutMs;
+	const timeoutFailure = (): Result<ProcessOutput> => err(`${command} did not finish within ${describeDuration(timeoutMs)} and was killed.`);
 	const settle = (result: Result<ProcessOutput>): void => {
 		if (settled) return;
 		settled = true;
@@ -140,7 +147,7 @@ export const runProcess = (
 		child.on("error", (error) => settle(err(errorText(error))));
 		// The killed child can report close before the killer returns, and that exit is still the timeout.
 		child.on("close", (code) => settle(timedOut ? timeoutFailure() : ok({ stdout, stderr, exitCode: code ?? PROCESS_FAILURE_EXIT_CODE })));
-		disarm = limits.timer.start(limits.timeoutMs, () => {
+		disarm = limits.timer.start(timeoutMs, () => {
 			if (settled) return;
 			timedOut = true;
 			void (limits.kill ?? killTree)(child, kind).then(() => {

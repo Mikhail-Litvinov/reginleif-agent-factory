@@ -67,6 +67,7 @@ export const createRealRuntime = async (options: RealRuntimeOptions = {}): Promi
 		fs: fileSystem,
 		assetFs: createNodeAssetFileSystem(),
 		process: processPorts,
+		environment: { get: (name) => process.env[name] },
 		lock: {
 			fs: fileSystem,
 			home,
@@ -190,8 +191,30 @@ const runGit = async (
 		: err(result.value.stderr || result.value.stdout || `git ${args.join(" ")} failed with code ${result.value.exitCode}`);
 };
 
+const isMissingPath = (error: unknown): boolean =>
+	typeof error === "object" && error !== null && "code" in error && (error.code === "ENOENT" || error.code === "ENOTDIR");
+
 export const createFileSystem = (hostKind: HostPlatform = hostPlatform() === "win32" ? "windows" : "posix"): FileSystem => ({
 	readText: (path) => fs.readFile(path, "utf8"),
+	stat: async (path) => {
+		try {
+			const info = await fs.stat(path);
+			return info.isFile() ? { size: info.size, mtimeMs: info.mtimeMs } : null;
+		} catch (error) {
+			if (isMissingPath(error)) return null;
+			throw error;
+		}
+	},
+	readRange: async (path, start, length) => {
+		const handle = await fs.open(path, "r");
+		try {
+			const buffer = new Uint8Array(length);
+			const { bytesRead } = await handle.read(buffer, 0, length, start);
+			return buffer.subarray(0, bytesRead);
+		} finally {
+			await handle.close();
+		}
+	},
 	writeText: (path, value) => fs.writeFile(path, value, "utf8"),
 	appendText: (path, value) => fs.appendFile(path, value, "utf8"),
 	rename: (from, to) => fs.rename(from, to),

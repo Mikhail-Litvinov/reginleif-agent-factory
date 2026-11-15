@@ -83,9 +83,13 @@ OpenRouter: 3/10
 - Claude limits: the freshest `usage.json` `rateLimits` among the sessions whose config dir has the same cswap account
   (`account-allowlist.py account --config-dir <dir>`). An account that cannot be determined means only the session's own.
 - Codex block: only when the feature `codex` is on in rig state and `account-allowlist.py check codex --config-dir <dir>`
-  allows it. Limits come from the newest `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` with a rate-limit event; a window
+  allows it. Limits come from `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-*.jsonl` (`~/.codex` when `CODEX_HOME` is unset or
+  empty): date directories newest first, at most 20 files, ordered by modification time (then name). Each file is
+  read backwards in 64 KiB blocks (stat plus ranged reads, never the whole file) until the last rate-limit event; a window
   whose reset has passed reads 0%.
-- Volunteer block: the same gate with the feature `volunteers`; data from `volunteer-models.py limits --json`.
+- Volunteer block: the same gate with the feature `volunteers`; data from `volunteer-models.py limits --json`. The script
+  and the allowlist tool calls are each bounded by a 5 s timeout (the process tree is killed); a timeout gives the
+  `no data, <reason>` line and the command still exits 0.
 - Context: this session's `usage.json` context (`120/300k`, `≈` when estimated, `1.5M` without auto-compact).
 - "(data N old)" appears when the data is 5 minutes old or more.
 - A block without data is one line: `<Name>: no data, <reason>`. A failing source never fails the command.

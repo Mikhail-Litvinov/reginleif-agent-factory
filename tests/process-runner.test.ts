@@ -11,6 +11,7 @@ const MS_PER_MINUTE = 60_000;
 const POLL_MS = 25;
 const POLL_ATTEMPTS = 400;
 const NEVER_FIRES_MS = 1_000_000;
+const SHORT_TIMEOUT_MS = 5000;
 // bun's default per-test timeout is 5 s; the tree test polls for up to POLL_MS * POLL_ATTEMPTS (10 s) before its
 // assertion fails, so it needs the poll budget plus the default, or a survivor would show as a timeout, not a failure.
 const BUN_DEFAULT_TEST_TIMEOUT_MS = 5_000;
@@ -71,6 +72,20 @@ describe("process time limit", () => {
 
 		expect(result.ok).toBe(false);
 		if (!result.ok) expect(result.error).toContain("15 minutes");
+	});
+
+	test("a per-call timeoutMs replaces the default limit and the error names it", async () => {
+		const manual = manualTimer();
+		const limits: ProcessLimits = { timeoutMs: PROCESS_TIMEOUT_MS, timer: manual.timer };
+		const pending = runProcess(process.env.PATH ?? "", process.execPath, ["-e", "setInterval(() => undefined, 1000)"], { timeoutMs: SHORT_TIMEOUT_MS }, limits);
+		await wait(POLL_MS);
+		expect(manual.requested).toEqual([SHORT_TIMEOUT_MS]);
+
+		manual.fire();
+		const result = await pending;
+
+		expect(result.ok).toBe(false);
+		if (!result.ok) expect(result.error).toContain("5 seconds");
 	});
 
 	test("a process that closes while its tree is being killed still counts as failed", async () => {

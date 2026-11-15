@@ -5,7 +5,7 @@ import type { Result } from "../result.js";
 import type { RuntimePorts } from "../ports.js";
 
 import { readCodexLimits } from "../codex-rollout.js";
-import { joinPath } from "../file-system.js";
+import { joinPath, toSlashPath } from "../file-system.js";
 import { formatInfo } from "../info-text.js";
 import { messagesFor } from "../messages.js";
 import { PROCESS_SUCCESS_EXIT_CODE } from "../ports.js";
@@ -14,6 +14,9 @@ import { readRigState } from "./shared.js";
 
 const SAFE_SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const MS_PER_SECOND = 1000;
+// A python helper that hangs must not hang `rig info`; the hub gave the volunteer script the same 5 s (volunteerLimitsTimeoutMs).
+const HELPER_TIMEOUT_MS = 5 * MS_PER_SECOND;
+const CODEX_HOME_VARIABLE = "CODEX_HOME";
 const ACCOUNT_SCRIPT = "base/tools/account-allowlist.py";
 const VOLUNTEER_TOOLS_DIRECTORY = "features/volunteers/tools";
 const VOLUNTEER_SCRIPT = "volunteer-models.py";
@@ -82,7 +85,7 @@ const readOptionalText = async (runtime: RuntimePorts, path: string): Promise<st
 
 // Runs a subcommand of the shared allowlist tool and returns its one JSON line; null on any failure.
 const runAllowlistTool = async (runtime: RuntimePorts, state: RigState, args: readonly string[]): Promise<Record<string, unknown> | null> => {
-	const result = await runtime.process.run(runtime.pythonCommand, ["-I", joinPath(state.paths.repo, ACCOUNT_SCRIPT), ...args]);
+	const result = await runtime.process.run(runtime.pythonCommand, ["-I", joinPath(state.paths.repo, ACCOUNT_SCRIPT), ...args], { timeoutMs: HELPER_TIMEOUT_MS });
 	if (!result.ok || result.value.exitCode !== PROCESS_SUCCESS_EXIT_CODE) return null;
 	const parsed = parseJson(result.value.stdout.trim());
 	return isRecord(parsed) ? parsed : null;
@@ -149,7 +152,8 @@ const freshestClaudeLimits = async (
 };
 
 const codexSource = async (runtime: RuntimePorts, messages: Messages): Promise<Source<{ at: number; limits: Limit[] }>> => {
-	const reading = await readCodexLimits(runtime.fs, joinPath(runtime.home, ".codex"));
+	const codexHome = runtime.environment.get(CODEX_HOME_VARIABLE);
+	const reading = await readCodexLimits(runtime.fs, codexHome === undefined || codexHome === "" ? joinPath(runtime.home, ".codex") : toSlashPath(codexHome));
 	return reading === null ? { kind: "error", reason: messages.info.noCodexRollout() } : { kind: "ok", value: reading };
 };
 
@@ -183,7 +187,7 @@ const volunteerSource = async (runtime: RuntimePorts, state: RigState, messages:
 		present = false;
 	}
 	if (!present) return { kind: "error", reason: messages.info.scriptMissing() };
-	const result = await runtime.process.run(runtime.pythonCommand, ["-I", joinPath(toolsDirectory, VOLUNTEER_SCRIPT), "limits", "--json"]);
+	const result = await runtime.process.run(runtime.pythonCommand, ["-I", joinPath(toolsDirectory, VOLUNTEER_SCRIPT), "limits", "--json"], { timeoutMs: HELPER_TIMEOUT_MS });
 	if (!result.ok) return { kind: "error", reason: result.error };
 	if (result.value.exitCode !== PROCESS_SUCCESS_EXIT_CODE) {
 		return { kind: "error", reason: messages.info.scriptExit(result.value.exitCode, result.value.stderr.trim()) };

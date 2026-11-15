@@ -1,14 +1,14 @@
 import type { RigState } from "../src/state.js";
 import type { RuntimePorts } from "../src/ports.js";
 import type { Result } from "../src/result.js";
-import type { ProcessOutput } from "../src/ports.js";
+import type { ProcessOptions, ProcessOutput } from "../src/ports.js";
 
 import { describe, expect, test } from "bun:test";
 
 import { runCli } from "../src/cli.js";
-import { parseRolloutLimits } from "../src/codex-rollout.js";
+import { TAIL_BLOCK_BYTES, parseRolloutLimits } from "../src/codex-rollout.js";
 import { PROCESS_FAILURE_EXIT_CODE, PROCESS_SUCCESS_EXIT_CODE } from "../src/ports.js";
-import { ok } from "../src/result.js";
+import { err, ok } from "../src/result.js";
 import { createMemoryRuntime } from "./fakes/memory-runtime.js";
 
 const HOME = "/home/test";
@@ -24,6 +24,7 @@ const FAILURE_EXIT_CODE = 1;
 const SCRIPT_FAILURE_CODE = 2;
 const TOOLS_DIRECTORY = `${REPO}/features/volunteers/tools`;
 const ROLLOUT_DIRECTORY = `${HOME}/.codex/sessions/2026/10/29`;
+const VOLUNTEER_TIMEOUT_MS = 5000;
 const OWN_ID = "11111111-aaaa";
 const SAME_ACCOUNT_ID = "22222222-bbbb";
 const OTHER_ACCOUNT_ID = "33333333-cccc";
@@ -32,7 +33,7 @@ const SAME_ACCOUNT_DIRECTORY = "/cfg/1-twin";
 const OTHER_ACCOUNT_DIRECTORY = "/cfg/2-other";
 
 type Harness = ReturnType<typeof createMemoryRuntime>;
-type Tool = { accounts: Record<string, number | null>; allowed: Record<string, boolean>; volunteers: () => Result<ProcessOutput> };
+type Tool = { accounts: Record<string, number | null>; allowed: Record<string, boolean>; volunteers: (options?: ProcessOptions) => Result<ProcessOutput> };
 
 const iso = (ms: number): string => new Date(ms).toISOString();
 
@@ -63,8 +64,8 @@ const withTool = (harness: Harness, tool: Tool, language: RuntimePorts["language
 	language,
 	process: {
 		...harness.runtime.process,
-		run: async (command, args) => {
-			harness.processCalls.push({ command, args });
+		run: async (command, args, options) => {
+			harness.processCalls.push({ command, args, options });
 			const [, script, subcommand, third, fourth] = args;
 			if (script.endsWith("account-allowlist.py") && subcommand === "account") {
 				return stdout({ present: true, account: tool.accounts[fourth] ?? null });
@@ -72,7 +73,7 @@ const withTool = (harness: Harness, tool: Tool, language: RuntimePorts["language
 			if (script.endsWith("account-allowlist.py") && subcommand === "check") {
 				return stdout({ allowed: tool.allowed[third] === true, reason: "" });
 			}
-			if (script.endsWith("volunteer-models.py")) return tool.volunteers();
+			if (script.endsWith("volunteer-models.py")) return tool.volunteers(options);
 			return ok({ stdout: "", stderr: "unexpected", exitCode: PROCESS_FAILURE_EXIT_CODE });
 		},
 	},
@@ -264,13 +265,13 @@ describe("rig info", () => {
 		const text = (await run(withTool(harness, tool(), "ru"), ["info", "--session", OWN_ID])).output.join("\n");
 
 		expect(text).toBe([
-			"**Лимиты Claude** (данные 10 мин назад)",
-			"5 часов: 10% (сброс через 1 ч 30 мин)",
-			"Неделя: 40% (сброс через 2 д 5 ч)",
+			"**\u041b\u0438\u043c\u0438\u0442\u044b Claude** (\u0434\u0430\u043d\u043d\u044b\u0435 10 \u043c\u0438\u043d \u043d\u0430\u0437\u0430\u0434)",
+			"5 \u0447\u0430\u0441\u043e\u0432: 10% (\u0441\u0431\u0440\u043e\u0441 \u0447\u0435\u0440\u0435\u0437 1 \u0447 30 \u043c\u0438\u043d)",
+			"\u041d\u0435\u0434\u0435\u043b\u044f: 40% (\u0441\u0431\u0440\u043e\u0441 \u0447\u0435\u0440\u0435\u0437 2 \u0434 5 \u0447)",
 			"",
-			"Лимиты Codex: нет данных — в сессиях Codex ещё нет лимитов",
+			"\u041b\u0438\u043c\u0438\u0442\u044b Codex: \u043d\u0435\u0442 \u0434\u0430\u043d\u043d\u044b\u0445 — \u0432 \u0441\u0435\u0441\u0441\u0438\u044f\u0445 Codex \u0435\u0449\u0451 \u043d\u0435\u0442 \u043b\u0438\u043c\u0438\u0442\u043e\u0432",
 			"",
-			"**Контекст**",
+			"**\u041a\u043e\u043d\u0442\u0435\u043a\u0441\u0442**",
 			"120/300k",
 		].join("\n"));
 	});
@@ -287,6 +288,99 @@ describe("rig info", () => {
 		expect(await run(runtime, ["info", "--session", "missing-id"])).toEqual({ code: FAILURE_EXIT_CODE, output: ["rig error: Unknown session: missing-id"] });
 		expect(await run(runtime, ["info"])).toEqual({ code: FAILURE_EXIT_CODE, output: ["Usage: rig info --session <id>"] });
 		expect(await run(runtime, ["info", "--session"])).toEqual({ code: FAILURE_EXIT_CODE, output: ["Usage: rig info --session <id>"] });
+	});
+});
+
+describe("rig info source limits", () => {
+	test("a hung volunteer script is bounded by a timeout and becomes a reason line; the command still exits 0", async () => {
+		const harness = baseHarness({ volunteers: true });
+		seedSession(harness, OWN_ID, OWN_DIRECTORY);
+		seedVolunteerScript(harness);
+		// The fake process answers like the real runner does once the per-call timeout expires.
+		const volunteers = (options?: ProcessOptions): Result<ProcessOutput> =>
+			options?.timeoutMs === VOLUNTEER_TIMEOUT_MS ? err("python3 did not finish within 5 seconds and was killed.") : noVolunteers();
+
+		const result = await run(withTool(harness, tool({ volunteers })), ["info", "--session", OWN_ID]);
+
+		expect(result.code).toBe(PROCESS_SUCCESS_EXIT_CODE);
+		expect(result.output.join("\n")).toContain("Volunteer limits: no data, python3 did not finish within 5 seconds and was killed.");
+	});
+
+	test("every python helper call carries a timeout", async () => {
+		const harness = baseHarness({ codex: true, volunteers: true });
+		seedSession(harness, OWN_ID, OWN_DIRECTORY);
+		seedVolunteerScript(harness);
+
+		await run(withTool(harness, tool()), ["info", "--session", OWN_ID]);
+
+		expect(harness.processCalls.length).toBeGreaterThan(0);
+		for (const call of harness.processCalls) expect(call.options?.timeoutMs).toBeGreaterThan(0);
+	});
+
+	test("CODEX_HOME decides where the rollouts are read", async () => {
+		const harness = baseHarness({ codex: true });
+		seedSession(harness, OWN_ID, OWN_DIRECTORY);
+		harness.environment.set("CODEX_HOME", "/custom/codex");
+		harness.fs.seed("/custom/codex/sessions/2026/10/29/rollout-a.jsonl", `${rolloutLine(NOW - HOUR, { used_percent: 61, window_minutes: 300 }, null)}\n`);
+		seedRollout(harness, "rollout-b.jsonl", `${rolloutLine(NOW - HOUR, { used_percent: 9, window_minutes: 300 }, null)}\n`);
+
+		const text = (await run(withTool(harness, tool()), ["info", "--session", OWN_ID])).output.join("\n");
+
+		expect(text).toContain("5 hours: 61%");
+		expect(text).not.toContain("9%");
+	});
+
+	test("the newest file by mtime wins over the newest name within a date directory", async () => {
+		const harness = baseHarness({ codex: true });
+		seedSession(harness, OWN_ID, OWN_DIRECTORY);
+		seedRollout(harness, "rollout-2026-10-29T20-00-00-late-name.jsonl", `${rolloutLine(NOW - 2 * HOUR, { used_percent: 11, window_minutes: 300 }, null)}\n`);
+		seedRollout(harness, "rollout-2026-10-29T08-00-00-early-name.jsonl", `${rolloutLine(NOW - HOUR, { used_percent: 77, window_minutes: 300 }, null)}\n`);
+		harness.fs.mtimes.set(`${ROLLOUT_DIRECTORY}/rollout-2026-10-29T20-00-00-late-name.jsonl`, NOW - 2 * HOUR);
+		harness.fs.mtimes.set(`${ROLLOUT_DIRECTORY}/rollout-2026-10-29T08-00-00-early-name.jsonl`, NOW - HOUR);
+
+		const text = (await run(withTool(harness, tool()), ["info", "--session", OWN_ID])).output.join("\n");
+
+		expect(text).toContain("5 hours: 77%");
+	});
+
+	test("the last rate-limit line is found across a block boundary without reading the whole file", async () => {
+		const harness = baseHarness({ codex: true });
+		seedSession(harness, OWN_ID, OWN_DIRECTORY);
+		const wanted = JSON.stringify({
+			timestamp: iso(NOW - HOUR),
+			type: "event_msg",
+			note: "\u00e9".repeat(TAIL_BLOCK_BYTES / 8),
+			payload: { type: "token_count", rate_limits: { limit_id: "codex", primary: { used_percent: 42, window_minutes: 300 }, secondary: null } },
+		});
+		const older = rolloutLine(NOW - 5 * HOUR, { used_percent: 1, window_minutes: 300 }, null);
+		const wantedBytes = new TextEncoder().encode(wanted).length;
+		// The wanted line ends up straddling the second block counted from the end of the file.
+		const tailBytes = 2 * TAIL_BLOCK_BYTES - Math.floor(wantedBytes / 2);
+		const filler = (bytes: number): string => `${"x".repeat(bytes - 1)}\n`;
+		const text = `${filler(8 * TAIL_BLOCK_BYTES)}${older}\n${wanted}\n${filler(tailBytes)}`;
+		const path = `${ROLLOUT_DIRECTORY}/rollout-big.jsonl`;
+		seedRollout(harness, "rollout-big.jsonl", text);
+		const size = new TextEncoder().encode(text).length;
+
+		const output = (await run(withTool(harness, tool()), ["info", "--session", OWN_ID])).output.join("\n");
+
+		expect(output).toContain("5 hours: 42%");
+		expect(harness.fs.textReads).not.toContain(path);
+		const reads = harness.fs.rangeReads.filter((read) => read.path === path);
+		expect(reads.length).toBeGreaterThanOrEqual(3);
+		expect(reads.reduce((total, read) => total + read.length, 0)).toBeLessThan(size / 2);
+	});
+
+	test("a match in the last block needs one ranged read", async () => {
+		const harness = baseHarness({ codex: true });
+		seedSession(harness, OWN_ID, OWN_DIRECTORY);
+		const path = `${ROLLOUT_DIRECTORY}/rollout-small.jsonl`;
+		seedRollout(harness, "rollout-small.jsonl", `${"y".repeat(3 * TAIL_BLOCK_BYTES)}\n${rolloutLine(NOW - HOUR, { used_percent: 5, window_minutes: 300 }, null)}\n`);
+
+		const output = (await run(withTool(harness, tool()), ["info", "--session", OWN_ID])).output.join("\n");
+
+		expect(output).toContain("5 hours: 5%");
+		expect(harness.fs.rangeReads.filter((read) => read.path === path)).toHaveLength(1);
 	});
 });
 

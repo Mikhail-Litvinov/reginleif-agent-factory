@@ -1,4 +1,4 @@
-import type { DirectoryEntry, FileSystem } from "../../src/file-system.js";
+import type { DirectoryEntry, FileStat, FileSystem } from "../../src/file-system.js";
 import type { RuntimePorts, ProcessOptions, ProcessOutput } from "../../src/ports.js";
 import type { Result } from "../../src/result.js";
 import type { FileContent } from "../../src/content-hash.js";
@@ -30,6 +30,10 @@ export class MemoryFileSystem implements FileSystem {
 	readonly binaries = new Map<string, Uint8Array>();
 	readonly executables = new Set<string>();
 	readonly operations: string[] = [];
+	// Modification times set by tests (files without one report 0), and the reads the code under test made.
+	readonly mtimes = new Map<string, number>();
+	readonly textReads: string[] = [];
+	readonly rangeReads: Array<{ path: string; start: number; length: number }> = [];
 	// Symlink path -> the file it points to, and permission bits of files that have them.
 	readonly links = new Map<string, string>();
 	readonly modes = new Map<string, number>();
@@ -45,7 +49,20 @@ export class MemoryFileSystem implements FileSystem {
 		this.directories.add(parentPath(path));
 	}
 
+	async stat(path: string): Promise<FileStat | null> {
+		const value = this.files.get(path);
+		return value === undefined ? null : { size: new TextEncoder().encode(value).length, mtimeMs: this.mtimes.get(path) ?? 0 };
+	}
+
+	async readRange(path: string, start: number, length: number): Promise<Uint8Array> {
+		this.rangeReads.push({ path, start, length });
+		const value = this.files.get(path);
+		if (value === undefined) throw new MissingPathError(`Missing file ${path}`);
+		return new TextEncoder().encode(value).subarray(start, start + length);
+	}
+
 	async readText(path: string): Promise<string> {
+		this.textReads.push(path);
 		const value = this.files.get(path);
 		if (value === undefined) throw new MissingPathError(`Missing file ${path}`);
 		return value;
@@ -203,6 +220,8 @@ export type MemoryRuntimeHarness = {
 	installedPlugins: Set<string>;
 	// Delays, in milliseconds, that the code under test asked the clock to sleep; the fake clock does not wait.
 	sleeps: number[];
+	// Environment variables the fake `environment` port reports.
+	environment: Map<string, string>;
 };
 
 export const createMemoryRuntime = (platform: RuntimePorts["platform"] = "linux"): MemoryRuntimeHarness => {
@@ -212,6 +231,7 @@ export const createMemoryRuntime = (platform: RuntimePorts["platform"] = "linux"
 	const unavailableCommands = new Set<string>();
 	const installedPlugins = new Set<string>();
 	const sleeps: number[] = [];
+	const environment = new Map<string, string>();
 	let eventId = INITIAL_EVENT_ID;
 	const assetFs = {
 		readFile: async (path: string): Promise<Result<FileContent>> => {
@@ -285,6 +305,7 @@ export const createMemoryRuntime = (platform: RuntimePorts["platform"] = "linux"
 			},
 			isAvailable: async (command) => !unavailableCommands.has(command) && !unavailableCommands.has(command.replaceAll("\\", "/").split("/").pop() ?? command),
 		},
+		environment: { get: (name) => environment.get(name) },
 		lock: {
 			fs,
 			home: "/home/test",
@@ -321,7 +342,7 @@ export const createMemoryRuntime = (platform: RuntimePorts["platform"] = "linux"
 			return ok(undefined);
 		},
 	};
-	return { runtime, fs, processCalls, timeline, unavailableCommands, installedPlugins, sleeps };
+	return { runtime, fs, processCalls, timeline, unavailableCommands, installedPlugins, sleeps, environment };
 };
 
 const SETTINGS_PATH = "/home/test/.claude/settings.json";

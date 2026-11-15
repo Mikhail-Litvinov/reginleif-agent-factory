@@ -214,8 +214,8 @@ class EntryPointsTest(unittest.TestCase):
         self.assertEqual(out.getvalue(), "")
 
 
-class CliTest(unittest.TestCase):
-    """`check <category> --config-dir <dir>` run as a subprocess with a fake HOME (and USERPROFILE on Windows)."""
+class CliRunner(unittest.TestCase):
+    """Shared subprocess runner with a fake HOME (and USERPROFILE on Windows); holds no tests, so subclasses do not re-run each other's."""
 
     def run_cli(self, home, argv, own_config_dir=None):
         env = {key: value for key, value in os.environ.items() if key not in HOME_ENV}
@@ -224,6 +224,10 @@ class CliTest(unittest.TestCase):
             env["CLAUDE_CONFIG_DIR"] = own_config_dir
         return subprocess.run([sys.executable, "-I", str(MODULE), *argv], env=env, capture_output=True,
                               encoding="utf-8", timeout=CLI_TIMEOUT_SECONDS, check=False)
+
+
+class CliTest(CliRunner):
+    """`check <category> --config-dir <dir>` run as a subprocess."""
 
     def query(self, home, category, config_dir=None, own_config_dir=None):
         argv = ["check", category]
@@ -303,7 +307,7 @@ class CliTest(unittest.TestCase):
             self.assertEqual(proc.stdout, "", argv)
 
 
-class AccountCliTest(CliTest):
+class AccountCliTest(CliRunner):
     """`account --config-dir <dir>` prints {"present", "account"} as one JSON line."""
 
     def account(self, home, config_dir=None):
