@@ -191,11 +191,13 @@ describe("API output guard", () => {
 		expect(parseCommand(["language", "--json"]).ok).toBe(true);
 	});
 
-	test("session compact and rename follow the JSON API contract", async () => {
+	test("session compact, rename and autocompact follow the JSON API contract", async () => {
 		for (const [args, result] of [
 			[["session", "compact", SESSION_ID], { tokensBefore: 90, tokensAfter: 30 }],
 			[["session", "compact", SESSION_ID], { skip: "hook veto" }],
 			[["session", "rename", SESSION_ID, "new title"], { name: "new title" }],
+			[["session", "autocompact", SESSION_ID, "200000"], { window: 200000, text: "Window set" }],
+			[["session", "autocompact", SESSION_ID, "auto"], { window: "auto" }],
 		] as const) {
 			const harness = seed("installed");
 			harness.fs.seed(`${SESSIONS}/${SESSION_ID}.json`, JSON.stringify({ session_id: SESSION_ID, cwd: null, transcript_path: null, pid: 42, pid_created: "2026-01-01T00:00:00.000000Z", started_at: "2026-01-01T00:00:00Z", ended_at: null }));

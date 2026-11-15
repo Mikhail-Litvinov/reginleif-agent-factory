@@ -29,6 +29,8 @@ export type Deps = {
   compact(instructions: string | undefined): Promise<Compaction>;
   // Runs the session's own /rename; the engine queues it until the session is idle.
   rename(name: string): Promise<void>;
+  // Runs the session's own /autocompact with the window (a number or "auto"); resolves to the command's text, if any.
+  autocompact(window: number | "auto"): Promise<string | undefined>;
   now(): number;
 };
 
@@ -104,7 +106,7 @@ export class Window {
     const parsed = parseRequest(id, text);
     if (!parsed.ok) return this.answer({ id, ok: false, error: parsed.error });
     const request = parsed.value;
-    // The read-only ops answer at once; compact and rename wait for the turn to end.
+    // The read-only ops answer at once; compact, rename and autocompact wait for the turn to end.
     if (request.op === "usage") {
       try {
         return await this.answer({ id, ok: true, result: await this.snapshot() });
@@ -142,6 +144,14 @@ export class Window {
         if (name === "") return { id: request.id, ok: false, error: "args.name must be a non-empty string" };
         await this.deps.rename(name);
         return { id: request.id, ok: true, result: { name } };
+      }
+      if (request.op === "autocompact") {
+        const window = request.args.window;
+        if (window !== "auto" && !(typeof window === "number" && Number.isSafeInteger(window) && window > 0)) {
+          return { id: request.id, ok: false, error: 'args.window must be a positive integer or "auto"' };
+        }
+        const text = (await this.deps.autocompact(window))?.trim();
+        return { id: request.id, ok: true, result: text ? { window, text } : { window } };
       }
       const instructions = typeof request.args.instructions === "string" ? request.args.instructions : undefined;
       const compaction = await this.deps.compact(instructions);

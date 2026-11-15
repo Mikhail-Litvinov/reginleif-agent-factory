@@ -48,6 +48,7 @@ const USAGE: string[] = [
 	"rig session list",
 	"rig session compact <id> [--instructions <text>]",
 	"rig session rename <id> <name...>",
+	"rig session autocompact <id> <N|auto>",
 	"rig session stop <id>",
 	"rig session cleanup <id>",
 	"rig session run <id> [--mode <mode>] [--account <n>]",

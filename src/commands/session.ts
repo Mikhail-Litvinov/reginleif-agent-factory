@@ -7,6 +7,7 @@ import { apiFail, ERROR_CODE_USAGE } from "../output.js";
 import { messagesFor } from "../messages.js";
 import { cleanupSession } from "./session-cleanup.js";
 import { compactSession } from "./session-compact.js";
+import { autocompactSession } from "./session-autocompact.js";
 import { renameSession } from "./session-rename.js";
 import { stopSession } from "./session-stop.js";
 import { modeCommand, runCommand } from "./session-run.js";
@@ -21,6 +22,6 @@ export const SESSION_COMMANDS: Record<string, SessionHandler> = { list: (runtime
 	if (args.length !== 1) return apiFail(ERROR_CODE_USAGE, messagesFor(runtime.language).session.usageCleanup());
 	const session = await lookupSessionForCommand(runtime, args[0], true);
 	return session.ok ? cleanupSession(runtime, session.value, progress) : session;
-}, compact: compactSession, rename: renameSession, run: runCommand, mode: modeCommand };
+}, compact: compactSession, rename: renameSession, autocompact: autocompactSession, run: runCommand, mode: modeCommand };
 export const isSessionCommand = (name: string): boolean => Object.hasOwn(SESSION_COMMANDS, name);
 export const runSessionCommand = (runtime: RuntimePorts, name: string, args: readonly string[], progress: (event: ProgressEvent) => void): Promise<ApiResult<JsonValue>> => SESSION_COMMANDS[name](runtime, args, progress);

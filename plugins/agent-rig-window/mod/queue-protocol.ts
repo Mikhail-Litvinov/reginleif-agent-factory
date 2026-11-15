@@ -1,7 +1,7 @@
 // Queue identifiers and wire shapes shared by rig and the window.
 export const ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 export const REQUEST_SUFFIX = ".json";
-export const OPS = ["compact", "rename", "usage", "mode"] as const;
+export const OPS = ["compact", "rename", "autocompact", "usage", "mode"] as const;
 export type Op = (typeof OPS)[number];
 export type Args = Record<string, unknown>;
 export type Request = { id: string; op: Op; args: Args };

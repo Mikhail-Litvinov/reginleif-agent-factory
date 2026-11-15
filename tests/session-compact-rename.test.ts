@@ -3,10 +3,11 @@ import type { SessionRecord } from "../src/session-core.js";
 import { describe, expect, test } from "bun:test";
 
 import { runCli } from "../src/cli.js";
+import { autocompactSession } from "../src/commands/session-autocompact.js";
 import { compactSession } from "../src/commands/session-compact.js";
 import { renameSession } from "../src/commands/session-rename.js";
 import { SESSION_ENDED, SESSION_MODULE_ERROR, SESSION_NO_MODULE } from "../src/output.js";
-import { COMPACT_TIMEOUT_MS, SESSION_TIMEOUTS } from "../src/session-core.js";
+import { AUTOCOMPACT_TIMEOUT_MS, COMPACT_TIMEOUT_MS, SESSION_TIMEOUTS } from "../src/session-core.js";
 import { ok } from "../src/result.js";
 import { createMemoryRuntime } from "./fakes/memory-runtime.js";
 
@@ -100,6 +101,62 @@ describe("session compact and rename", () => {
 	test("rename rejects an empty trimmed name", async () => {
 		const harness = setup(null);
 		expect(errorCode(await renameSession(harness.runtime, ["abc", "  "], () => {}))).toBe("usage");
+	});
+
+	test("autocompact sends the window and returns it with the command text", async () => {
+		for (const [arg, window] of [["333000", 333000], ["auto", "auto"]] as const) {
+			const harness = setup({ window, text: "Auto-compact window set" });
+			let request: string | undefined;
+			const writeText = harness.fs.writeText.bind(harness.fs);
+			harness.fs.writeText = async (path, value) => {
+				if (path.endsWith(".tmp")) request = value;
+				await writeText(path, value);
+			};
+			expect(await autocompactSession(harness.runtime, ["abc", arg], () => {})).toEqual({ ok: true, value: { session: "abc", window, text: "Auto-compact window set" } });
+			expect(JSON.parse(request ?? "null")).toMatchObject({ op: "autocompact", args: { window } });
+		}
+		expect(SESSION_TIMEOUTS.autocompact).toBe(AUTOCOMPACT_TIMEOUT_MS);
+	});
+
+	test("autocompact omits text when the command returned none", async () => {
+		const harness = setup({ window: "auto" });
+		expect(await autocompactSession(harness.runtime, ["abc", "auto"], () => {})).toEqual({ ok: true, value: { session: "abc", window: "auto" } });
+	});
+
+	test("autocompact accepts only decimal digits above zero or auto", async () => {
+		for (const bad of ["0", "-5", "333k", "1.5", "1e3", "AUTO", "", "0x10", "+5", "007x"]) {
+			expect(errorCode(await autocompactSession(setup(null).runtime, ["abc", bad], () => {}))).toBe("usage");
+		}
+		expect(errorCode(await autocompactSession(setup(null).runtime, ["abc"], () => {}))).toBe("usage");
+		expect(errorCode(await autocompactSession(setup(null).runtime, ["abc", "5", "6"], () => {}))).toBe("usage");
+		expect(errorCode(await autocompactSession(setup(null).runtime, ["abc", "99999999999999999999"], () => {}))).toBe("usage");
+	});
+
+	test("autocompact rejects a response without the window", async () => {
+		expect(errorCode(await autocompactSession(setup({ text: "x" }).runtime, ["abc", "auto"], () => {}))).toBe("session-bad-response");
+	});
+
+	test("autocompact reports module errors, an ended session and a missing module", async () => {
+		const failed = setup(null);
+		failed.fs.seed(`${ROOT}/abc/responses/event-1.json`, JSON.stringify({ id: "event-1", ok: false, error: "module failed" }));
+		expect(errorCode(await autocompactSession(failed.runtime, ["abc", "auto"], () => {}))).toBe(SESSION_MODULE_ERROR);
+		const ended = setup(null);
+		ended.runtime.process.createdAt = async () => ok({ "42": "different" });
+		expect(errorCode(await autocompactSession(ended.runtime, ["abc", "auto"], () => {}))).toBe(SESSION_ENDED);
+		const none = setup(null);
+		none.fs.directories.delete(`${ROOT}/abc`);
+		expect(errorCode(await autocompactSession(none.runtime, ["abc", "auto"], () => {}))).toBe(SESSION_NO_MODULE);
+	});
+
+	test("autocompact runs through the CLI as one JSON object", async () => {
+		const harness = setup({ window: 200000 });
+		const output: string[] = [];
+		expect(await runCli(["session", "autocompact", "abc", "200000"], (line) => output.push(line), harness.runtime)).toBe(0);
+		expect(output).toHaveLength(1);
+		expect(JSON.parse(output[0])).toEqual({ session: "abc", window: 200000 });
+		const bad: string[] = [];
+		expect(await runCli(["session", "autocompact", "abc", "333k"], (line) => bad.push(line), setup(null).runtime)).toBe(1);
+		expect(JSON.parse(bad[0])).toHaveProperty("error.code", "usage");
 	});
 
 	test("both CLI subcommands keep success and failure output to one JSON object", async () => {

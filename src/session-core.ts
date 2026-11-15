@@ -14,7 +14,9 @@ export const READ_TIMEOUT_MS = 3 * SESSION_POLL_MS;
 // Hub CLEANUP_COMPACT_MS (plugin/src/hub/hub.ts:87); rename also waits for the turn to end.
 export const COMPACT_TIMEOUT_MS = 10 * 60 * SESSION_POLL_MS;
 export const RENAME_TIMEOUT_MS = COMPACT_TIMEOUT_MS;
-export const SESSION_TIMEOUTS: Record<Op, number> = { compact: COMPACT_TIMEOUT_MS, rename: RENAME_TIMEOUT_MS, usage: READ_TIMEOUT_MS, mode: READ_TIMEOUT_MS };
+// Like rename: the command waits for the turn to end, so it gets the same allowance.
+export const AUTOCOMPACT_TIMEOUT_MS = COMPACT_TIMEOUT_MS;
+export const SESSION_TIMEOUTS: Record<Op, number> = { compact: COMPACT_TIMEOUT_MS, rename: RENAME_TIMEOUT_MS, autocompact: AUTOCOMPACT_TIMEOUT_MS, usage: READ_TIMEOUT_MS, mode: READ_TIMEOUT_MS };
 
 export type SessionRecord = { id: string; cwd: string | null; transcriptPath: string | null; pid: number | null; pidCreated: string | null; startedAt: string; endedAt: string | null };
 export type SessionSummary = { id: string; cwd: string | null; transcriptPath: string | null; pid: number | null; startedAt: string; live: boolean; module: boolean };

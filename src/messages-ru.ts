@@ -46,6 +46,7 @@ export const ru: Messages = {
 		usage: (): string => "Использование: rig session <subcommand> [arguments]",
 		usageCompact: (): string => "Использование: rig session compact <id> [--instructions <text>]",
 		usageRename: (): string => "Использование: rig session rename <id> <name...>",
+		usageAutocompact: (): string => "Использование: rig session autocompact <id> <N|auto>",
 		badId: (id: string): string => `Некорректный id сессии: ${id}`,
 		unknown: (id: string): string => `Неизвестная сессия: ${id}`,
 		invalid: (id: string): string => `Некорректная запись сессии: ${id}`,

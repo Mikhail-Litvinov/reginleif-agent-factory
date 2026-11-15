@@ -362,6 +362,7 @@ error, in event texts and in the generated agent rules.
 | `rig exec list` | `{runs: [...]}` | nothing yet | JSON |
 | `rig session compact <id> [--instructions <text>]` | `{session, tokensBefore, tokensAfter}` or `{session, skip}`; failure codes `usage` and common session errors; progress `session-waiting` | compact result | JSON |
 | `rig session rename <id> <name...>` | `{session, name}`; failure codes `usage` and common session errors; progress `session-waiting` | rename result | JSON |
+| `rig session autocompact <id> <N\|auto>` | `{session, window: N \| "auto", text?}`; failure codes `usage` and common session errors; progress `session-waiting` | autocompact result | JSON |
 | `rig session stop <id>` | `{session, stopped, compacted}` or `{session, stopped: false, reason}` | session waiting | JSON |
 | `rig session cleanup <id>` | `{session, compacted, backup, skillsRemoved}` | session waiting | JSON |
 | `rig session run <id> [--mode <mode>] [--account <n>]` | `{session, pid, mode, account}`; failures `usage`, common session errors, `state-unreadable`, `launch-unavailable`, `launch-invalid`, `launch-account-lookup`, `launch-failed`, `launch-timeout`, `session-running`; no progress | nothing yet | JSON |

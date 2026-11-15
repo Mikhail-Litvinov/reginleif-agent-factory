@@ -19,13 +19,15 @@ type World = {
   files: Map<string, string>;
   compactions: (string | undefined)[];
   renames: string[];
+  autocompacts: string[];
   compactResult: { skip?: string };
+  autocompactText?: string;
   clock: ReturnType<typeof mock.clock>;
 };
 
 // Every `$` call the module makes, answered by the test; `session.start` is the engine's own echo.
 function world(on: On): World {
-  const w: World = { files: new Map(), compactions: [], renames: [], compactResult: {}, clock: mock.clock(on) };
+  const w: World = { files: new Map(), compactions: [], renames: [], autocompacts: [], compactResult: {}, clock: mock.clock(on) };
   on("session.start", (_, e) => ({ cwd: e.cwd }));
   on("env.get", (_, e) => ({ value: e.name === "HOME" ? HOME : undefined }));
   on("session.id", () => ({ value: SESSION }));
@@ -65,6 +67,10 @@ function world(on: On): World {
   });
   on("session.measure", (_, e) => ({ changed: e.changed }));
   on("command.run", (_, e) => {
+    if (e.command === "autocompact") {
+      w.autocompacts.push(e.args);
+      return w.autocompactText === undefined ? {} : { text: w.autocompactText };
+    }
     w.renames.push(e.args);
     return { value: {} };
   });
@@ -123,6 +129,54 @@ test("compact and rename run when no turn runs", async ($, on) => {
   expect(response(w, "c1")?.ok).toBe(true);
   expect(response(w, "r1")?.result).toEqual({ name: "new name" });
   expect(w.files.has(`${DIR}/requests/c1.json`)).toBe(false);
+});
+
+test("autocompact runs the session's own command and answers the window, with the command text when there is one", async ($, on) => {
+  const w = world(on);
+  w.autocompactText = "  Window set  ";
+  await start($);
+  request(w, "a1", { id: "a1", op: "autocompact", args: { window: 333000 } });
+  await w.clock.advance(POLL_MS);
+  expect(w.autocompacts).toEqual(["333000"]);
+  expect(response(w, "a1")).toEqual({ id: "a1", ok: true, result: { window: 333000, text: "Window set" } });
+  expect(w.files.has(`${DIR}/requests/a1.json`)).toBe(false);
+
+  w.autocompactText = undefined;
+  request(w, "a2", { id: "a2", op: "autocompact", args: { window: "auto" } });
+  await w.clock.advance(POLL_MS);
+  expect(w.autocompacts).toEqual(["333000", "auto"]);
+  expect(response(w, "a2")?.result).toEqual({ window: "auto" });
+  expect(w.renames).toEqual([]);
+});
+
+test("autocompact with bad args is an error response and runs nothing", async ($, on) => {
+  const w = world(on);
+  await start($);
+  const bad: unknown[] = [undefined, 0, -1, 1.5, "333k", "AUTO", "5", null, true];
+  bad.forEach((window, i) => request(w, `b${i}`, { id: `b${i}`, op: "autocompact", args: { window } }));
+  request(w, "bnone", { id: "bnone", op: "autocompact" });
+  await w.clock.advance(POLL_MS);
+  for (const id of [...bad.keys()].map(i => `b${i}`).concat("bnone")) {
+    expect(response(w, id)?.ok).toBe(false);
+    expect(String(response(w, id)?.error)).toContain("window");
+  }
+  expect(w.autocompacts).toEqual([]);
+});
+
+test("an autocompact request that arrives during a turn waits until the turn ends", async ($, on) => {
+  const w = world(on);
+  on("turn.start", (_, e) => ({ turnId: e.turnId }));
+  on("turn.complete", (_, e) => ({ text: e.answer }));
+  await start($);
+  await $.turn.start({ text: "hi", turnId: "t1" });
+  request(w, "a1", { id: "a1", op: "autocompact", args: { window: "auto" } });
+  await w.clock.advance(POLL_MS * 3);
+  expect(w.autocompacts).toEqual([]);
+  expect(response(w, "a1")).toBeUndefined();
+  await $.turn.complete({ answer: "done", durationMs: 1, isAborted: false, turnId: "t1", reason: "answer" });
+  await w.clock.advance(POLL_MS);
+  expect(w.autocompacts).toEqual(["auto"]);
+  expect(response(w, "a1")?.ok).toBe(true);
 });
 
 test("a compaction skipped by a hook is answered as a result with the reason", async ($, on) => {

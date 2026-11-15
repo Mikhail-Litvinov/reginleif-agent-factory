@@ -59,6 +59,7 @@ export const en = {
 		usage: (): string => "Usage: rig session <subcommand> [arguments]",
 		usageCompact: (): string => "Usage: rig session compact <id> [--instructions <text>]",
 		usageRename: (): string => "Usage: rig session rename <id> <name...>",
+		usageAutocompact: (): string => "Usage: rig session autocompact <id> <N|auto>",
 		badId: (id: string): string => `Invalid session id: ${id}`,
 		unknown: (id: string): string => `Unknown session: ${id}`,
 		invalid: (id: string): string => `Invalid session record: ${id}`,

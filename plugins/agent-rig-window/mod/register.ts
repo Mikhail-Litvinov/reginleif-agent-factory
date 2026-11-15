@@ -69,6 +69,10 @@ export const register: Register = on => {
       rename: async name => {
         await $.command.run({ command: "rename", args: name });
       },
+      autocompact: async window => {
+        const result = await $.command.run({ command: "autocompact", args: String(window) });
+        return result.text;
+      },
       now: () => Date.now(),
     });
     window = w;
