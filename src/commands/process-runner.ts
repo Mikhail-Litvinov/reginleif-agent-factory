@@ -21,28 +21,28 @@ const WINDOWS_PATH_SEPARATOR = ";";
 // cmd.exe expands %VAR% even inside double quotes and cannot escape a double quote there.
 const CMD_UNSAFE_ARGUMENT = /["%\r\n]/;
 
-export const spawnDetached = async (command: readonly string[], graceMs: number, stderrLimit: number, path: string): Promise<Result<{ exited: boolean; exitCode: number | null; stderr: string }>> => {
+export const spawnDetached = async (command: readonly string[], graceMs: number, stderrLimit: number, path: string, options?: { windowsHide?: boolean }): Promise<Result<{ exited: boolean; exitCode: number | null; stderr: string; pid?: number }>> => {
 	const [executable, ...args] = command;
 	if (!executable) return err("Empty launch command");
 	try {
 		const fd = openSync(path, "w");
 		let child;
-		try { child = spawn(executable, args, { detached: true, stdio: ["ignore", "ignore", fd] }); } finally { closeSync(fd); }
+		try { child = spawn(executable, args, { detached: true, windowsHide: options?.windowsHide, stdio: ["ignore", "ignore", fd] }); } finally { closeSync(fd); }
 		return await new Promise((resolve) => {
 			let settled = false;
-			const finish = (result: Result<{ exited: boolean; exitCode: number | null; stderr: string }>): void => {
+			const finish = (result: Result<{ exited: boolean; exitCode: number | null; stderr: string; pid?: number }>): void => {
 				if (settled) return;
 				settled = true;
 				clearTimeout(timer);
 				child.unref();
 				resolve(result);
 			};
-			const timer = setTimeout(() => finish(ok({ exited: false, exitCode: null, stderr: "" })), graceMs);
+			const timer = setTimeout(() => finish(child.pid === undefined ? err("Missing process ID") : ok({ exited: false, exitCode: null, stderr: "", pid: child.pid })), graceMs);
 			child.once("error", (error) => { finish(err(error.message)); });
 			child.once("exit", (code) => {
 				let stderr = "";
 				if (!settled && code !== 0) { try { stderr = readFileSync(path, "utf8").trim().slice(0, stderrLimit); } catch { /* No stderr available. */ } }
-				finish(ok({ exited: true, exitCode: code, stderr }));
+				finish(ok({ exited: true, exitCode: code, stderr, pid: child.pid }));
 			});
 		});
 	} catch (error) { return err(errorText(error)); }

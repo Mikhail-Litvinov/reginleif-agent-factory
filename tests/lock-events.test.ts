@@ -33,6 +33,7 @@ class MemoryFileSystem implements FileSystem {
 	}
 	async remove(path: string): Promise<void> { this.files.delete(path); }
 	async ensureDirectory(path: string): Promise<void> { this.directories.add(path); }
+	async removeDirectoryTree(path: string): Promise<void> { this.directories.delete(path); }
 	async writeExclusive(path: string, value: string): Promise<Result<boolean>> {
 		if (this.files.has(path)) return ok(false);
 		this.files.set(path, value);

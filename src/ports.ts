@@ -25,10 +25,13 @@ export type ProcessOptions = {
 
 export type ProcessPorts = {
 	run(command: string, args: readonly string[], options?: ProcessOptions): Promise<Result<ProcessOutput>>;
-	spawnDetached(command: readonly string[], graceMs: number, stderrLimit: number, stderrPath: string): Promise<Result<{ exited: boolean; exitCode: number | null; stderr: string }>>;
+	spawnDetached(command: readonly string[], graceMs: number, stderrLimit: number, stderrPath: string, options?: { windowsHide?: boolean }): Promise<Result<{ exited: boolean; exitCode: number | null; stderr: string; pid?: number }>>;
+	runStreaming(argv: readonly string[], cwd: string, env: Record<string, string>, append: (bytes: Uint8Array) => Promise<void>, verbatimArguments: boolean): Promise<Result<number | null>>;
 	isAvailable(command: string): Promise<boolean>;
 	createdAt(pids: readonly number[]): Promise<Result<Record<string, string | null>>>;
-	killTree(pid: number): Promise<Result<void>>;
+	killTree(pid: number, force?: boolean): Promise<Result<void>>;
+	// POSIX only: SIGKILL to the process group whose id is `pid` (a run started with spawnDetached leads its own group).
+	killGroup(pid: number): Promise<Result<void>>;
 };
 
 export type RuntimePorts = {
@@ -36,7 +39,8 @@ export type RuntimePorts = {
 	assetFs: AssetFileSystem;
 	process: ProcessPorts;
 	// Reads of the process environment (CODEX_HOME and the like); commands never touch process.env directly.
-	environment: { get(name: string): string | undefined };
+	environment: { get(name: string): string | undefined; entries(): Record<string, string> };
+	stdin: { read(): Promise<string> };
 	lock: LockDependencies;
 	home: string;
 	currentDirectory: string;
@@ -52,6 +56,7 @@ export type RuntimePorts = {
 		now(): Date;
 		nowText(): string;
 		sleep(milliseconds: number): Promise<void>;
+		every(milliseconds: number, callback: () => void): () => void;
 	};
 	ids: { next(): string };
 	service: {

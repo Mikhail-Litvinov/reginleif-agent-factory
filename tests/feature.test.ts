@@ -40,6 +40,7 @@ class FeatureFileSystem implements FileSystem {
 	async rename(): Promise<void> {}
 	async remove(): Promise<void> {}
 	async ensureDirectory(): Promise<void> {}
+	async removeDirectoryTree(): Promise<void> {}
 	async writeExclusive(): Promise<Result<boolean>> { return ok(false); }
 	async resolveTarget(path: string): Promise<string> { return path; }
 	async modeOf(): Promise<number | null> { return null; }

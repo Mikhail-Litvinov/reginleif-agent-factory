@@ -27,6 +27,15 @@ export const ru: Messages = {
 		scriptBadJson: (): string => "скрипт вернул неверный JSON",
 		noSource: (): string => "нет источника данных",
 	},
+	exec: {
+		usage: (): string => "Использование: rig exec start <pwsh|cmd|bash> --cwd <dir> | status <id> [--from <offset>] | stop <id> | list",
+		badId: (): string => "Недопустимый идентификатор запуска",
+		unknown: (): string => "Запуск не найден",
+		invalid: (): string => "Недопустимая запись или аргументы запуска",
+		io: (detail: string): string => `Ошибка доступа к запуску: ${detail}`,
+		unavailable: (): string => "Фича оболочки недоступна",
+		launch: (detail: string): string => `Не удалось запустить команду: ${detail}`,
+	},
 	session: {
 		usage: (): string => "Использование: rig session <subcommand> [arguments]",
 		usageCompact: (): string => "Использование: rig session compact <id> [--instructions <text>]",
@@ -201,4 +210,5 @@ export const ru: Messages = {
 		checksumMissing: (target: string): string => `В checksums.txt нет контрольной суммы ${target}.`,
 		rtkFetchFailed: (error: string): string => `Не удалось получить релиз rtk: ${error}`,
 	},
+	execShell: { singleLine: (): string => "Команда cmd должна состоять из одной строки." },
 };

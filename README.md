@@ -13,6 +13,10 @@ The repository is for anyone who works with Claude Code and Codex on several mac
 `rig session cleanup <id>` compacts, stops, and clears remembered skills from the transcript.
 `rig session run <id> [--mode <mode>] [--account <n>]` resumes a stopped session using `~/.agent-rig/launch.json`.
 `rig session mode <id> <mode>` changes a session's permission mode, restarting it when needed.
+`rig exec start <shell> --cwd <dir>` starts the command read from stdin in a detached runner.
+`rig exec status <id> [--from <byte offset>]` reads a bounded log chunk and the run's state.
+`rig exec stop <id>` stops a run and its process tree.
+`rig exec list` lists runs newest first.
 
 Installing on a server is described in [INSTALL.md](INSTALL.md). Agent, you were asked to deploy this here: read `INSTALL.md` and follow its section "What the agent does".
 

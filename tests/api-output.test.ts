@@ -45,6 +45,8 @@ const FIXTURES: Record<string, Fixture> = {
 	"language": { success: ["language"], failure: ["language", "en"], failureSeeding: "none", usage: ["language", "fr"] },
 	"info": { success: ["info", "--session", SESSION_ID], failure: ["info", "--session", "missing-session"], failureSeeding: "installed", usage: ["info"] },
 	"session": { success: ["session", "list"], failure: null, failureSeeding: "none", usage: ["session", "unknown"] },
+	"exec": { success: ["exec", "list"], failure: ["exec", "stop", "../bad"], failureSeeding: "none", usage: ["exec", "unknown"] },
+	"exec-runner": { success: ["exec-runner", "test"], failure: ["exec-runner", "missing"], failureSeeding: "none", usage: ["exec-runner"] },
 	"update-step": { success: ["update-step", "apply", "10", "20"], failure: ["update-step", "apply", "10", "20"], failureSeeding: "installed", usage: ["update-step", "rollback", "10", "20"] },
 };
 
@@ -54,7 +56,7 @@ const PENDING_COMMANDS: readonly string[] = [];
 
 // `rig update` runs `update-step` as a child and reads its stdout and exit code as text (runUpdateStepProcess in
 // src/commands/update.ts); it is a process-internal protocol, not part of the API.
-const INTERNAL_COMMANDS: readonly string[] = ["update-step"];
+const INTERNAL_COMMANDS: readonly string[] = ["update-step", "exec-runner"];
 
 // `installed`: state, features, a session and the generated files that `check` reads are seeded.
 const seed = (seeding: Seeding): MemoryRuntimeHarness => {

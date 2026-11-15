@@ -40,6 +40,15 @@ export const en = {
 		scriptBadJson: (): string => "bad JSON from script",
 		noSource: (): string => "no data source",
 	},
+	exec: {
+		usage: (): string => "Usage: rig exec start <pwsh|cmd|bash> --cwd <dir> | status <id> [--from <offset>] | stop <id> | list",
+		badId: (): string => "Invalid exec id",
+		unknown: (): string => "Unknown exec run",
+		invalid: (): string => "Invalid exec record or arguments",
+		io: (detail: string): string => `Exec access failed: ${detail}`,
+		unavailable: (): string => "Shell feature is unavailable",
+		launch: (detail: string): string => `Exec launch failed: ${detail}`,
+	},
 	session: {
 		usage: (): string => "Usage: rig session <subcommand> [arguments]",
 		usageCompact: (): string => "Usage: rig session compact <id> [--instructions <text>]",
@@ -214,6 +223,7 @@ export const en = {
 		checksumMissing: (target: string): string => `checksums.txt has no checksum for ${target}.`,
 		rtkFetchFailed: (error: string): string => `Could not get the rtk release: ${error}`,
 	},
+	execShell: { singleLine: (): string => "A cmd command must be a single line." },
 };
 
 export type Messages = typeof en;

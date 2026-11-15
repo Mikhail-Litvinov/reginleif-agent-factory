@@ -33,6 +33,12 @@ export const LAUNCH_NOT_CONFIGURED = "launch-not-configured";
 export const LAUNCH_FAILED = "launch-failed";
 export const LAUNCH_TIMEOUT = "launch-timeout";
 export const SESSION_RUNNING = "session-running";
+export const EXEC_BAD_ID = "exec-bad-id";
+export const EXEC_UNKNOWN = "exec-unknown";
+export const EXEC_INVALID = "exec-invalid";
+export const EXEC_IO = "exec-io";
+export const EXEC_UNAVAILABLE = "exec-unavailable";
+export const EXEC_LAUNCH = "exec-launch";
 export const PROGRESS_CODE_SESSION_WAITING = "session-waiting";
 
 export const SUCCESS_EXIT_CODE = 0;

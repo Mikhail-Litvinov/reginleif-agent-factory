@@ -18,6 +18,7 @@ export type FileSystem = {
 	rename(from: string, to: string): Promise<void>;
 	remove(path: string): Promise<void>;
 	ensureDirectory(path: string): Promise<void>;
+	removeDirectoryTree(path: string): Promise<void>;
 	// Creates the file already complete, or reports false when the name exists; never exposes a partial file.
 	writeExclusive(path: string, value: string): Promise<Result<boolean>>;
 	// Follows symlinks to the file a write must replace.

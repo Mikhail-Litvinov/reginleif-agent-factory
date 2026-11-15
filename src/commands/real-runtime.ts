@@ -7,6 +7,7 @@ import type { RigState } from "../state.js";
 import type { RepositoryName, UpdatePorts } from "../update/update.js";
 
 import { createHash, randomUUID } from "node:crypto";
+import { spawn } from "node:child_process";
 import { constants, promises as fs } from "node:fs";
 import { homedir, platform as hostPlatform, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -20,6 +21,7 @@ import { err, errorText, ok } from "../result.js";
 import { readStoredLanguage } from "../state.js";
 import { PROCESS_SUCCESS_EXIT_CODE } from "../ports.js";
 import { runProcess, spawnDetached } from "./process-runner.js";
+import { confineToKillOnCloseJob } from "./windows-job.js";
 import { parseVersion, VERSION_PATHS } from "../version-manifest.js";
 
 // This keeps lock waits responsive without spinning while another command owns the lock.
@@ -68,7 +70,8 @@ export const createRealRuntime = async (options: RealRuntimeOptions = {}): Promi
 		fs: fileSystem,
 		assetFs: createNodeAssetFileSystem(),
 		process: processPorts,
-		environment: { get: (name) => process.env[name] },
+		environment: { get: (name) => process.env[name], entries: () => Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined)) },
+		stdin: { read: async () => await Bun.stdin.text() },
 		lock: {
 			fs: fileSystem,
 			home,
@@ -92,6 +95,7 @@ export const createRealRuntime = async (options: RealRuntimeOptions = {}): Promi
 			now: () => new Date(),
 			nowText: () => new Date().toISOString(),
 			sleep: sleepFor,
+			every: (milliseconds, callback) => { const timer = setInterval(callback, milliseconds); return () => clearInterval(timer); },
 		},
 		ids: { next: () => randomUUID() },
 		service: {
@@ -222,6 +226,7 @@ export const createFileSystem = (hostKind: HostPlatform = hostPlatform() === "wi
 	rename: (from, to) => fs.rename(from, to),
 	remove: (path) => fs.unlink(path),
 	ensureDirectory: async (path) => { await fs.mkdir(path, { recursive: true }); },
+	removeDirectoryTree: async (path) => { await fs.rm(path, { recursive: true, force: true }); },
 	writeExclusive: (path, value) => writeExclusiveAtomic(path, value, hostKind),
 	resolveTarget,
 	modeOf,
@@ -237,7 +242,28 @@ const createProcessPorts = (pathEnvironment: string): ProcessPorts => {
 	const ports: ProcessPorts = {
 	run: (command: string, args: readonly string[], options?: ProcessOptions) => runProcess(pathEnvironment, command, args, options),
 	spawnDetached,
-	killTree: async (pid): Promise<Result<void>> => {
+	runStreaming: async (argv, cwd, env, append, verbatimArguments) => {
+		const [command, ...args] = argv;
+		if (!command) return err("Empty command");
+		if (hostPlatform() === "win32") {
+			// A stopped run must take down every descendant, including ones taskkill /T cannot reach.
+			const confined = confineToKillOnCloseJob();
+			if (!confined.ok) return confined;
+		}
+		return await new Promise((resolve) => {
+			let pending = Promise.resolve();
+			let failure: string | null = null;
+			try {
+				const child = spawn(command, args, { cwd, env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true, windowsVerbatimArguments: verbatimArguments });
+				const write = (bytes: Uint8Array): void => { pending = pending.then(() => append(bytes)).catch((error: unknown) => { failure = errorText(error); }); };
+				child.stdout.on("data", write);
+				child.stderr.on("data", write);
+				child.once("error", (error) => { failure = error.message; });
+				child.once("close", (code) => { void pending.then(() => resolve(failure === null ? ok(code) : err(failure))); });
+			} catch (error) { resolve(err(errorText(error))); }
+		});
+	},
+	killTree: async (pid, force = false): Promise<Result<void>> => {
 		if (hostPlatform() === "win32") {
 			const result = await ports.run("taskkill", ["/T", "/F", "/PID", String(pid)]);
 			return processSuccess(result, "taskkill");
@@ -253,11 +279,16 @@ const createProcessPorts = (pathEnvironment: string): ProcessPorts => {
 		const tree = [pid];
 		for (let index = 0; index < tree.length; index++) tree.push(...(children.get(tree[index]) ?? []));
 		for (const child of tree.reverse()) {
-			const result = await ports.run("kill", ["-TERM", String(child)]);
+			const result = await ports.run("kill", [force ? "-KILL" : "-TERM", String(child)]);
 			if (!result.ok) return result;
 			if (result.value.exitCode !== PROCESS_SUCCESS_EXIT_CODE && child === pid) return err(result.value.stderr || "Could not stop process");
 		}
 		return ok(undefined);
+	},
+	killGroup: async (pid): Promise<Result<void>> => {
+		if (hostPlatform() === "win32") return err("Process groups are not available on Windows");
+		const result = await ports.run("kill", ["-KILL", "--", `-${pid}`]);
+		return processSuccess(result, "kill");
 	},
 	createdAt: async (pids: readonly number[]): Promise<Result<Record<string, string | null>>> => {
 		if (pids.length === 0) return ok({});

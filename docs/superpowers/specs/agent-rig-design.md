@@ -355,6 +355,10 @@ error, in event texts and in the generated agent rules.
 | `rig help` | `{"usage":[...]}` | nothing | JSON |
 | `rig info --session <id>` | `InfoData` object (`src/info-data.ts`) | nothing yet | JSON |
 | `rig session list` | `{sessions: [{id, cwd, transcriptPath, pid, startedAt, live, module}]}` | nothing yet | JSON |
+| `rig exec start <shell> --cwd <dir>` | `{id, shell, cwd, pid, startedAt}`; command on stdin | nothing yet | JSON |
+| `rig exec status <id> [--from <offset>]` | `{id, shell, cwd, state, startedAt, end?, log}` | nothing yet | JSON |
+| `rig exec stop <id>` | `{id, stopping: true}` or `{id, state: "ended"}` | nothing yet | JSON |
+| `rig exec list` | `{runs: [...]}` | nothing yet | JSON |
 | `rig session compact <id> [--instructions <text>]` | `{session, tokensBefore, tokensAfter}` or `{session, skip}`; failure codes `usage` and common session errors; progress `session-waiting` | compact result | JSON |
 | `rig session rename <id> <name...>` | `{session, name}`; failure codes `usage` and common session errors; progress `session-waiting` | rename result | JSON |
 | `rig session stop <id>` | `{session, stopped, compacted}` or `{session, stopped: false, reason}` | session waiting | JSON |

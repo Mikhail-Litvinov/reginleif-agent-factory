@@ -641,8 +641,10 @@ const runGit = (cwd: string, ...args: string[]): string => {
 
 const realProcess = (): RuntimePorts["process"] => ({
   spawnDetached: async () => ({ ok: true, value: { exited: false, exitCode: null, stderr: "" } }),
+  runStreaming: async () => ({ ok: true, value: 0 }),
   createdAt: async () => ({ ok: true, value: {} }),
   killTree: async () => ({ ok: true, value: undefined }),
+  killGroup: async () => ({ ok: true, value: undefined }),
   run: async (command, args, options) => {
     const result = spawnSync(command, [...args], { cwd: options?.cwd, encoding: "utf8" });
     if (result.error !== undefined) return { ok: false, error: result.error.message };

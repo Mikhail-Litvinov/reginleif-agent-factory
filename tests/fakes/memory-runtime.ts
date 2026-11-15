@@ -120,6 +120,11 @@ export class MemoryFileSystem implements FileSystem {
 		if (parent !== path) this.directories.add(parent);
 	}
 
+	async removeDirectoryTree(path: string): Promise<void> {
+		for (const file of this.files.keys()) if (file.startsWith(`${path}/`)) { this.files.delete(file); this.binaries.delete(file); }
+		for (const directory of this.directories) if (directory === path || directory.startsWith(`${path}/`)) this.directories.delete(directory);
+	}
+
 	async writeExclusive(path: string, value: string): Promise<Result<boolean>> {
 		if (this.files.has(path)) return ok(false);
 		this.record(`exclusive:${path}`);
@@ -295,9 +300,11 @@ export const createMemoryRuntime = (platform: RuntimePorts["platform"] = "linux"
 		fs,
 		assetFs,
 		process: {
-			spawnDetached: async () => ok({ exited: false, exitCode: null, stderr: "" }),
+			spawnDetached: async (_command, _graceMs, _stderrLimit, _stderrPath, _options) => ok({ exited: false, exitCode: null, stderr: "", pid: 100 }),
+			runStreaming: async () => ok(0),
 			createdAt: async () => ok({}),
 			killTree: async () => ok(undefined),
+			killGroup: async () => ok(undefined),
 			run: async (command, args, options) => {
 				processCalls.push({ command, args, options });
 				if (command === "claude" && args.join(" ") === "plugin marketplace list --json") {
@@ -323,7 +330,8 @@ export const createMemoryRuntime = (platform: RuntimePorts["platform"] = "linux"
 			},
 			isAvailable: async (command) => !unavailableCommands.has(command) && !unavailableCommands.has(command.replaceAll("\\", "/").split("/").pop() ?? command),
 		},
-		environment: { get: (name) => environment.get(name) },
+		environment: { get: (name) => environment.get(name), entries: () => Object.fromEntries(environment) },
+		stdin: { read: async () => "" },
 		lock: {
 			fs,
 			home: "/home/test",
@@ -342,6 +350,7 @@ export const createMemoryRuntime = (platform: RuntimePorts["platform"] = "linux"
 			now: () => new Date(FAKE_TIME),
 			nowText: () => FAKE_TIME,
 			sleep: async (milliseconds) => { sleeps.push(milliseconds); },
+			every: () => () => undefined,
 		},
 		ids: { next: () => { eventId += 1; return `event-${eventId}`; } },
 		service: {
