@@ -89,9 +89,21 @@ CREATE_NO_WINDOW = 0x08000000
 
 # Shell rule for Windows runs only: on POSIX the agent's shell is the plain system shell.
 SHELL_RULE_MARKER = "__SHELL_RULE__"
-SHELL_RULE_WINDOWS = """- Run shell commands through Git Bash: & "C:\\Program Files\\Git\\bin\\bash.exe" -lc '<command>'; anything
-  complex goes into a script file run by path.
+SHELL_RULE_WINDOWS = """- Run commands directly in the shell the tool gives you (PowerShell); never hand a command string to a second
+  shell (bash -c, powershell -Command, cmd /c): quoting is lost between the layers. Read files with Get-Content
+  (-TotalCount, -Tail). Anything that needs bash, or is longer than one line, goes into a script file written with
+  apply_patch and run by path: & "C:\\Program Files\\Git\\bin\\bash.exe" path/to/script.sh arg1 arg2.
 """
+
+# A shell word followed by its command-string flag: bash/sh -c, -lc; powershell/pwsh -Command; cmd /c, /k.
+_WRAPPER_RE = re.compile(
+    r'^\s*"?[^\s"\']*?(?:powershell|pwsh|bash|sh)(?:\.exe)?"?(?:\s+-\S+)*?\s+-(?:Command|[a-zA-Z]*c)\s+', re.I)
+# The flag must be followed by a word: a shell name quoted inside an argument (rg "bash -c") is not a nested shell.
+_NESTED_SHELL_RE = re.compile(
+    r'(?:\b(?:bash|sh|zsh)(?:\.exe)?[\\"\']*(?:\s+-\S+)*?\s+-[a-zA-Z]*c(?=\s+\S)'
+    r'|\b(?:powershell|pwsh)(?:\.exe)?[\\"\']*(?:\s+-\S+)*?\s+-Command(?=\s+\S)'
+    r'|\bcmd(?:\.exe)?[\\"\']*\s+/[ck](?=\s+\S))', re.I)
+NESTED_SHELL_MAX_LISTED = 3
 
 RUN_RULES = """
 
@@ -113,6 +125,21 @@ __SHELL_RULE__- Sandbox limits: tools that call os.userInfo (drizzle-kit, for ex
   test for each. Before the report, walk the changed files against AGENTS.md and fix what breaks it.
 - One operation per file in one apply_patch: several operations on one file are rejected.
 """.replace("__DECISION_RULES__\n", report_module.DECISION_RULES) + report_module.REPORT_FORM
+
+def nested_shell_commands(events):
+    """Commands that pass a command string to a second shell inside the tool's own wrapper (the first
+    wrapper layer is stripped; what remains must not start another shell with a command string)."""
+    found = []
+    for e in events:
+        it = e.get("item") or {}
+        if e.get("type") != "item.completed" or it.get("type") != "command_execution":
+            continue
+        cmd = it.get("command") or ""
+        inner = _WRAPPER_RE.sub("", cmd, count=1)
+        if _NESTED_SHELL_RE.search(inner) and cmd not in found:
+            found.append(cmd)
+    return found
+
 
 def run_rules(windows):
     return RUN_RULES.replace(SHELL_RULE_MARKER, SHELL_RULE_WINDOWS if windows else "")
@@ -483,6 +510,11 @@ def digest(d, st, events, final):
     if files:
         lines.append("files touched: " + ", ".join(Path(f).name for f in files[:15]))
     if final:
+        nested = nested_shell_commands(scan_events(d / "events.jsonl")[1])
+        if nested:
+            lines.append(f"warning: {len(nested)} command(s) passed a command string to a second shell; their output "
+                         "may have lost quoting (backslashes, quotes) and be wrong: " +
+                         "; ".join(short(c, 160) for c in nested[:NESTED_SHELL_MAX_LISTED]))
         last = d / "last.md"
         if st["status"] in REPORT_STATUSES and not st.get("error") and last.exists():
             lines.append("")

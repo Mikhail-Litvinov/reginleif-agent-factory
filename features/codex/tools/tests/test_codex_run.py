@@ -5,6 +5,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -21,7 +22,7 @@ spec = importlib.util.spec_from_file_location("codex_run", SCRIPT)
 cr = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(cr)
 
-GIT_BASH_MARK = "Git Bash"
+GIT_BASH_MARK = "bash.exe"
 SANDBOX_MARK = "Sandbox limits"
 # The job starts a child that outlives it unless the cancel kills the whole job's process group.
 JOB_SCRIPT = """
@@ -121,6 +122,57 @@ class RunRulesTest(unittest.TestCase):
     def test_common_rules_stay_on_both_platforms(self):
         for windows in (True, False):
             self.assertIn(SANDBOX_MARK, cr.run_rules(windows=windows))
+
+
+NESTED_SHELL_PLACEHOLDER_RE = r"""(?:-l?c\s+'<|-Command\s+"<|/c\s+"<)"""
+# Invented equivalent of a real job's command: the tool's PowerShell wrapper around a Git Bash command string.
+NESTED_BASH_COMMAND = ('powershell.exe -Command "& \\"C:\\Program Files\\Git\\bin\\bash.exe\\" -lc '
+                       "'IFS= read -r line < notes.txt; printf \\\"%s\\n\\\" \\\"$line\\\"'\"")
+SCRIPT_BY_PATH_COMMAND = ('powershell.exe -Command "& \\"C:\\Program Files\\Git\\bin\\bash.exe\\" '
+                          '.tmp/read-first-line.sh notes.txt"')
+
+
+def command_event(command):
+    return {"type": "item.completed", "item": {"type": "command_execution", "command": command}}
+
+
+class NestedShellTest(unittest.TestCase):
+    def test_run_rules_do_not_tell_a_nested_shell(self):
+        for windows in (True, False):
+            self.assertIsNone(re.search(NESTED_SHELL_PLACEHOLDER_RE, cr.run_rules(windows)))
+
+    def test_detector_flags_bash_inside_powershell(self):
+        self.assertEqual(cr.nested_shell_commands([command_event(NESTED_BASH_COMMAND)]), [NESTED_BASH_COMMAND])
+
+    def test_detector_flags_other_nested_shells(self):
+        for inner in ('powershell -NoProfile -Command "Get-Date"', 'cmd /c "dir"', "sh -c 'ls'", "pwsh -Command ls"):
+            cmd = f'powershell.exe -Command "{inner}"'
+            self.assertEqual(cr.nested_shell_commands([command_event(cmd)]), [cmd], inner)
+
+    def test_detector_flags_nested_shell_under_posix_wrapper(self):
+        cmd = "/bin/bash -lc \"bash -c 'ls'\""
+        self.assertEqual(cr.nested_shell_commands([command_event(cmd)]), [cmd])
+
+    def test_detector_ignores_plain_commands_and_scripts(self):
+        plain = ['powershell.exe -Command "Get-Content notes.txt -TotalCount 1"',
+                 'powershell.exe -Command "git status"', "/bin/bash -lc \"git status\"", SCRIPT_BY_PATH_COMMAND,
+                 'powershell.exe -Command "rg -n \\"bash -c\\" docs"']
+        for cmd in plain:
+            self.assertEqual(cr.nested_shell_commands([command_event(cmd)]), [], cmd)
+
+    def test_detector_ignores_other_event_types(self):
+        self.assertEqual(cr.nested_shell_commands([{"type": "item.started", "item": {
+            "type": "command_execution", "command": NESTED_BASH_COMMAND}}]), [])
+
+    def test_final_digest_warns(self):
+        with tempfile.TemporaryDirectory(prefix="codex-run-nested-test-") as tmp:
+            d = Path(tmp)
+            (d / "events.jsonl").write_text(json.dumps(command_event(NESTED_BASH_COMMAND)) + "\n", encoding="utf-8")
+            st = {"job": "j", "status": "blocked", "slug": "s", "effort": "high", "created": time.time(),
+                  "error": "x"}
+            out = cr.digest(d, st, [], True)
+            self.assertIn("warning: 1 command(s) passed a command string to a second shell", out)
+            self.assertIn("bash.exe", out)
 
 
 class TerraLineTest(unittest.TestCase):

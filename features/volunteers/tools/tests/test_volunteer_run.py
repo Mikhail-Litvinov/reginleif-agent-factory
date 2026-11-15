@@ -381,6 +381,9 @@ class SupervisorTests(Base):
         self.assertIn("More work than expected is never a reason to stop", vr.RUN_RULES)
         self.assertIn("Blocked by: for blocked", vr.RUN_RULES)
 
+    def test_run_rules_do_not_tell_a_nested_shell(self):
+        self.assertIsNone(re.search(r"""(?:-l?c\s+'<|-Command\s+"<|/c\s+"<)""", vr.RUN_RULES))
+
     def test_malformed_recovery_and_restart(self):
         self.models("openrouter/a")
         for first, second, prior, expected, count in [("bad", "STATUS: blocked\nBlocked by: access: a credential is missing", 0, "blocked", 2),
