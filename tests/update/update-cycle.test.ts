@@ -24,6 +24,9 @@ import { createRealGitAdapter } from "../../src/commands/real-runtime";
 import { updateRig } from "../../src/commands/update";
 import { runPending, runUpdate } from "../../src/update/update";
 import { createMemoryRuntime } from "../fakes/memory-runtime";
+import { messagesFor } from "../../src/messages";
+
+const TEST_MESSAGES = messagesFor("en");
 
 const GIT_TEST_TIMEOUT_MS = 30_000;
 const ONE_MINUTE_MS = 60_000;
@@ -377,7 +380,7 @@ describe("C3: a clone off main or ahead of origin", () => {
       runGit(clone, "add", ".");
       runGit(clone, ...TEST_USER, "commit", "-m", "first");
       runGit(clone, "push", "origin", "main");
-      const adapter = createRealGitAdapter(realProcess(), { repo: clone, hub: clone });
+      const adapter = createRealGitAdapter(realProcess(), { repo: clone, hub: clone }, TEST_MESSAGES);
 
       expect(await adapter.branchProblem("rig")).toEqual({ ok: true, value: null });
 
@@ -519,7 +522,7 @@ describe("the update-ok event names the versions", () => {
       runGit(repository, "-c", "user.name=Cycle Test", "-c", "user.email=cycle-test@example.com", "commit", "-m", "release");
       const commit = runGit(repository, "rev-parse", "HEAD");
       await writeFile(join(repository, "package.json"), JSON.stringify({ version: "9.9.9" }));
-      const adapter = createRealGitAdapter(realProcess(), { repo: repository, hub: repository });
+      const adapter = createRealGitAdapter(realProcess(), { repo: repository, hub: repository }, TEST_MESSAGES);
 
       expect(await adapter.readVersion("rig", commit)).toEqual({ ok: true, value: "0.1.0" });
     } finally {

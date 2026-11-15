@@ -1,5 +1,6 @@
 import type { AssetOperations, FileSystem as AssetFileSystem } from "./assets/installer.js";
 import type { FileSystem } from "./file-system.js";
+import type { Messages } from "./messages.js";
 import type { Result } from "./result.js";
 import type { Journal, JournalEntry, JournalEvent } from "./state.js";
 
@@ -20,6 +21,7 @@ export type JournalDependencies = {
 	home: string;
 	clock: { nowText(): string };
 	ids: { next(): string };
+	messages: Messages;
 };
 
 export type PlannedEvent = Pick<JournalEvent, "type" | "level" | "text">;
@@ -111,6 +113,7 @@ export const emitJournalEvents = async (
 			home: dependencies.home,
 			now: () => dependencies.clock.nowText(),
 			createId: () => event.id,
+			messages: dependencies.messages,
 		}, { type: event.type, level: event.level, text: event.text });
 		if (!appended.ok) return appended;
 	}
@@ -133,19 +136,19 @@ const currentHash = async (
 		try {
 			return ok(hashText(await dependencies.fs.readText(path)));
 		} catch (error) {
-			return isMissing(error) ? ok(null) : err(`Could not read ${path}: ${errorText(error)}`);
+			return isMissing(error) ? ok(null) : err(dependencies.messages.failure.readFailed(path, errorText(error)));
 		}
 	}
 	const read = await dependencies.assetFs.readFile(path);
 	if (read.ok) return ok(hashContent(read.value));
-	return read.error === NOT_FOUND ? ok(null) : err(`Could not read ${path}: ${read.error}`);
+	return read.error === NOT_FOUND ? ok(null) : err(dependencies.messages.failure.readFailed(path, read.error));
 };
 
 const readLog = async (dependencies: JournalDependencies): Promise<Result<string>> => {
 	try {
 		return ok(await dependencies.fs.readText(joinPath(dependencies.home, ".agent-rig", EVENTS_FILE)));
 	} catch (error) {
-		return isMissing(error) ? ok("") : err(`Could not read the event log: ${errorText(error)}`);
+		return isMissing(error) ? ok("") : err(dependencies.messages.failure.eventLogReadFailed(errorText(error)));
 	}
 };
 

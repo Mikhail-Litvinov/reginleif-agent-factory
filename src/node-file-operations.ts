@@ -1,3 +1,4 @@
+import type { Messages } from "./messages.js";
 import type { Result } from "./result.js";
 
 import { randomUUID } from "node:crypto";
@@ -54,7 +55,7 @@ export const writeDurable = async (path: string, value: string, mode: number | n
 };
 
 // The file appears under its final name already complete, or not at all: a hard link is atomic and fails if the name exists.
-export const writeExclusiveAtomic = async (path: string, value: string, platform: HostPlatform): Promise<Result<boolean>> => {
+export const writeExclusiveAtomic = async (path: string, value: string, platform: HostPlatform, messages: Messages): Promise<Result<boolean>> => {
 	const temporaryPath = `${path}.${randomUUID()}.tmp`;
 	try {
 		await writeDurable(temporaryPath, value, null, platform);
@@ -63,10 +64,10 @@ export const writeExclusiveAtomic = async (path: string, value: string, platform
 			return ok(true);
 		} catch (error) {
 			if (errorCode(error) === "EEXIST") return ok(false);
-			return err(`Could not create ${path}: ${errorText(error)}`);
+			return err(messages.failure.createFailed(path, errorText(error)));
 		}
 	} catch (error) {
-		return err(`Could not create ${path}: ${errorText(error)}`);
+		return err(messages.failure.createFailed(path, errorText(error)));
 	} finally {
 		await fs.unlink(temporaryPath).catch(() => undefined);
 	}

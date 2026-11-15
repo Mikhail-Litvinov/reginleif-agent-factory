@@ -16,18 +16,18 @@ export type FeatureChange = {
 	platform: Platform;
 };
 
-export const validateFeatureGraph = (features: FeatureManifest[]): Result<void> => {
+export const validateFeatureGraph = (features: FeatureManifest[], messages: Messages): Result<void> => {
 	const byName = new Map<string, FeatureManifest>();
 	for (const feature of features) byName.set(feature.name, feature);
 	const visiting = new Set<string>();
 	const visited = new Set<string>();
 	for (const feature of features) {
 		for (const dependency of feature.dependencies) {
-			if (!byName.has(dependency)) return err(`Feature ${feature.name} depends on missing feature ${dependency}`);
+			if (!byName.has(dependency)) return err(messages.failure.featureMissingDependency(feature.name, dependency));
 		}
 		for (const rule of feature.rules) {
 			for (const condition of [...(rule.whenEnabled ?? []), ...(rule.whenDisabled ?? [])]) {
-				if (!byName.has(condition)) return err(`Feature ${feature.name} rule depends on missing feature ${condition}`);
+				if (!byName.has(condition)) return err(messages.failure.featureRuleMissingDependency(feature.name, condition));
 			}
 		}
 	}
@@ -48,36 +48,36 @@ export const validateFeatureGraph = (features: FeatureManifest[]): Result<void> 
 	};
 	for (const feature of features) {
 		const cycle = visit(feature.name);
-		if (cycle !== null) return err(`Feature dependency cycle includes ${cycle}`);
+		if (cycle !== null) return err(messages.failure.featureCycle(cycle));
 	}
 	return ok(undefined);
 };
 
-export const loadFeatures = async (fs: FileSystem, repoPath: string): Promise<Result<FeatureManifest[]>> => {
-	const base = await readFeature(fs, joinPath(repoPath, "base"));
+export const loadFeatures = async (fs: FileSystem, repoPath: string, messages: Messages): Promise<Result<FeatureManifest[]>> => {
+	const base = await readFeature(fs, joinPath(repoPath, "base"), messages);
 	if (!base.ok) return base;
-	if (base.value.name !== "base") return err(`Base manifest must be named base, found ${base.value.name}`);
+	if (base.value.name !== "base") return err(messages.failure.featureBaseName(base.value.name));
 	try {
 		const entries = await fs.listDirectory(joinPath(repoPath, "features"));
 		const directories = entries.filter((entry) => entry.directory).sort((left, right) => left.name.localeCompare(right.name));
 		const features: FeatureManifest[] = [base.value];
 		for (const entry of directories) {
-			const feature = await readFeature(fs, joinPath(repoPath, "features", entry.name));
+			const feature = await readFeature(fs, joinPath(repoPath, "features", entry.name), messages);
 			if (!feature.ok) return feature;
-			if (feature.value.name !== entry.name) return err(`Feature directory ${entry.name} contains manifest for ${feature.value.name}`);
+			if (feature.value.name !== entry.name) return err(messages.failure.featureDirectoryMismatch(entry.name, feature.value.name));
 			features.push(feature.value);
 		}
 		const duplicate = features.find((feature, index) => features.findIndex((candidate) => candidate.name === feature.name) !== index);
-		if (duplicate !== undefined) return err(`Duplicate feature name ${duplicate.name}`);
-		const graph = validateFeatureGraph(features);
+		if (duplicate !== undefined) return err(messages.failure.featureDuplicate(duplicate.name));
+		const graph = validateFeatureGraph(features, messages);
 		return graph.ok ? ok(features) : graph;
 	} catch (error) {
-		return err(`Could not load features: ${errorText(error)}`);
+		return err(messages.failure.featuresLoadFailed(errorText(error)));
 	}
 };
 
 export const resolveFeatureChange = (change: FeatureChange): Result<string[]> => {
-	const graph = validateFeatureGraph(change.features);
+	const graph = validateFeatureGraph(change.features, change.messages);
 	if (!graph.ok) return graph;
 	const byName = new Map<string, FeatureManifest>();
 	for (const feature of change.features) byName.set(feature.name, feature);

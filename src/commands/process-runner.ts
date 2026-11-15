@@ -1,3 +1,4 @@
+import type { Language, Messages } from "../messages.js";
 import type { Result } from "../result.js";
 import type { ProcessOptions, ProcessOutput } from "../ports.js";
 
@@ -7,6 +8,7 @@ import { platform as hostPlatform } from "node:os";
 import { win32 } from "node:path";
 
 import { cleanEnvironment } from "../clean-environment.js";
+import { messagesFor } from "../messages.js";
 import { err, errorText, ok } from "../result.js";
 import { PROCESS_FAILURE_EXIT_CODE } from "../ports.js";
 import { spawnDetachedWindows } from "./windows-spawn.js";
@@ -23,11 +25,11 @@ const WINDOWS_PATH_SEPARATOR = ";";
 // cmd.exe expands %VAR% even inside double quotes and cannot escape a double quote there.
 const CMD_UNSAFE_ARGUMENT = /["%\r\n]/;
 
-export const spawnDetached = async (command: readonly string[], graceMs: number, stderrLimit: number, path: string, options?: { windowsHide?: boolean }): Promise<Result<{ exited: boolean; exitCode: number | null; stderr: string; pid?: number }>> => {
+export const spawnDetached = async (command: readonly string[], graceMs: number, stderrLimit: number, path: string, language: Language, options?: { windowsHide?: boolean }): Promise<Result<{ exited: boolean; exitCode: number | null; stderr: string; pid?: number }>> => {
 	// Windows: the process must also leave the caller's job object (see windows-spawn.ts), which node's spawn cannot do.
-	if (hostPlatform() === "win32") return await spawnDetachedWindows({ command, graceMs, stderrLimit, stderrPath: path, hide: options?.windowsHide === true, environment: cleanEnvironment(process.env) });
+	if (hostPlatform() === "win32") return await spawnDetachedWindows({ command, graceMs, stderrLimit, stderrPath: path, hide: options?.windowsHide === true, environment: cleanEnvironment(process.env), language });
 	const [executable, ...args] = command;
-	if (!executable) return err("Empty launch command");
+	if (!executable) return err(messagesFor(language).failure.emptyLaunchCommand());
 	try {
 		const fd = openSync(path, "w");
 		let child;
@@ -41,7 +43,7 @@ export const spawnDetached = async (command: readonly string[], graceMs: number,
 				child.unref();
 				resolve(result);
 			};
-			const timer = setTimeout(() => finish(child.pid === undefined ? err("Missing process ID") : ok({ exited: false, exitCode: null, stderr: "", pid: child.pid })), graceMs);
+			const timer = setTimeout(() => finish(child.pid === undefined ? err(messagesFor(language).failure.missingProcessId()) : ok({ exited: false, exitCode: null, stderr: "", pid: child.pid })), graceMs);
 			child.once("error", (error) => { finish(err(error.message)); });
 			child.once("exit", (code) => {
 				let stderr = "";
@@ -94,6 +96,7 @@ export const planSpawn = (
 	command: string,
 	args: readonly string[],
 	pathEnvironment: string,
+	messages: Messages,
 	exists: (path: string) => boolean = existsSync,
 ): Result<SpawnPlan> => {
 	if (kind === "posix") return ok({ command, args: [...args], verbatim: false });
@@ -101,14 +104,14 @@ export const planSpawn = (
 	if (!hasExtension(resolved, WINDOWS_SCRIPT_EXTENSIONS)) return ok({ command: resolved, args: [...args], verbatim: false });
 	const parts = [resolved, ...args];
 	const unsafe = parts.find((part) => CMD_UNSAFE_ARGUMENT.test(part));
-	if (unsafe !== undefined) return err(`Cannot pass ${JSON.stringify(unsafe)} to ${command} through cmd.exe: it contains a quote, percent sign or line break.`);
+	if (unsafe !== undefined) return err(messages.failure.cmdUnsafeArgument(JSON.stringify(unsafe), command));
 	return ok({ command: "cmd.exe", args: ["/d", "/s", "/c", `"${parts.map(quoteForCmd).join(" ")}"`], verbatim: true });
 };
 
-const describeDuration = (milliseconds: number): string =>
+const describeDuration = (milliseconds: number, messages: Messages): string =>
 	milliseconds >= MILLISECONDS_PER_MINUTE
-		? `${Math.round(milliseconds / MILLISECONDS_PER_MINUTE)} minutes`
-		: `${Math.round(milliseconds / MILLISECONDS_PER_SECOND)} seconds`;
+		? messages.failure.durationMinutes(Math.round(milliseconds / MILLISECONDS_PER_MINUTE))
+		: messages.failure.durationSeconds(Math.round(milliseconds / MILLISECONDS_PER_SECOND));
 
 // Kills the child and its descendants by PID (taskkill /T on Windows, the process group elsewhere), never by image name.
 const killTree: ProcessKiller = (child, kind) => new Promise((resolveKill) => {
@@ -136,11 +139,12 @@ export const runProcess = (
 	pathEnvironment: string,
 	command: string,
 	args: readonly string[],
+	messages: Messages,
 	options: ProcessOptions = {},
 	limits: ProcessLimits = DEFAULT_PROCESS_LIMITS,
 	kind: RunnerKind = hostPlatform() === "win32" ? "windows" : "posix",
 ): Promise<Result<ProcessOutput>> => new Promise((resolveResult) => {
-	const plan = planSpawn(kind, command, args, pathEnvironment);
+	const plan = planSpawn(kind, command, args, pathEnvironment, messages);
 	if (!plan.ok) {
 		resolveResult(plan);
 		return;
@@ -151,7 +155,7 @@ export const runProcess = (
 	let timedOut = false;
 	let disarm: () => void = () => undefined;
 	const timeoutMs = options.timeoutMs ?? limits.timeoutMs;
-	const timeoutFailure = (): Result<ProcessOutput> => err(`${command} did not finish within ${describeDuration(timeoutMs)} and was killed.`);
+	const timeoutFailure = (): Result<ProcessOutput> => err(messages.failure.processTimedOut(command, describeDuration(timeoutMs, messages)));
 	const settle = (result: Result<ProcessOutput>): void => {
 		if (settled) return;
 		settled = true;

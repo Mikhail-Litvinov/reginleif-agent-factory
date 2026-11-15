@@ -7,6 +7,9 @@ import { describe, expect, test } from "bun:test";
 import { appendEvent, trimEvents } from "../src/events.js";
 import { acquireLock } from "../src/lock.js";
 import { ok } from "../src/result.js";
+import { messagesFor } from "../src/messages";
+
+const TEST_MESSAGES = messagesFor("en");
 
 const TEST_EVENT_FILE_THRESHOLD_BYTES = 1024 * 1024;
 
@@ -58,6 +61,7 @@ describe("lock", () => {
 			home: "/home/test",
 				process: { pid, startTime, ownerStartTime: async (ownerPid) => ok(ownerStarts.get(ownerPid) ?? null) },
 			clock: { sleep: async () => { onSleep(); }, now: () => Date.now() },
+			messages: TEST_MESSAGES,
 			pollIntervalMs: 5,
 		});
 		const starts = new Map([[11, 101]]);
@@ -78,7 +82,7 @@ describe("lock", () => {
 		const lockPath = "/home/test/.agent-rig/rig.lock";
 		fs.files.set(lockPath, JSON.stringify({ pid: 55, startTime: 100 }));
 		const result = await acquireLock({
-			fs, home: "/home/test", process: { pid: 66, startTime: 200, ownerStartTime: async () => ok(999) },
+			messages: TEST_MESSAGES, fs, home: "/home/test", process: { pid: 66, startTime: 200, ownerStartTime: async () => ok(999) },
 			clock: { sleep: async () => undefined, now: () => Date.now() }, pollIntervalMs: 1,
 		}, () => undefined);
 		expect(result.ok).toBe(true);
@@ -90,7 +94,7 @@ describe("lock", () => {
 		const lockPath = "/home/test/.agent-rig/rig.lock";
 		fs.files.set(lockPath, JSON.stringify({ pid: 55, startTime: 100 }));
 		const result = await acquireLock({
-			fs, home: "/home/test", process: { pid: 66, startTime: 200, ownerStartTime: async () => ok(null) },
+			messages: TEST_MESSAGES, fs, home: "/home/test", process: { pid: 66, startTime: 200, ownerStartTime: async () => ok(null) },
 			clock: { sleep: async () => undefined, now: () => Date.now() }, pollIntervalMs: 1,
 		}, () => undefined);
 		expect(result.ok).toBe(true);
@@ -102,7 +106,7 @@ describe("events", () => {
 	test("appends one JSON line", async () => {
 		const fs = new MemoryFileSystem();
 		const dependencies: EventDependencies = {
-			fs, home: "/home/test", now: () => "2026-10-30T00:00:00.000Z", createId: () => "event-1",
+			messages: TEST_MESSAGES, fs, home: "/home/test", now: () => "2026-10-30T00:00:00.000Z", createId: () => "event-1",
 		};
 		await appendEvent(dependencies, { level: "info", type: "update-ok", text: "prêt" });
 		const eventPath = "/home/test/.agent-rig/events.jsonl";
@@ -111,7 +115,7 @@ describe("events", () => {
 
 	test("keeps the file byte-identical when the offset leaves an unread tail", async () => {
 		const fs = new MemoryFileSystem();
-		const dependencies: EventDependencies = { fs, home: "/home/test", now: () => "", createId: () => "" };
+		const dependencies: EventDependencies = { messages: TEST_MESSAGES, fs, home: "/home/test", now: () => "", createId: () => "" };
 		const eventPath = "/home/test/.agent-rig/events.jsonl";
 		const eventText = `${"x".repeat(TEST_EVENT_FILE_THRESHOLD_BYTES + 1)} queue-é`;
 		fs.files.set(eventPath, eventText);
@@ -125,7 +129,7 @@ describe("events", () => {
 
 	test("empties an over-threshold file when fully read and leaves the offset alone", async () => {
 		const fs = new MemoryFileSystem();
-		const dependencies: EventDependencies = { fs, home: "/home/test", now: () => "", createId: () => "" };
+		const dependencies: EventDependencies = { messages: TEST_MESSAGES, fs, home: "/home/test", now: () => "", createId: () => "" };
 		const eventPath = "/home/test/.agent-rig/events.jsonl";
 		const offsetPath = "/home/test/.agent-rig/events.offset";
 		const eventText = "x".repeat(TEST_EVENT_FILE_THRESHOLD_BYTES + 1);
@@ -142,7 +146,7 @@ describe("events", () => {
 
 	test("keeps an under-threshold file unchanged even when fully read", async () => {
 		const fs = new MemoryFileSystem();
-		const dependencies: EventDependencies = { fs, home: "/home/test", now: () => "", createId: () => "" };
+		const dependencies: EventDependencies = { messages: TEST_MESSAGES, fs, home: "/home/test", now: () => "", createId: () => "" };
 		const eventPath = "/home/test/.agent-rig/events.jsonl";
 		const eventText = "x".repeat(TEST_EVENT_FILE_THRESHOLD_BYTES);
 		fs.files.set(eventPath, eventText);
@@ -156,7 +160,7 @@ describe("events", () => {
 
 	test("keeps the file unchanged when the offset is missing", async () => {
 		const fs = new MemoryFileSystem();
-		const dependencies: EventDependencies = { fs, home: "/home/test", now: () => "", createId: () => "" };
+		const dependencies: EventDependencies = { messages: TEST_MESSAGES, fs, home: "/home/test", now: () => "", createId: () => "" };
 		const eventPath = "/home/test/.agent-rig/events.jsonl";
 		const eventText = "x".repeat(TEST_EVENT_FILE_THRESHOLD_BYTES + 1);
 		fs.files.set(eventPath, eventText);
@@ -169,7 +173,7 @@ describe("events", () => {
 
 	test("keeps the file unchanged when the offset is unreadable", async () => {
 		const fs = new MemoryFileSystem();
-		const dependencies: EventDependencies = { fs, home: "/home/test", now: () => "", createId: () => "" };
+		const dependencies: EventDependencies = { messages: TEST_MESSAGES, fs, home: "/home/test", now: () => "", createId: () => "" };
 		const eventPath = "/home/test/.agent-rig/events.jsonl";
 		const offsetPath = "/home/test/.agent-rig/events.offset";
 		const eventText = "x".repeat(TEST_EVENT_FILE_THRESHOLD_BYTES + 1);
@@ -185,7 +189,7 @@ describe("events", () => {
 
 	test("keeps the file unchanged when the offset is malformed", async () => {
 		const fs = new MemoryFileSystem();
-		const dependencies: EventDependencies = { fs, home: "/home/test", now: () => "", createId: () => "" };
+		const dependencies: EventDependencies = { messages: TEST_MESSAGES, fs, home: "/home/test", now: () => "", createId: () => "" };
 		const eventPath = "/home/test/.agent-rig/events.jsonl";
 		const eventText = "x".repeat(TEST_EVENT_FILE_THRESHOLD_BYTES + 1);
 		fs.files.set(eventPath, eventText);

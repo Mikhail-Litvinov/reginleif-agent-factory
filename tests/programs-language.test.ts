@@ -7,8 +7,10 @@ import { validateFeature } from "../src/feature.js";
 import { messagesFor } from "../src/messages.js";
 import { createMemoryRuntime, featureManifest } from "./fakes/memory-runtime.js";
 
+const TEST_MESSAGES = messagesFor("en");
+
 const manifestWith = (program: Record<string, unknown>): FeatureManifest => {
-	const result = validateFeature(featureManifest("demo", { programs: [program] }));
+	const result = validateFeature(featureManifest("demo", { programs: [program] }), TEST_MESSAGES);
 	if (!result.ok) throw new Error(result.error);
 	return result.value;
 };

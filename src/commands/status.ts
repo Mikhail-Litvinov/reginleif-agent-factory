@@ -5,6 +5,7 @@ import type { Result } from "../result.js";
 import type { RuntimePorts } from "../ports.js";
 
 import { apiFail, apiOk } from "../output.js";
+import { messagesFor } from "../messages.js";
 import { err, ok } from "../result.js";
 import { listFeatureViews } from "./feature.js";
 import { PROCESS_SUCCESS_EXIT_CODE } from "../ports.js";
@@ -68,7 +69,7 @@ export const readStatus = async (runtime: RuntimePorts): Promise<ApiResult<Statu
 const readGitHead = async (runtime: RuntimePorts, path: string): Promise<Result<string>> => {
 	const result = await runtime.process.run("git", ["-C", path, "rev-parse", "HEAD"]);
 	if (!result.ok) return result;
-	if (result.value.exitCode !== PROCESS_SUCCESS_EXIT_CODE) return err(result.value.stderr || result.value.stdout || "git rev-parse failed");
+	if (result.value.exitCode !== PROCESS_SUCCESS_EXIT_CODE) return err(result.value.stderr || result.value.stdout || messagesFor(runtime.language).failure.gitRevParseFailed());
 	return ok(result.value.stdout.trim());
 };
 

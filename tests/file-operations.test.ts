@@ -10,6 +10,9 @@ import { createFileSystem, ownerStartTime } from "../src/commands/real-runtime.j
 import { atomicWrite } from "../src/file-system.js";
 import { err, ok } from "../src/result.js";
 import { MemoryFileSystem } from "./fakes/memory-runtime.js";
+import { messagesFor } from "../src/messages";
+
+const TEST_MESSAGES = messagesFor("en");
 
 const PRIVATE_MODE = 0o600;
 const MODE_MASK = 0o777;
@@ -36,7 +39,7 @@ describe("stat and ranged reads of the real file system", () => {
 	test("stat reports size and mtime, null for a missing file or a directory", async () => {
 		const path = join(directory, "a.txt").replaceAll("\\", "/");
 		await writeFile(path, "hello");
-		const fs = createFileSystem();
+		const fs = createFileSystem(TEST_MESSAGES);
 
 		const found = await fs.stat(path);
 
@@ -49,7 +52,7 @@ describe("stat and ranged reads of the real file system", () => {
 	test("readRange returns the requested bytes and fewer at the end of the file", async () => {
 		const path = join(directory, "b.txt").replaceAll("\\", "/");
 		await writeFile(path, "0123456789");
-		const fs = createFileSystem();
+		const fs = createFileSystem(TEST_MESSAGES);
 
 		expect(new TextDecoder().decode(await fs.readRange(path, 2, 3))).toBe("234");
 		expect(new TextDecoder().decode(await fs.readRange(path, 8, 100))).toBe("89");
@@ -63,7 +66,7 @@ describe("atomic write through the in-memory file system", () => {
 		fs.seed("/data/secret.json", "old");
 		fs.modes.set("/data/secret.json", PRIVATE_MODE);
 
-		const result = await atomicWrite(fs, "/data/secret.json", "new");
+		const result = await atomicWrite(fs, "/data/secret.json", "new", TEST_MESSAGES);
 
 		expect(result.ok).toBe(true);
 		expect(fs.files.get("/data/secret.json")).toBe("new");
@@ -76,7 +79,7 @@ describe("atomic write through the in-memory file system", () => {
 		fs.seed("/data/real.json", "old");
 		fs.links.set("/data/link.json", "/data/real.json");
 
-		const result = await atomicWrite(fs, "/data/link.json", "new");
+		const result = await atomicWrite(fs, "/data/link.json", "new", TEST_MESSAGES);
 
 		expect(result.ok).toBe(true);
 		expect(fs.files.get("/data/real.json")).toBe("new");
@@ -93,7 +96,7 @@ describe("atomic write on the real file system", () => {
 		await writeFile(target, "old");
 		await symlink(target, link);
 
-		const result = await atomicWrite(createFileSystem(), link.replaceAll("\\", "/"), "new");
+		const result = await atomicWrite(createFileSystem(TEST_MESSAGES), link.replaceAll("\\", "/"), "new", TEST_MESSAGES);
 
 		expect(result.ok).toBe(true);
 		expect((await lstat(link)).isSymbolicLink()).toBe(true);
@@ -107,7 +110,7 @@ describe("atomic write on the real file system", () => {
 		const link = join(directory, "dangling.json");
 		await symlink(target, link);
 
-		const result = await atomicWrite(createFileSystem(), link.replaceAll("\\", "/"), "created");
+		const result = await atomicWrite(createFileSystem(TEST_MESSAGES), link.replaceAll("\\", "/"), "created", TEST_MESSAGES);
 
 		expect(result.ok).toBe(true);
 		expect((await lstat(link)).isSymbolicLink()).toBe(true);
@@ -120,7 +123,7 @@ describe("atomic write on the real file system", () => {
 		await writeFile(path, "old");
 		await chmod(path, PRIVATE_MODE);
 
-		const result = await atomicWrite(createFileSystem("posix"), path, "new");
+		const result = await atomicWrite(createFileSystem(TEST_MESSAGES, "posix"), path, "new", TEST_MESSAGES);
 
 		expect(result.ok).toBe(true);
 		expect((await stat(path)).mode & MODE_MASK).toBe(PRIVATE_MODE);
@@ -132,7 +135,7 @@ describe("atomic write on the real file system", () => {
 		await writeFile(path, "old");
 		const chmodSpy = spyOn(nodeFs, "chmod");
 		try {
-			const result = await atomicWrite(createFileSystem("windows"), path.replaceAll("\\", "/"), "new");
+			const result = await atomicWrite(createFileSystem(TEST_MESSAGES, "windows"), path.replaceAll("\\", "/"), "new", TEST_MESSAGES);
 
 			expect(result.ok).toBe(true);
 			expect(await readFile(path, "utf8")).toBe("new");
@@ -158,7 +161,7 @@ describe("atomic write on the real file system", () => {
 			return originalRename(from, to);
 		});
 		try {
-			const result = await atomicWrite(createFileSystem(), path.replaceAll("\\", "/"), "data");
+			const result = await atomicWrite(createFileSystem(TEST_MESSAGES), path.replaceAll("\\", "/"), "data", TEST_MESSAGES);
 
 			expect(result.ok).toBe(true);
 		} finally {
@@ -174,7 +177,7 @@ describe("exclusive creation of a file", () => {
 		const blocker = join(directory, "blocker");
 		await writeFile(blocker, "i am a file");
 
-		const result = await createFileSystem().writeExclusive(join(blocker, "rig.lock").replaceAll("\\", "/"), "x");
+		const result = await createFileSystem(TEST_MESSAGES).writeExclusive(join(blocker, "rig.lock").replaceAll("\\", "/"), "x");
 
 		expect(result.ok).toBe(false);
 	});
@@ -183,7 +186,7 @@ describe("exclusive creation of a file", () => {
 		const path = join(directory, "rig.lock");
 		await writeFile(path, "owner");
 
-		const result = await createFileSystem().writeExclusive(path.replaceAll("\\", "/"), "intruder");
+		const result = await createFileSystem(TEST_MESSAGES).writeExclusive(path.replaceAll("\\", "/"), "intruder");
 
 		expect(result).toEqual(ok(false));
 		expect(await readFile(path, "utf8")).toBe("owner");
@@ -199,7 +202,7 @@ describe("exclusive creation of a file", () => {
 			return originalLink(existing, created);
 		});
 		try {
-			const result = await createFileSystem().writeExclusive(path.replaceAll("\\", "/"), "complete-owner-record");
+			const result = await createFileSystem(TEST_MESSAGES).writeExclusive(path.replaceAll("\\", "/"), "complete-owner-record");
 
 			expect(result).toEqual(ok(true));
 		} finally {
@@ -214,7 +217,7 @@ describe("exclusive creation of a file", () => {
 		const path = join(directory, "rig.lock");
 		const openSpy = spyOn(nodeFs, "open").mockRejectedValue(new Error("killed"));
 		try {
-			const result = await createFileSystem().writeExclusive(path.replaceAll("\\", "/"), "x");
+			const result = await createFileSystem(TEST_MESSAGES).writeExclusive(path.replaceAll("\\", "/"), "x");
 
 			expect(result.ok).toBe(false);
 		} finally {
@@ -229,23 +232,23 @@ describe("owner start time", () => {
 	const output = (stdout: string, exitCode = 0, stderr = ""): Result<ProcessOutput> => ok({ stdout, stderr, exitCode });
 
 	test("windows: a failed PowerShell is unknown, never 'no such process'", async () => {
-		expect((await ownerStartTime(1, runner(err("spawn failed")), "win32")).ok).toBe(false);
-		expect((await ownerStartTime(1, runner(output("", 1, "denied")), "win32")).ok).toBe(false);
-		expect((await ownerStartTime(1, runner(output("garbage")), "win32")).ok).toBe(false);
+		expect((await ownerStartTime(1, runner(err("spawn failed")), TEST_MESSAGES, "win32")).ok).toBe(false);
+		expect((await ownerStartTime(1, runner(output("", 1, "denied")), TEST_MESSAGES, "win32")).ok).toBe(false);
+		expect((await ownerStartTime(1, runner(output("garbage")), TEST_MESSAGES, "win32")).ok).toBe(false);
 	});
 
 	test("windows: empty output with a clean exit means the process does not exist", async () => {
-		expect(await ownerStartTime(1, runner(output("\r\n")), "win32")).toEqual(ok(null));
+		expect(await ownerStartTime(1, runner(output("\r\n")), TEST_MESSAGES, "win32")).toEqual(ok(null));
 	});
 
 	test("windows: ticks are returned as the start time", async () => {
-		expect(await ownerStartTime(1, runner(output(`${WINDOWS_TICKS}\r\n`)), "win32")).toEqual(ok(WINDOWS_TICKS));
+		expect(await ownerStartTime(1, runner(output(`${WINDOWS_TICKS}\r\n`)), TEST_MESSAGES, "win32")).toEqual(ok(WINDOWS_TICKS));
 	});
 
 	test("linux: a missing /proc entry means no such process, any other failure is unknown", async () => {
 		if (process.platform !== "linux") return;
-		expect(await ownerStartTime(LINUX_ABSENT_PID, runner(output("")), "linux")).toEqual(ok(null));
-		const own = await ownerStartTime(process.pid, runner(output("")), "linux");
+		expect(await ownerStartTime(LINUX_ABSENT_PID, runner(output("")), TEST_MESSAGES, "linux")).toEqual(ok(null));
+		const own = await ownerStartTime(process.pid, runner(output("")), TEST_MESSAGES, "linux");
 		expect(own.ok && typeof own.value === "number").toBe(true);
 	});
 
@@ -257,12 +260,12 @@ describe("owner start time", () => {
 				return output("");
 			},
 		};
-		await ownerStartTime(1, recorder, "darwin");
+		await ownerStartTime(1, recorder, TEST_MESSAGES, "darwin");
 		expect(calls.map((call) => call.command)).toEqual(["ps"]);
 		expect(calls[0]?.options?.environment?.LC_ALL).toBe("C");
 	});
 
 	test("an unsupported host is unknown", async () => {
-		expect((await ownerStartTime(1, runner(output("")), "aix")).ok).toBe(false);
+		expect((await ownerStartTime(1, runner(output("")), TEST_MESSAGES, "aix")).ok).toBe(false);
 	});
 });

@@ -1,5 +1,5 @@
 import type { FileSystem } from "./file-system.js";
-import type { TranslatedLanguage } from "./messages.js";
+import type { Messages, TranslatedLanguage } from "./messages.js";
 import type { Result } from "./result.js";
 
 import { joinPath } from "./file-system.js";
@@ -144,26 +144,26 @@ const isFeatureManifest = (value: unknown): value is FeatureManifest => isObject
 	isString(value.name) && /^[a-z0-9][a-z0-9-]*$/.test(value.name) && isString(value.description) &&
 	(value.translations === undefined || isTranslatedTexts(value.translations, "description")) && typeof value.enabledByDefault === "boolean" && hasValidLists(value);
 
-export const validateFeature = (value: unknown): Result<FeatureManifest> => {
+export const validateFeature = (value: unknown, messages: Messages): Result<FeatureManifest> => {
 	const name = isObject(value) && isString(value.name) ? value.name : "<unknown>";
 	if (!isFeatureManifest(value)) {
-		return err(`Feature ${name} has an invalid feature.json manifest`);
+		return err(messages.failure.featureManifestInvalid(name));
 	}
 	return ok(value);
 };
 
-export const readFeature = async (fs: FileSystem, directory: string): Promise<Result<FeatureManifest>> => {
+export const readFeature = async (fs: FileSystem, directory: string, messages: Messages): Promise<Result<FeatureManifest>> => {
 	try {
 		const text = await fs.readText(joinPath(directory, "feature.json"));
 		let data: unknown;
 		try {
 			data = JSON.parse(text);
 		} catch {
-			return err(`Feature at ${directory} has invalid JSON in feature.json`);
+			return err(messages.failure.featureJsonInvalid(directory));
 		}
-		const result = validateFeature(data);
+		const result = validateFeature(data, messages);
 		return result.ok ? result : err(`${directory}: ${result.error}`);
 	} catch (error) {
-		return err(`Could not load feature at ${directory}: ${errorText(error)}`);
+		return err(messages.failure.featureLoadFailed(directory, errorText(error)));
 	}
 };

@@ -1,3 +1,4 @@
+import type { Messages } from "../messages.js";
 import type { Result } from "../result.js";
 
 import { dlopen, FFIType, ptr } from "bun:ffi";
@@ -40,8 +41,8 @@ let confined: Result<Job> | null = null;
  * Children spawned afterwards inherit the job, so a killed runner takes down descendants that `taskkill /T` cannot
  * reach because an intermediate parent already exited (Git Bash and other MSYS programs do this). Idempotent.
  */
-export const confineToKillOnCloseJob = (): Result<void> => {
-	const job = confinedJob();
+export const confineToKillOnCloseJob = (messages: Messages): Result<void> => {
+	const job = confinedJob(messages);
 	return job.ok ? ok(undefined) : job;
 };
 
@@ -49,8 +50,8 @@ export const confineToKillOnCloseJob = (): Result<void> => {
  * How many processes of the current process's job are alive, the current process not counted. Confines the current
  * process first when that has not happened yet. A process that broke away from the job on its own is not in it.
  */
-export const jobMembersOtherThanSelf = (): Result<number> => {
-	const job = confinedJob();
+export const jobMembersOtherThanSelf = (messages: Messages): Result<number> => {
+	const job = confinedJob(messages);
 	if (!job.ok) return job;
 	const active = job.value.activeProcesses();
 	return active.ok ? ok(Math.max(0, active.value - 1)) : active;
@@ -60,18 +61,18 @@ export const jobMembersOtherThanSelf = (): Result<number> => {
  * Terminates every process of the current process's job except the current process. Succeeds when none is left to
  * terminate: a member that ended between the listing and the termination is already gone, which is the goal.
  */
-export const terminateJobMembersOtherThanSelf = (): Result<void> => {
-	const job = confinedJob();
+export const terminateJobMembersOtherThanSelf = (messages: Messages): Result<void> => {
+	const job = confinedJob(messages);
 	return job.ok ? job.value.terminateOthers(process.pid) : job;
 };
 
-const confinedJob = (): Result<Job> => {
+const confinedJob = (messages: Messages): Result<Job> => {
 	if (confined !== null) return confined;
-	confined = create();
+	confined = create(messages);
 	return confined;
 };
 
-const create = (): Result<Job> => {
+const create = (messages: Messages): Result<Job> => {
 	try {
 		const kernel = dlopen("kernel32.dll", {
 			CreateJobObjectW: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.ptr },
@@ -85,20 +86,20 @@ const create = (): Result<Job> => {
 			GetLastError: { args: [], returns: FFIType.u32 },
 		});
 		const job = kernel.symbols.CreateJobObjectW(null, null);
-		if (job === null) return err(`CreateJobObjectW failed: ${kernel.symbols.GetLastError()}`);
+		if (job === null) return err(messages.failure.win32CallFailed("CreateJobObjectW", kernel.symbols.GetLastError()));
 		const info = new Uint8Array(EXTENDED_LIMIT_INFORMATION_SIZE);
 		new DataView(info.buffer).setUint32(LIMIT_FLAGS_OFFSET, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, true);
 		if (kernel.symbols.SetInformationJobObject(job, JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS, ptr(info), info.length) === WIN32_FALSE) {
-			return err(`SetInformationJobObject failed: ${kernel.symbols.GetLastError()}`);
+			return err(messages.failure.win32CallFailed("SetInformationJobObject", kernel.symbols.GetLastError()));
 		}
 		if (kernel.symbols.AssignProcessToJobObject(job, kernel.symbols.GetCurrentProcess()) === WIN32_FALSE) {
-			return err(`AssignProcessToJobObject failed: ${kernel.symbols.GetLastError()}`);
+			return err(messages.failure.win32CallFailed("AssignProcessToJobObject", kernel.symbols.GetLastError()));
 		}
 		const activeProcesses = (): Result<number> => {
 			try {
 				const accounting = new Uint8Array(BASIC_ACCOUNTING_INFORMATION_SIZE);
 				if (kernel.symbols.QueryInformationJobObject(job, JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION_CLASS, ptr(accounting), accounting.length, null) === WIN32_FALSE) {
-					return err(`QueryInformationJobObject failed: ${kernel.symbols.GetLastError()}`);
+					return err(messages.failure.win32CallFailed("QueryInformationJobObject", kernel.symbols.GetLastError()));
 				}
 				return ok(new DataView(accounting.buffer).getUint32(ACTIVE_PROCESSES_OFFSET, true));
 			} catch (error) {
@@ -112,13 +113,13 @@ const create = (): Result<Job> => {
 				const list = new Uint8Array(PROCESS_ID_LIST_HEADER_SIZE + capacity * PROCESS_ID_SIZE);
 				const view = new DataView(list.buffer);
 				const queried = kernel.symbols.QueryInformationJobObject(job, JOB_OBJECT_BASIC_PROCESS_ID_LIST_CLASS, ptr(list), list.length, null);
-				if (queried === WIN32_FALSE && kernel.symbols.GetLastError() !== ERROR_MORE_DATA) return err(`QueryInformationJobObject failed: ${kernel.symbols.GetLastError()}`);
+				if (queried === WIN32_FALSE && kernel.symbols.GetLastError() !== ERROR_MORE_DATA) return err(messages.failure.win32CallFailed("QueryInformationJobObject", kernel.symbols.GetLastError()));
 				const assigned = view.getUint32(0, true);
 				if (queried === WIN32_FALSE) { capacity = Math.max(assigned, capacity + 1); continue; }
 				const listed = view.getUint32(4, true);
 				return ok(Array.from({ length: listed }, (_, index) => Number(view.getBigUint64(PROCESS_ID_LIST_HEADER_SIZE + index * PROCESS_ID_SIZE, true))));
 			}
-			return err("The job's process list kept changing");
+			return err(messages.failure.jobListKeptChanging());
 		};
 		const terminateOthers = (selfPid: number): Result<void> => {
 			try {

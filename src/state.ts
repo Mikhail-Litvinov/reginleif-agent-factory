@@ -1,9 +1,9 @@
 import type { FileSystem } from "./file-system.js";
-import type { Language } from "./messages.js";
+import type { Language, Messages } from "./messages.js";
 import type { Result } from "./result.js";
 
 import { atomicWrite, joinPath, toSlashPath } from "./file-system.js";
-import { DEFAULT_LANGUAGE, isLanguage } from "./messages.js";
+import { DEFAULT_LANGUAGE, isLanguage, messagesFor } from "./messages.js";
 import { err, errorText, ok } from "./result.js";
 
 // A write-ahead journal of one `apply`. `entries` hold the record changes that count only when the file at `path`
@@ -58,12 +58,12 @@ const isJournal = (value: unknown): value is Journal =>
 // absent (English); only `rig language en|ru` needs to know, to write a valid value back.
 export type StateReport = { state: RigState; languageInvalid: boolean };
 
-export const parseStateReport = (text: string): Result<StateReport> => {
+export const parseStateReport = (text: string, messages: Messages): Result<StateReport> => {
 	let value: unknown;
 	try {
 		value = JSON.parse(text);
 	} catch {
-		return err("state.json is not valid JSON");
+		return err(messages.failure.stateInvalidJson());
 	}
 	if (!isObject(value) || (value.mode !== "dev" && value.mode !== "server") ||
 		!isObject(value.paths) || typeof value.paths.repo !== "string" || typeof value.paths.hub !== "string" ||
@@ -71,7 +71,7 @@ export const parseStateReport = (text: string): Result<StateReport> => {
 		!isUnknownArray(value.badPairs) || !value.badPairs.every(isBadPair) ||
 		!(value.pendingHubRestart === null || typeof value.pendingHubRestart === "string") ||
 		!(value.journal === undefined || isJournal(value.journal))) {
-		return err("state.json has an invalid shape");
+		return err(messages.failure.stateInvalidShape());
 	}
 	const state: RigState = {
 		mode: value.mode,
@@ -87,42 +87,42 @@ export const parseStateReport = (text: string): Result<StateReport> => {
 	return ok({ state, languageInvalid });
 };
 
-export const parseState = (text: string): Result<RigState> => {
-	const report = parseStateReport(text);
+export const parseState = (text: string, messages: Messages): Result<RigState> => {
+	const report = parseStateReport(text, messages);
 	return report.ok ? ok(report.value.state) : report;
 };
 
-export const readState = async (fs: FileSystem, home: string): Promise<Result<RigState>> => {
+export const readState = async (fs: FileSystem, home: string, messages: Messages): Promise<Result<RigState>> => {
 	try {
-		return parseState(await fs.readText(joinPath(home, ".agent-rig", "state.json")));
+		return parseState(await fs.readText(joinPath(home, ".agent-rig", "state.json")), messages);
 	} catch (error) {
-		return err(`Could not read state.json: ${errorText(error)}`);
+		return err(messages.failure.stateReadFailed(errorText(error)));
 	}
 };
 
 // null: there is no state.json (rig is not installed yet).
-export const readStateReport = async (fs: FileSystem, home: string): Promise<Result<StateReport | null>> => {
+export const readStateReport = async (fs: FileSystem, home: string, messages: Messages): Promise<Result<StateReport | null>> => {
 	let text: string;
 	try {
 		text = await fs.readText(joinPath(home, ".agent-rig", "state.json"));
 	} catch (error) {
-		return isMissingFile(error) ? ok(null) : err(`Could not read state.json: ${errorText(error)}`);
+		return isMissingFile(error) ? ok(null) : err(messages.failure.stateReadFailed(errorText(error)));
 	}
-	return parseStateReport(text);
+	return parseStateReport(text, messages);
 };
 
 // The language of everything rig prints: a missing, unreadable or invalid state.json, or an unsupported value in it,
 // means the default language; the command itself reports a broken state later.
 export const readStoredLanguage = async (fs: FileSystem, home: string): Promise<Language> => {
-	const state = await readState(fs, home);
+	const state = await readState(fs, home, messagesFor(DEFAULT_LANGUAGE));
 	return state.ok ? state.value.language ?? DEFAULT_LANGUAGE : DEFAULT_LANGUAGE;
 };
 
-export const writeState = async (fs: FileSystem, home: string, state: RigState): Promise<Result<void>> => {
+export const writeState = async (fs: FileSystem, home: string, state: RigState, messages: Messages): Promise<Result<void>> => {
 	try {
-		const result = await atomicWrite(fs, joinPath(home, ".agent-rig", "state.json"), `${JSON.stringify(state, null, 2)}\n`);
-		return result.ok ? ok(undefined) : err(`Could not write state.json: ${result.error}`);
+		const result = await atomicWrite(fs, joinPath(home, ".agent-rig", "state.json"), `${JSON.stringify(state, null, 2)}\n`, messages);
+		return result.ok ? ok(undefined) : err(messages.failure.stateWriteFailed(result.error));
 	} catch (error) {
-		return err(`Could not write state.json: ${errorText(error)}`);
+		return err(messages.failure.stateWriteFailed(errorText(error)));
 	}
 };

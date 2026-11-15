@@ -4,6 +4,7 @@ import type { Result } from "../../src/result.js";
 import type { FileContent } from "../../src/content-hash.js";
 
 import { atomicWrite } from "../../src/file-system.js";
+import { messagesFor } from "../../src/messages.js";
 import { err, ok } from "../../src/result.js";
 import { PROCESS_SUCCESS_EXIT_CODE } from "../../src/ports.js";
 
@@ -283,7 +284,7 @@ export const createMemoryRuntime = (platform: RuntimePorts["platform"] = "linux"
 		writeFileAtomic: async (path: string, content: FileContent): Promise<Result<void>> => {
 			const text = decodeUtf8(content.bytes);
 			// Bytes that are not text cannot live in the string map: it holds a placeholder, `binaries` the real bytes.
-			const written = await atomicWrite(fs, path, text ?? "");
+			const written = await atomicWrite(fs, path, text ?? "", messagesFor("en"));
 			if (!written.ok) return written;
 			if (text === null) fs.binaries.set(path, content.bytes);
 			else fs.binaries.delete(path);
@@ -355,6 +356,7 @@ export const createMemoryRuntime = (platform: RuntimePorts["platform"] = "linux"
 			process: { pid: FAKE_OWNER_PID, startTime: FAKE_OWNER_START_TIME, ownerStartTime: async () => ok(FAKE_OWNER_START_TIME) },
 			clock: { sleep: async () => undefined, now: () => Date.now() },
 			pollIntervalMs: FAKE_LOCK_POLL_INTERVAL_MS,
+			messages: messagesFor("en"),
 		},
 		home: "/home/test",
 		currentDirectory: "/repo",

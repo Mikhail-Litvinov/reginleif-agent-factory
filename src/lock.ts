@@ -1,4 +1,5 @@
 import type { FileSystem } from "./file-system.js";
+import type { Messages } from "./messages.js";
 import type { Result } from "./result.js";
 
 import { joinPath } from "./file-system.js";
@@ -9,6 +10,7 @@ export type LockDependencies = {
 	fs: FileSystem;
 	home: string;
 	lockPath?: string;
+	messages: Messages;
 	process: {
 		pid: number;
 		startTime: number;
@@ -44,7 +46,7 @@ const ownerMayBeRunning = async (owner: LockOwner, dependencies: LockDependencie
 	}
 };
 
-const createHandle = (fs: FileSystem, lockPath: string, owner: LockOwner): LockHandle => {
+const createHandle = (fs: FileSystem, lockPath: string, owner: LockOwner, messages: Messages): LockHandle => {
 	let released = false;
 	return {
 		release: async () => {
@@ -55,7 +57,7 @@ const createHandle = (fs: FileSystem, lockPath: string, owner: LockOwner): LockH
 				released = true;
 				return ok(undefined);
 			} catch (error) {
-				return err(`Could not release rig lock: ${errorText(error)}`);
+				return err(messages.failure.lockReleaseFailed(errorText(error)));
 			}
 		},
 	};
@@ -114,8 +116,8 @@ const acquire = async (dependencies: LockDependencies, onWait: (() => void) | nu
 		while (true) {
 			const owner: LockOwner = { pid: dependencies.process.pid, startTime: dependencies.process.startTime };
 			const created = await fs.writeExclusive(lockPath, `${JSON.stringify(owner)}\n`);
-			if (!created.ok) return err(`Could not acquire rig lock: ${created.error}`);
-			if (created.value) return ok(createHandle(fs, lockPath, owner));
+			if (!created.ok) return err(dependencies.messages.failure.lockAcquireFailed(created.error));
+			if (created.value) return ok(createHandle(fs, lockPath, owner, dependencies.messages));
 			let existingText: string;
 			try {
 				existingText = await fs.readText(lockPath);
@@ -123,7 +125,7 @@ const acquire = async (dependencies: LockDependencies, onWait: (() => void) | nu
 				continue;
 			}
 			const existing = parseOwner(existingText);
-			if (existing === null) return err("rig.lock is malformed; remove it after confirming no rig process is running");
+			if (existing === null) return err(dependencies.messages.failure.lockMalformed());
 			if (await ownerMayBeRunning(existing, dependencies)) {
 				if (onWait === null) return ok(null);
 				if (!announced) {
@@ -136,7 +138,7 @@ const acquire = async (dependencies: LockDependencies, onWait: (() => void) | nu
 			await takeOverStale(fs, lockPath, dependencies);
 		}
 	} catch (error) {
-		return err(`Could not acquire rig lock: ${errorText(error)}`);
+		return err(dependencies.messages.failure.lockAcquireFailed(errorText(error)));
 	}
 };
 
@@ -144,7 +146,7 @@ const acquire = async (dependencies: LockDependencies, onWait: (() => void) | nu
 export const acquireLock = async (dependencies: LockDependencies, onWait: () => void): Promise<Result<LockHandle>> => {
 	const acquired = await acquire(dependencies, onWait);
 	if (!acquired.ok) return acquired;
-	return acquired.value === null ? err("Could not acquire rig lock: it is held by another process") : ok(acquired.value);
+	return acquired.value === null ? err(dependencies.messages.failure.lockHeld()) : ok(acquired.value);
 };
 
 // Takes the lock only if it is free right now; ok(null) means another live process holds it.

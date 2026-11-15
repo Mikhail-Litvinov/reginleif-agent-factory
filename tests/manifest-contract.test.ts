@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 
 import { validateFeature } from "../src/feature.js";
+import { messagesFor } from "../src/messages";
+
+const TEST_MESSAGES = messagesFor("en");
 
 const EXAMPLE_HOOK_TIMEOUT_SECONDS = 30;
 
@@ -15,7 +18,7 @@ describe("feature manifest contract", () => {
 			return;
 		}
 
-		const result = validateFeature(value);
+		const result = validateFeature(value, TEST_MESSAGES);
 		expect(result.ok).toBe(true);
 		if (!result.ok) return;
 		expect(result.value.hooks[0]).toEqual({

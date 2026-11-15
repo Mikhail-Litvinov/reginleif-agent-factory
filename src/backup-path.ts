@@ -1,3 +1,4 @@
+import type { Messages } from "./messages.js";
 import type { Result } from "./result.js";
 
 import { err, ok } from "./result.js";
@@ -18,6 +19,7 @@ export const chooseBackupPath = async (
 	basePath: string,
 	wantedHash: string,
 	readHash: (path: string) => Promise<Result<string | null>>,
+	messages: Messages,
 ): Promise<Result<BackupChoice>> => {
 	for (let number = FIRST_BACKUP_NUMBER; number <= MAX_BACKUP_NUMBER; number += 1) {
 		const path = number === FIRST_BACKUP_NUMBER ? basePath : `${basePath}-${number}`;
@@ -26,5 +28,5 @@ export const chooseBackupPath = async (
 		if (existing.value === null) return ok({ path, exists: false });
 		if (existing.value === wantedHash) return ok({ path, exists: true });
 	}
-	return err(`Too many backups of ${basePath}`);
+	return err(messages.failure.tooManyBackups(basePath));
 };

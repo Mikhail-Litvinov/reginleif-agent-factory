@@ -10,6 +10,8 @@ import { ok } from "../src/result.js";
 import { mergeSettings } from "../src/settings/merge-settings.js";
 import { baseManifest, createMemoryRuntime, featureManifest, seedFeature } from "./fakes/memory-runtime.js";
 
+const TEST_MESSAGES = messagesFor("en");
+
 const REPO = "/repo";
 const SETTINGS = "/home/test/.claude/settings.json";
 const STATE = "/home/test/.agent-rig/state.json";
@@ -40,7 +42,7 @@ describe("hook executable resolution", () => {
 		harness.runtime.process.run = async (command) => ok({ stdout: command === "git" ? "D:/Git/mingw64/libexec/git-core\n" : `${command.includes("WindowsApps") ? command : "C:/Python/python.exe"}\n`, stderr: "", exitCode: 0 });
 		const manifest = { ...baseManifest(), hooks: HOOKS };
 		seedFeature(harness.fs, REPO, manifest);
-		const loaded = await import("../src/feature-graph.js").then((module) => module.loadFeatures(harness.fs, REPO));
+		const loaded = await import("../src/feature-graph.js").then((module) => module.loadFeatures(harness.fs, REPO, TEST_MESSAGES));
 		expect(loaded.ok).toBe(true);
 		if (!loaded.ok) return;
 		const result = await resolveHookPrograms(harness.runtime, loaded.value, new Set(["base"]));

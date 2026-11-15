@@ -7,6 +7,9 @@ import { join } from "node:path";
 
 import { applyAssets } from "../../src/assets/installer";
 import { createNodeAssetFileSystem } from "../../src/assets/node-asset-file-system";
+import { messagesFor } from "../../src/messages";
+
+const TEST_MESSAGES = messagesFor("en");
 
 const DAY = "2026-10-30";
 const TEMP_PREFIX = "rig-assets-";
@@ -44,7 +47,7 @@ describe("real file system adapter (A8)", () => {
       files: [{ sourcePath: source, targetPath: target }],
     };
 
-    const applied = await applyAssets({ fs: createNodeAssetFileSystem(), now: () => DAY }, [plan], {});
+    const applied = await applyAssets({ fs: createNodeAssetFileSystem(), now: () => DAY, messages: TEST_MESSAGES }, [plan], {});
 
     expect(applied.ok).toBe(true);
     expect(new Uint8Array(await readFile(join(target, "nested", "logo.png")))).toEqual(BINARY_BYTES);

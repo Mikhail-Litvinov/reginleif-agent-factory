@@ -9,6 +9,7 @@
 	},
 	"devDependencies": {
 		"@types/bun": "latest",
-		"typescript": "latest"
+		"typescript": "latest",
+		"typescript-api": "npm:typescript@5"
 	}
 }

@@ -60,7 +60,7 @@ export const updateRig = async (
 	const done = (outcome: UpdateOutcome): ApiResult<UpdateData> => apiOk({ mode, outcome });
 	const finished = (result: Result<UpdateOutcome>): ApiResult<UpdateData> => result.ok ? done(result.value) : apiFail(UPDATE_ERROR_FAILED, result.error);
 	const operation = async (): Promise<Result<UpdateOutcome>> => {
-		const state = await readRigStateFile(runtime.fs, runtime.home);
+		const state = await readRigStateFile(runtime.fs, runtime.home, messagesFor(runtime.language));
 		if (!state.ok) return state;
 		const environmentFailures: Pair[] = [];
 		const ports = makeUpdatePorts(runtime, state.value.paths, pendingOnly, writeProgress, environmentFailures);
@@ -75,6 +75,7 @@ export const updateRig = async (
 			home: runtime.home,
 			now: () => runtime.clock.nowText(),
 			createId: () => runtime.ids.next(),
+			messages: messagesFor(runtime.language),
 		});
 		if (!trimmed.ok) return trimmed;
 		return ok("complete");
@@ -145,7 +146,7 @@ const parentHoldsLock = async (runtime: RuntimePorts, parent: LockOwner): Promis
 const applyInstalledPrograms = async (runtime: RuntimePorts, writeLine: (line: string) => void): Promise<Result<void>> => {
 	const state = await readState(runtime);
 	if (!state.ok) return state;
-	const features = await loadFeatures(runtime.fs, state.value.paths.repo);
+	const features = await loadFeatures(runtime.fs, state.value.paths.repo, messagesFor(runtime.language));
 	if (!features.ok) return features;
 	const enabled = features.value
 		.filter((feature) => feature.name === "base" || state.value.features[feature.name] === true)
@@ -189,7 +190,7 @@ const forgetBadPairs = async (runtime: RuntimePorts, pairs: readonly Pair[]): Pr
 	const state = await readState(runtime);
 	if (!state.ok) return state;
 	const badPairs = state.value.badPairs.filter((bad) => !pairs.some((pair) => pair.rig === bad.repo && pair.hub === bad.hub));
-	return writeRigStateFile(runtime.fs, runtime.home, { ...state.value, badPairs });
+	return writeRigStateFile(runtime.fs, runtime.home, { ...state.value, badPairs }, messagesFor(runtime.language));
 };
 
 const makeUpdatePorts = (
@@ -200,7 +201,7 @@ const makeUpdatePorts = (
 	environmentFailures: Pair[],
 ): UpdatePorts => ({
 	messages: messagesFor(runtime.language),
-	git: createRealGitAdapter(runtime.process, paths),
+	git: createRealGitAdapter(runtime.process, paths, messagesFor(runtime.language)),
 	apply: async () => {
 		const update = await readUpdateState(runtime, paths, !pendingOnly);
 		if (!update.ok) return update;
@@ -231,7 +232,7 @@ const makeUpdatePorts = (
 	discoverFeatures: async () => {
 		const state = await readState(runtime);
 		if (!state.ok) return state;
-		const features = await loadFeatures(runtime.fs, paths.repo);
+		const features = await loadFeatures(runtime.fs, paths.repo, messagesFor(runtime.language));
 		return features.ok ? ok(features.value.filter((feature) => feature.name !== "base").map((feature) => feature.name)) : features;
 	},
 	service: { restart: () => runtime.service.restart() },
@@ -241,7 +242,7 @@ const makeUpdatePorts = (
 const readUpdateState = async (runtime: RuntimePorts, paths: RigState["paths"], loadConfirmed: boolean): Promise<Result<UpdateState>> => {
 	const rigState = await readState(runtime);
 	if (!rigState.ok) return rigState;
-	const stored = parseStoredUpdateState(rigState.value.records[UPDATE_STATE_RECORD]);
+	const stored = parseStoredUpdateState(rigState.value.records[UPDATE_STATE_RECORD], messagesFor(runtime.language));
 	if (!stored.ok) return stored;
 	const pendingResult = parsePending(rigState.value.pendingHubRestart, messagesFor(runtime.language));
 	if (!pendingResult.ok) return pendingResult;
@@ -302,19 +303,19 @@ const writeUpdateState = async (runtime: RuntimePorts, updateState: UpdateState)
 		pendingHubRestart: updateState.pending === null ? null : JSON.stringify(updateState.pending),
 		records,
 	};
-	return writeRigStateFile(runtime.fs, runtime.home, next);
+	return writeRigStateFile(runtime.fs, runtime.home, next, messagesFor(runtime.language));
 };
 
-const parseStoredUpdateState = (text: string | undefined): Result<PersistedUpdateState | null> => {
+const parseStoredUpdateState = (text: string | undefined, messages: Messages): Result<PersistedUpdateState | null> => {
 	if (text === undefined) return ok(null);
 	let value: unknown;
 	try {
 		value = JSON.parse(text);
 	} catch {
-		return err("update state record is not valid JSON");
+		return err(messages.failure.updateStateInvalidJson());
 	}
 	if (!isObject(value) || !isPair(value.confirmed) || !(value.transaction === null || isTransaction(value.transaction)) || !(value.pendingEvent === undefined || value.pendingEvent === null || isUpdateEvent(value.pendingEvent))) {
-		return err("update state record has an invalid shape");
+		return err(messages.failure.updateStateInvalidShape());
 	}
 	const lastFailure = typeof value.lastFailure === "string" ? value.lastFailure : null;
 	const pendingEvent = isUpdateEvent(value.pendingEvent) ? value.pendingEvent : null;
@@ -350,6 +351,7 @@ const emitUpdateEvent = async (runtime: RuntimePorts, event: UpdateEvent): Promi
 		fs: runtime.fs,
 		home: runtime.home,
 		now: () => event.time,
+		messages: messagesFor(runtime.language),
 		createId: () => event.id,
 	}, event);
 	return appended.ok ? ok(undefined) : appended;
@@ -374,17 +376,17 @@ const isEventWithId = (line: string, eventId: string): boolean => {
 	return isObject(value) && value.id === eventId;
 };
 
-const currentHead = (runtime: RuntimePorts, repository: RepositoryName, paths: RigState["paths"]): Promise<Result<string>> => createRealGitAdapter(runtime.process, paths).head(repository);
+const currentHead = (runtime: RuntimePorts, repository: RepositoryName, paths: RigState["paths"]): Promise<Result<string>> => createRealGitAdapter(runtime.process, paths, messagesFor(runtime.language)).head(repository);
 
 const readState = async (runtime: RuntimePorts): Promise<Result<RigState>> => {
-	return readRigStateFile(runtime.fs, runtime.home);
+	return readRigStateFile(runtime.fs, runtime.home, messagesFor(runtime.language));
 };
 
 const readOptional = async (runtime: RuntimePorts, path: string): Promise<Result<string | null>> => {
 	try {
 		return ok(await runtime.fs.readText(path));
 	} catch (error) {
-		return isNotFound(error) ? ok(null) : err(`Could not read ${path}: ${errorText(error)}`);
+		return isNotFound(error) ? ok(null) : err(messagesFor(runtime.language).failure.readFailed(path, errorText(error)));
 	}
 };
 

@@ -107,7 +107,7 @@ export const requestSession = async (r: RuntimePorts, session: SessionRecord, op
 	if (!initialLive.ok) return initialLive;
 	if (!initialLive.value) return apiFail(SESSION_ENDED, m.ended());
 	const id = r.ids.next();
-	if (!ID_PATTERN.test(id)) return apiFail(SESSION_IO, m.io("Invalid generated request id"));
+	if (!ID_PATTERN.test(id)) return apiFail(SESSION_IO, m.io(messagesFor(r.language).failure.requestIdInvalid()));
 	const requests = joinPath(folder(r, session.id), "requests");
 	const responses = joinPath(folder(r, session.id), "responses");
 	const path = joinPath(requests, `${id}${REQUEST_SUFFIX}`);

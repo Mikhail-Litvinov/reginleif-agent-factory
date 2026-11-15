@@ -7,6 +7,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { createFileSystem, createRealRuntime } from "../src/commands/real-runtime.js";
+import { messagesFor } from "../src/messages";
+
+const TEST_MESSAGES = messagesFor("en");
 
 // The real process and file ports, run against tiny real processes (the other tests only see fakes).
 
@@ -181,7 +184,7 @@ describe("real process ports", () => {
 	test("appendBytes appends exactly the given bytes", async () => {
 		const root = makeDirectory();
 		const path = join(root, "log.bin");
-		const files = createFileSystem();
+		const files = createFileSystem(TEST_MESSAGES);
 		await files.appendBytes(path, new Uint8Array([0, 1, 255]));
 		await files.appendBytes(path, new Uint8Array([10, 13]));
 		expect([...readFileSync(path)]).toEqual([0, 1, 255, 10, 13]);
@@ -190,7 +193,7 @@ describe("real process ports", () => {
 	test("writeBytes replaces an existing file with exactly the given bytes", async () => {
 		const root = makeDirectory();
 		const path = join(root, "command.bin");
-		const files = createFileSystem();
+		const files = createFileSystem(TEST_MESSAGES);
 		await files.writeBytes(path, new Uint8Array([0, 1, 255]));
 		await files.writeBytes(path, new Uint8Array([10, 13]));
 		expect([...readFileSync(path)]).toEqual([10, 13]);

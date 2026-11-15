@@ -1,4 +1,5 @@
 import type { FileSystem } from "./file-system.js";
+import type { Messages } from "./messages.js";
 import type { Result } from "./result.js";
 
 import { atomicWrite, joinPath } from "./file-system.js";
@@ -23,6 +24,7 @@ export type EventDependencies = {
 	home: string;
 	now(): string;
 	createId(): string;
+	messages: Messages;
 };
 
 export const appendEvent = async (dependencies: EventDependencies, input: EventInput): Promise<Result<RigEvent>> => {
@@ -33,7 +35,7 @@ export const appendEvent = async (dependencies: EventDependencies, input: EventI
 		await dependencies.fs.appendText(eventPath, `${JSON.stringify(event)}\n`);
 		return ok(event);
 	} catch (error) {
-		return err(`Could not append event: ${errorText(error)}`);
+		return err(dependencies.messages.failure.eventAppendFailed(errorText(error)));
 	}
 };
 
@@ -51,10 +53,10 @@ export const trimEvents = async (dependencies: EventDependencies): Promise<Resul
 		const offset = Number(offsetValue);
 		if (!Number.isSafeInteger(offset) || offset !== encoded.length) return ok(undefined);
 
-		const fileWrite = await atomicWrite(dependencies.fs, eventPath, "");
-		if (!fileWrite.ok) return err(`Could not trim events: ${fileWrite.error}`);
+		const fileWrite = await atomicWrite(dependencies.fs, eventPath, "", dependencies.messages);
+		if (!fileWrite.ok) return err(dependencies.messages.failure.eventTrimFailed(fileWrite.error));
 		return ok(undefined);
 	} catch (error) {
-		return err(`Could not trim events: ${errorText(error)}`);
+		return err(dependencies.messages.failure.eventTrimFailed(errorText(error)));
 	}
 };

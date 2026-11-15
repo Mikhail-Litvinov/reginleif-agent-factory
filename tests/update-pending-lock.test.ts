@@ -4,6 +4,9 @@ import type { ProgressEvent } from "../src/output.js";
 import { updateRig } from "../src/commands/update.js";
 import { ok } from "../src/result.js";
 import { createMemoryRuntime } from "./fakes/memory-runtime.js";
+import { messagesFor } from "../src/messages";
+
+const TEST_MESSAGES = messagesFor("en");
 
 const LOCK_PATH = "/home/test/.agent-rig/rig.lock";
 const HOLDER_PID = 4242;
@@ -22,6 +25,7 @@ describe("rig update --pending and the lock", () => {
 			home: "/home/test",
 			process: { pid: OWN_PID, startTime: OWN_START, ownerStartTime: async () => ok(HOLDER_START) },
 			clock: { sleep: async () => { sleeps += 1; throw new Error("--pending must not wait for the lock"); }, now: () => Date.now() },
+			messages: TEST_MESSAGES,
 			pollIntervalMs: POLL_INTERVAL_MS,
 		};
 		const progress: ProgressEvent[] = [];

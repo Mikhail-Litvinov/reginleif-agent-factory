@@ -3,6 +3,9 @@ import type { RuleChunk, RuleFile, RuleFilePorts } from "../../src/rules/assembl
 import { describe, expect, test } from "bun:test";
 import { resolvePlaceholders } from "../../src/placeholders";
 import { assembleRules, ensureClaudeImports, updateRuleFiles } from "../../src/rules/assemble-rules";
+import { messagesFor } from "../../src/messages";
+
+const TEST_MESSAGES = messagesFor("en");
 
 const shared: RuleChunk = { target: "shared", text: "Shared policy" };
 const claude: RuleChunk = { target: "claude", text: "Claude policy" };
@@ -60,9 +63,9 @@ describe("rule assembly", () => {
 		expect(resolvePlaceholders("{{CLONE}}/tools/patchlib.py via {{PYTHON}}", {
 			CLONE: "C:/agent-rig",
 			PYTHON: "python",
-		}, "test rule")).toEqual({ ok: true, value: "C:/agent-rig/tools/patchlib.py via python" });
-		expect(resolvePlaceholders("{{UNKNOWN}}", {}, "test rule")).toEqual({ ok: false, error: "Unresolved placeholder {{UNKNOWN}} in test rule" });
-		expect(resolvePlaceholders("{{FIRST}} and {{SECOND}} and {{FIRST}}", {}, "test rule")).toEqual({
+		}, "test rule", TEST_MESSAGES)).toEqual({ ok: true, value: "C:/agent-rig/tools/patchlib.py via python" });
+		expect(resolvePlaceholders("{{UNKNOWN}}", {}, "test rule", TEST_MESSAGES)).toEqual({ ok: false, error: "Unresolved placeholder {{UNKNOWN}} in test rule" });
+		expect(resolvePlaceholders("{{FIRST}} and {{SECOND}} and {{FIRST}}", {}, "test rule", TEST_MESSAGES)).toEqual({
 			ok: false,
 			error: "Unresolved placeholder {{FIRST}}, {{SECOND}} in test rule",
 		});
@@ -208,6 +211,7 @@ function createMemoryPorts(
 ): RuleFilePorts {
   return {
     clock: () => "2026-10-30",
+    messages: TEST_MESSAGES,
     read: async (path) => ({ ok: true, value: files.get(path) ?? null }),
     write: async (path, content) => {
       writes.push([path, content]);

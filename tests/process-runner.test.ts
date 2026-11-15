@@ -5,6 +5,9 @@ import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { PROCESS_TIMEOUT_MS, planSpawn, runProcess } from "../src/commands/process-runner.js";
+import { messagesFor } from "../src/messages";
+
+const TEST_MESSAGES = messagesFor("en");
 
 const MINUTES = 15;
 const MS_PER_MINUTE = 60_000;
@@ -63,7 +66,7 @@ describe("process time limit", () => {
 	test("a process that runs past the injected limit is killed and reported as failed", async () => {
 		const manual = manualTimer();
 		const limits: ProcessLimits = { timeoutMs: PROCESS_TIMEOUT_MS, timer: manual.timer };
-		const pending = runProcess(process.env.PATH ?? "", process.execPath, ["-e", "setInterval(() => undefined, 1000)"], {}, limits);
+		const pending = runProcess(process.env.PATH ?? "", process.execPath, ["-e", "setInterval(() => undefined, 1000)"], TEST_MESSAGES, {}, limits);
 		await wait(POLL_MS);
 		expect(manual.requested).toEqual([PROCESS_TIMEOUT_MS]);
 
@@ -77,7 +80,7 @@ describe("process time limit", () => {
 	test("a per-call timeoutMs replaces the default limit and the error names it", async () => {
 		const manual = manualTimer();
 		const limits: ProcessLimits = { timeoutMs: PROCESS_TIMEOUT_MS, timer: manual.timer };
-		const pending = runProcess(process.env.PATH ?? "", process.execPath, ["-e", "setInterval(() => undefined, 1000)"], { timeoutMs: SHORT_TIMEOUT_MS }, limits);
+		const pending = runProcess(process.env.PATH ?? "", process.execPath, ["-e", "setInterval(() => undefined, 1000)"], TEST_MESSAGES, { timeoutMs: SHORT_TIMEOUT_MS }, limits);
 		await wait(POLL_MS);
 		expect(manual.requested).toEqual([SHORT_TIMEOUT_MS]);
 
@@ -96,7 +99,7 @@ describe("process time limit", () => {
 			child.kill("SIGKILL");
 		});
 		const limits: ProcessLimits = { timeoutMs: PROCESS_TIMEOUT_MS, timer: manual.timer, kill: killAfterClose };
-		const pending = runProcess(process.env.PATH ?? "", process.execPath, ["-e", "setInterval(() => undefined, 1000)"], {}, limits);
+		const pending = runProcess(process.env.PATH ?? "", process.execPath, ["-e", "setInterval(() => undefined, 1000)"], TEST_MESSAGES, {}, limits);
 		await wait(POLL_MS);
 
 		manual.fire();
@@ -108,7 +111,7 @@ describe("process time limit", () => {
 
 	test("a process that finishes in time disarms the timer", async () => {
 		const manual = manualTimer();
-		const result = await runProcess(process.env.PATH ?? "", process.execPath, ["-e", "console.log('hi')"], {}, { timeoutMs: NEVER_FIRES_MS, timer: manual.timer });
+		const result = await runProcess(process.env.PATH ?? "", process.execPath, ["-e", "console.log('hi')"], TEST_MESSAGES, {}, { timeoutMs: NEVER_FIRES_MS, timer: manual.timer });
 		expect(result.ok && result.value.stdout.trim()).toBe("hi");
 		expect(manual.disarmed()).toBe(true);
 	});
@@ -127,7 +130,7 @@ describe("process time limit", () => {
 			"",
 		].join("\n"));
 		const manual = manualTimer();
-		const pending = runProcess(process.env.PATH ?? "", process.execPath, [childPath], {}, { timeoutMs: PROCESS_TIMEOUT_MS, timer: manual.timer });
+		const pending = runProcess(process.env.PATH ?? "", process.execPath, [childPath], TEST_MESSAGES, {}, { timeoutMs: PROCESS_TIMEOUT_MS, timer: manual.timer });
 
 		const written = await waitFor(async () => { try { return (await readFile(pidPath, "utf8")).length > 0; } catch { return false; } });
 		expect(written).toBe(true);
@@ -150,7 +153,7 @@ describe("process time limit", () => {
 
 describe("git never waits for a password", () => {
 	test("other commands do not get GIT_TERMINAL_PROMPT", async () => {
-		const printed = await runProcess(process.env.PATH ?? "", process.execPath, ["-e", "console.log(process.env.GIT_TERMINAL_PROMPT ?? 'unset')"]);
+		const printed = await runProcess(process.env.PATH ?? "", process.execPath, ["-e", "console.log(process.env.GIT_TERMINAL_PROMPT ?? 'unset')"], TEST_MESSAGES);
 		expect(printed.ok && printed.value.stdout.trim()).toBe(process.env.GIT_TERMINAL_PROMPT ?? "unset");
 	});
 
@@ -161,7 +164,7 @@ describe("git never waits for a password", () => {
 		await writeFile(scriptPath, IS_WINDOWS ? "@echo off\r\necho prompt=%GIT_TERMINAL_PROMPT%\r\n" : "#!/bin/sh\necho prompt=$GIT_TERMINAL_PROMPT\n");
 		await chmod(scriptPath, 0o755);
 
-		const result = await runProcess(`${scriptDirectory}${delimiter}${process.env.PATH ?? ""}`, "git", []);
+		const result = await runProcess(`${scriptDirectory}${delimiter}${process.env.PATH ?? ""}`, "git", [], TEST_MESSAGES);
 
 		expect(result.ok && result.value.stdout.trim()).toBe("prompt=0");
 	});
@@ -172,7 +175,7 @@ describe("planSpawn on Windows", () => {
 	const existsOnly = (...paths: string[]) => (path: string): boolean => paths.includes(path);
 
 	test("claude is resolved to claude.cmd from PATH and runs through cmd.exe", () => {
-		const plan = planSpawn("windows", "claude", ["plugin", "list"], "C:\\other;C:\\tools\\bin", existsOnly(claudeCmd));
+		const plan = planSpawn("windows", "claude", ["plugin", "list"], "C:\\other;C:\\tools\\bin", TEST_MESSAGES, existsOnly(claudeCmd));
 		expect(plan.ok).toBe(true);
 		if (!plan.ok) return;
 		expect(plan.value.command).toBe("cmd.exe");
@@ -182,25 +185,25 @@ describe("planSpawn on Windows", () => {
 	});
 
 	test("an argument with spaces stays one quoted argument", () => {
-		const plan = planSpawn("windows", "claude", ["--prefix", "C:\\Program Files\\rig bin"], "C:\\tools\\bin", existsOnly(claudeCmd));
+		const plan = planSpawn("windows", "claude", ["--prefix", "C:\\Program Files\\rig bin"], "C:\\tools\\bin", TEST_MESSAGES, existsOnly(claudeCmd));
 		expect(plan.ok && plan.value.args[3]).toContain("\"C:\\Program Files\\rig bin\"");
 	});
 
 	test("an .exe is spawned directly without cmd.exe", () => {
 		const gitExe = "C:\\git\\git.exe";
-		const plan = planSpawn("windows", "git", ["status"], "C:\\git", existsOnly(gitExe));
+		const plan = planSpawn("windows", "git", ["status"], "C:\\git", TEST_MESSAGES, existsOnly(gitExe));
 		expect(plan).toEqual({ ok: true, value: { command: gitExe, args: ["status"], verbatim: false } });
 	});
 
 	test("an argument that cmd.exe would expand or split is rejected, not passed", () => {
 		for (const argument of ["a\"b", "%PATH%", "a\nb"]) {
-			const plan = planSpawn("windows", "claude", [argument], "C:\\tools\\bin", existsOnly(claudeCmd));
+			const plan = planSpawn("windows", "claude", [argument], "C:\\tools\\bin", TEST_MESSAGES, existsOnly(claudeCmd));
 			expect(plan.ok).toBe(false);
 		}
 	});
 
 	test("posix passes the command and arguments through untouched", () => {
-		expect(planSpawn("posix", "claude", ["a b"], "/usr/bin")).toEqual({ ok: true, value: { command: "claude", args: ["a b"], verbatim: false } });
+		expect(planSpawn("posix", "claude", ["a b"], "/usr/bin", TEST_MESSAGES)).toEqual({ ok: true, value: { command: "claude", args: ["a b"], verbatim: false } });
 	});
 });
 
@@ -212,7 +215,7 @@ describe("running a command script found on PATH", () => {
 		await writeFile(scriptPath, IS_WINDOWS ? "@echo off\r\necho got:%~1\r\n" : "#!/bin/sh\necho got:$1\n");
 		await chmod(scriptPath, 0o755);
 
-		const result = await runProcess(`${binDirectory}${delimiter}${process.env.PATH ?? ""}`, "claude", ["a dir/with space"]);
+		const result = await runProcess(`${binDirectory}${delimiter}${process.env.PATH ?? ""}`, "claude", ["a dir/with space"], TEST_MESSAGES);
 
 		expect(result.ok && result.value.stdout.trim()).toBe("got:a dir/with space");
 	});

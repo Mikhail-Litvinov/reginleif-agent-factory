@@ -8,6 +8,9 @@ import { describe, expect, test } from "bun:test";
 import { applyRig } from "../src/apply.js";
 import { loadFeatures } from "../src/feature-graph.js";
 import { createMemoryRuntime, MemoryFileSystem, seedHubManifest } from "./fakes/memory-runtime.js";
+import { messagesFor } from "../src/messages";
+
+const TEST_MESSAGES = messagesFor("en");
 
 const INDEX_KIND_COLUMN = 0;
 const INDEX_PATH_COLUMN = 1;
@@ -69,7 +72,7 @@ describe("real feature manifests", () => {
 	test("loads the base and every feature with the expected defaults and graph", async () => {
 		const fileSystem = new MemoryFileSystem();
 		await seedRepository(fileSystem);
-		const loaded = await loadFeatures(fileSystem, REPOSITORY_PATH);
+		const loaded = await loadFeatures(fileSystem, REPOSITORY_PATH, TEST_MESSAGES);
 
 		expect(loaded.ok).toBe(true);
 		if (!loaded.ok) return;
@@ -94,7 +97,7 @@ describe("real feature manifests", () => {
 		// with args, the hook runs but rtk reports "No hook installed" on every rewritten command.
 		const fileSystem = new MemoryFileSystem();
 		await seedRepository(fileSystem);
-		const loaded = await loadFeatures(fileSystem, REPOSITORY_PATH);
+		const loaded = await loadFeatures(fileSystem, REPOSITORY_PATH, TEST_MESSAGES);
 		expect(loaded.ok).toBe(true);
 		if (!loaded.ok) return;
 		const hooks =loaded.value.find((feature) => feature.name === "rtk")?.hooks ?? [];
@@ -143,7 +146,7 @@ describe("real feature manifests", () => {
 	test("base and telegram declare git, cron and tmux as system packages, cron and tmux on Linux only", async () => {
 		const fileSystem = new MemoryFileSystem();
 		await seedRepository(fileSystem);
-		const loaded = await loadFeatures(fileSystem, REPOSITORY_PATH);
+		const loaded = await loadFeatures(fileSystem, REPOSITORY_PATH, TEST_MESSAGES);
 		expect(loaded.ok).toBe(true);
 		if (!loaded.ok) return;
 		const programs = (name: string) => loaded.value.find((feature) => feature.name === name)?.programs ?? [];
@@ -167,7 +170,7 @@ describe("real feature manifests", () => {
 	test("codex declares node as a system package on every platform, because Codex installed through Bun runs on node", async () => {
 		const fileSystem = new MemoryFileSystem();
 		await seedRepository(fileSystem);
-		const loaded = await loadFeatures(fileSystem, REPOSITORY_PATH);
+		const loaded = await loadFeatures(fileSystem, REPOSITORY_PATH, TEST_MESSAGES);
 		expect(loaded.ok).toBe(true);
 		if (!loaded.ok) return;
 
@@ -186,7 +189,7 @@ describe("real feature manifests", () => {
 	test("volunteers declares uvx, which volunteer-run.py starts through uv, as a Windows system package", async () => {
 		const fileSystem = new MemoryFileSystem();
 		await seedRepository(fileSystem);
-		const loaded = await loadFeatures(fileSystem, REPOSITORY_PATH);
+		const loaded = await loadFeatures(fileSystem, REPOSITORY_PATH, TEST_MESSAGES);
 		expect(loaded.ok).toBe(true);
 		if (!loaded.ok) return;
 
@@ -200,7 +203,7 @@ describe("real feature manifests", () => {
 	test("pwsh and cmd declare no program, because the hub falls back to the built-in Windows PowerShell", async () => {
 		const fileSystem = new MemoryFileSystem();
 		await seedRepository(fileSystem);
-		const loaded = await loadFeatures(fileSystem, REPOSITORY_PATH);
+		const loaded = await loadFeatures(fileSystem, REPOSITORY_PATH, TEST_MESSAGES);
 		expect(loaded.ok).toBe(true);
 		if (!loaded.ok) return;
 
@@ -212,7 +215,7 @@ describe("real feature manifests", () => {
 	test("uses live Codex permissions and autoMode launcher sentences", async () => {
 		const fileSystem = new MemoryFileSystem();
 		await seedRepository(fileSystem);
-		const loaded = await loadFeatures(fileSystem, REPOSITORY_PATH);
+		const loaded = await loadFeatures(fileSystem, REPOSITORY_PATH, TEST_MESSAGES);
 		expect(loaded.ok).toBe(true);
 		if (!loaded.ok) return;
 
@@ -249,7 +252,7 @@ describe("real feature manifests", () => {
 	test("matches rule chunks and hooks in the content index, and every source path exists", async () => {
 		const fileSystem = new MemoryFileSystem();
 		await seedRepository(fileSystem);
-		const loaded = await loadFeatures(fileSystem, REPOSITORY_PATH);
+		const loaded = await loadFeatures(fileSystem, REPOSITORY_PATH, TEST_MESSAGES);
 		expect(loaded.ok).toBe(true);
 		if (!loaded.ok) return;
 
@@ -291,7 +294,7 @@ describe("real feature manifests", () => {
 	test("reports orphan content and requires each rule chunk exactly once", async () => {
 		const fileSystem = new MemoryFileSystem();
 		await seedRepository(fileSystem);
-		const loaded = await loadFeatures(fileSystem, REPOSITORY_PATH);
+		const loaded = await loadFeatures(fileSystem, REPOSITORY_PATH, TEST_MESSAGES);
 		expect(loaded.ok).toBe(true);
 		if (!loaded.ok) return;
 
@@ -317,7 +320,7 @@ describe("real feature manifests", () => {
 			const harness = createMemoryRuntime(platform);
 			await seedRepository(harness.fs);
 			addWindowsOnlyHook(harness.fs);
-			const loaded = await loadFeatures(harness.fs, REPOSITORY_PATH);
+			const loaded = await loadFeatures(harness.fs, REPOSITORY_PATH, TEST_MESSAGES);
 			expect(loaded.ok).toBe(true);
 			if (!loaded.ok) continue;
 
@@ -359,7 +362,7 @@ describe("real feature manifests", () => {
 	test("the assembled rules put a blank line before every heading and keep the bullets apart", async () => {
 		const harness = createMemoryRuntime("windows");
 		await seedRepository(harness.fs);
-		const loaded = await loadFeatures(harness.fs, REPOSITORY_PATH);
+		const loaded = await loadFeatures(harness.fs, REPOSITORY_PATH, TEST_MESSAGES);
 		expect(loaded.ok).toBe(true);
 		if (!loaded.ok) return;
 		const features: Record<string, boolean> = {};

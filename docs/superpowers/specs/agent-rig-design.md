@@ -391,8 +391,12 @@ means `"en"`. `rig` and the hub are English by default and switch to Russian tog
 - Every string that `rig` words for a human (error messages, progress, event texts)
   comes from one message catalog with the languages `en` and `ru`; the catalog is typed so that `ru` carries every key of
   `en`, and there is no Russian text in the code outside the `ru` catalog. An event text is written in the language that is
-  current when the event is emitted. The exception is rare low-level diagnostics raised deep in the code (an unreadable
-  `state.json`, a failed file operation, a failed process read): they are always English, with the system's own text.
+  current when the event is emitted. There is no exception for low-level failures (an unreadable `state.json`, a failed
+  file operation, a failed process read, a Windows broker error): they live in the catalogue's `failure` group, the
+  catalogue is passed down explicitly (a `messages` parameter or dependency field; the Windows broker request carries
+  `language`), and the operating system's own text goes in as a parameter of the catalogue message. A guard test
+  (`tests/message-catalogue-guard.test.ts`) fails on any English literal that reaches `err`/`fail`/`apiFail`, an
+  `error`/`message`/`reason` field or a catalogue call from outside the two catalogue files.
 - A feature description in `feature.json` is a plain English string; the other languages go into the optional
   `translations` field, keyed by language: `{ "ru": { "description": "..." } }`. `rig feature`
   prints the description in the current language, falling back to the English string, and always as a plain string, so the

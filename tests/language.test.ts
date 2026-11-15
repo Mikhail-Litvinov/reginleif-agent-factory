@@ -9,6 +9,8 @@ import { messagesFor } from "../src/messages.js";
 import { readStoredLanguage } from "../src/state.js";
 import { baseManifest, createMemoryRuntime, featureManifest, seedFeature } from "./fakes/memory-runtime.js";
 
+const TEST_MESSAGES = messagesFor("en");
+
 const HOME = "/home/test";
 const REPO = "/repo";
 const HUB = "/hub";
@@ -168,6 +170,7 @@ describe("rig language", () => {
 				},
 				now: () => Date.now(),
 			},
+			messages: TEST_MESSAGES,
 			pollIntervalMs: 1,
 		};
 

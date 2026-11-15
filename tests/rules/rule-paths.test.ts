@@ -10,6 +10,9 @@ import { applyRig } from "../../src/apply.js";
 import { createFileSystem } from "../../src/commands/real-runtime.js";
 import { loadFeatures } from "../../src/feature-graph.js";
 import { baseManifest, createMemoryRuntime, featureManifest, seedFeature } from "../fakes/memory-runtime.js";
+import { messagesFor } from "../../src/messages";
+
+const TEST_MESSAGES = messagesFor("en");
 
 const REPOSITORY_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const HOME_PATH_PATTERN = /\{\{HOME\}\}\/\.claude((?:\/[\w.-]+)*)/g;
@@ -47,7 +50,7 @@ const loadRuleTexts = async (features: readonly FeatureManifest[]): Promise<Rule
 	}));
 
 const loadShippedFeatures = async (): Promise<FeatureManifest[]> => {
-	const loaded = await loadFeatures(createFileSystem(), REPOSITORY_ROOT.replace(/[\\/]+$/, ""));
+	const loaded = await loadFeatures(createFileSystem(TEST_MESSAGES), REPOSITORY_ROOT.replace(/[\\/]+$/, ""), TEST_MESSAGES);
 	if (!loaded.ok) throw new Error(loaded.error);
 	return loaded.value;
 };

@@ -29,7 +29,7 @@ const eventText = (language: Language): string => {
 // `rig language`: the language in effect, `{"language":"en"}`. Without state.json rig is not installed and there is no
 // setting to show.
 export const showLanguage = async (runtime: RuntimePorts): Promise<ApiResult<LanguageData>> => {
-	const stored = await readStateReport(runtime.fs, runtime.home);
+	const stored = await readStateReport(runtime.fs, runtime.home, messagesFor(runtime.language));
 	if (!stored.ok) return apiFail(LANGUAGE_ERROR_FAILED, stored.error);
 	if (stored.value === null) return apiFail(LANGUAGE_ERROR_NOT_INSTALLED, messagesFor(runtime.language).language.notInstalled());
 	return apiOk({ language: runtime.language });
@@ -46,7 +46,7 @@ export const setLanguage = async (
 ): Promise<ApiResult<LanguageChangeData>> => {
 	let failureCode = LANGUAGE_ERROR_FAILED;
 	const result = await withRigLock(runtime, () => writeProgress({ code: PROGRESS_CODE_LOCK_WAITING }), async (): Promise<Result<LanguageChangeData>> => {
-		const stored = await readStateReport(runtime.fs, runtime.home);
+		const stored = await readStateReport(runtime.fs, runtime.home, messagesFor(runtime.language));
 		if (!stored.ok) return stored;
 		if (stored.value === null) {
 			failureCode = LANGUAGE_ERROR_NOT_INSTALLED;
@@ -55,7 +55,7 @@ export const setLanguage = async (
 		const { state, languageInvalid } = stored.value;
 		const changed = (state.language ?? DEFAULT_LANGUAGE) !== language;
 		if (changed || languageInvalid) {
-			const written = await writeState(runtime.fs, runtime.home, { ...state, language });
+			const written = await writeState(runtime.fs, runtime.home, { ...state, language }, messagesFor(runtime.language));
 			if (!written.ok) return written;
 		}
 		if (changed) {

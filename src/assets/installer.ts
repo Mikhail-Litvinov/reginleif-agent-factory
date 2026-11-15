@@ -1,4 +1,5 @@
 import type { FileContent } from "../content-hash.js";
+import type { Messages } from "../messages.js";
 import type { Result } from "../result.js";
 
 import { chooseBackupPath } from "../backup-path.js";
@@ -57,6 +58,7 @@ export type FileSystem = {
 
 export type AssetEnvironment = {
   fs: FileSystem;
+  messages: Messages;
   now(): string;
   // When set, no file may be written or removed outside this folder, symlinks included.
   boundaryPath?: string;
@@ -102,6 +104,7 @@ export type ProcessRunner = {
 export type PluginEnvironment = {
   runner: ProcessRunner;
   claudeCommand: string;
+  messages: Messages;
 };
 
 export type PluginRecord = {
@@ -149,7 +152,7 @@ export async function planAssets(
       const fileTarget = toSlashPath(file.targetPath);
       if (!plan.enabled) {
         if (activeTargets.has(fileTarget)) {
-          return { ok: false, error: `Duplicate asset target: ${fileTarget}` };
+          return { ok: false, error: environment.messages.failure.duplicateAssetTarget(fileTarget) };
         }
         activeTargets.add(fileTarget);
         const removal = await disableAssetTree(environment, fileTarget, nextRecords, events, operations);
@@ -157,12 +160,12 @@ export async function planAssets(
         continue;
       }
 
-      const sourceFiles = await loadSourceFiles(environment.fs, file.sourcePath);
+      const sourceFiles = await loadSourceFiles(environment.fs, file.sourcePath, environment.messages);
       if (!sourceFiles.ok) return sourceFiles;
       for (const sourceFile of sourceFiles.value) {
         const targetPath = appendRelativePath(fileTarget, sourceFile.relativePath);
         if (activeTargets.has(targetPath)) {
-          return { ok: false, error: `Duplicate asset target: ${targetPath}` };
+          return { ok: false, error: environment.messages.failure.duplicateAssetTarget(targetPath) };
         }
         activeTargets.add(targetPath);
         enabledTargets.add(targetPath);
@@ -171,7 +174,7 @@ export async function planAssets(
           HUB: toSlashPath(plan.hubPath),
           HOME: toSlashPath(plan.homePath),
           PYTHON: toSlashPath(plan.pythonPath),
-        }, sourceFile.relativePath || file.sourcePath);
+        }, sourceFile.relativePath || file.sourcePath, environment.messages);
         if (!content.ok) return content;
         const sync = await enableAsset(environment, targetPath, content.value, nextRecords, events, operations);
         if (!sync.ok) return sync;
@@ -217,7 +220,7 @@ export async function applyPlugins(
 ): Promise<Result<PluginOutcome>> {
   const seenIds = new Set<string>();
   for (const plan of plans) {
-    if (seenIds.has(plan.id)) return { ok: false, error: `Duplicate plugin id: ${plan.id}` };
+    if (seenIds.has(plan.id)) return { ok: false, error: environment.messages.failure.duplicatePluginId(plan.id) };
     seenIds.add(plan.id);
   }
   // A plugin with a record but no plan left the manifest: it is removed like a disabled one.
@@ -237,8 +240,8 @@ export async function applyPlugins(
   const plugins = await runClaude(environment, [...CLAUDE_PLUGIN_PREFIX, "list", "--json"]);
   if (!plugins.ok) return plugins;
 
-  const availableMarketplaces = marketplaces === null ? { ok: true as const, value: [] } : parseMarketplaces(marketplaces.value.stdout);
-  const installedPlugins = parseInstalledPlugins(plugins.value.stdout);
+  const availableMarketplaces = marketplaces === null ? { ok: true as const, value: [] } : parseMarketplaces(marketplaces.value.stdout, environment.messages);
+  const installedPlugins = parseInstalledPlugins(plugins.value.stdout, environment.messages);
   if (!availableMarketplaces.ok) return availableMarketplaces;
   if (!installedPlugins.ok) return installedPlugins;
 
@@ -323,26 +326,26 @@ function pluginRecord(plan: PluginPlan): PluginRecord {
 
 type SourceFile = { relativePath: string; content: FileContent };
 
-async function loadSourceFiles(fs: FileSystem, sourcePath: string): Promise<Result<SourceFile[]>> {
+async function loadSourceFiles(fs: FileSystem, sourcePath: string, messages: Messages): Promise<Result<SourceFile[]>> {
   const file = await fs.readFile(sourcePath);
   if (file.ok) return { ok: true, value: [{ relativePath: "", content: file.value }] };
 
   const files = await fs.listFiles(sourcePath);
-  if (!files.ok) return { ok: false, error: `Cannot read asset source ${sourcePath}: ${files.error}` };
+  if (!files.ok) return { ok: false, error: messages.failure.assetSourceReadFailed(sourcePath, files.error) };
   if (files.value.length === EMPTY_LENGTH) {
-    return { ok: false, error: `Asset source is empty or missing: ${sourcePath} (${file.error})` };
+    return { ok: false, error: messages.failure.assetSourceMissing(sourcePath, file.error) };
   }
 
   const prefix = trimTrailingSeparator(toSlashPath(sourcePath));
   const results: SourceFile[] = [];
   for (const path of files.value) {
     const read = await fs.readFile(path);
-    if (!read.ok) return { ok: false, error: `Cannot read asset source ${path}: ${read.error}` };
+    if (!read.ok) return { ok: false, error: messages.failure.assetSourceReadFailed(path, read.error) };
     const slashPath = toSlashPath(path);
     const relativePath = slashPath.startsWith(`${prefix}/`)
       ? slashPath.slice(prefix.length + PATH_SEPARATOR_LENGTH)
       : "";
-    if (relativePath.length === EMPTY_LENGTH) return { ok: false, error: `Invalid file listing for asset directory ${sourcePath}` };
+    if (relativePath.length === EMPTY_LENGTH) return { ok: false, error: messages.failure.assetListingInvalid(sourcePath) };
     results.push({ relativePath, content: read.value });
   }
   return { ok: true, value: results };
@@ -353,10 +356,11 @@ function substitutePlaceholders(
   content: FileContent,
   values: Readonly<Record<string, string>>,
   context: string,
+  messages: Messages,
 ): Result<FileContent> {
   const text = decodeText(content.bytes);
   if (text === null) return { ok: true, value: content };
-  const resolved = resolvePlaceholders(text, values, context);
+  const resolved = resolvePlaceholders(text, values, context, messages);
   if (!resolved.ok) return resolved;
   return { ok: true, value: { bytes: new TextEncoder().encode(resolved.value), executable: content.executable } };
 }
@@ -383,7 +387,7 @@ async function enableAsset(
   const prior = records[targetPath];
 
   if (!current.ok) {
-    if (!isNotFound(current.error)) return { ok: false, error: `Cannot read installed asset ${targetPath}: ${current.error}` };
+    if (!isNotFound(current.error)) return { ok: false, error: environment.messages.failure.installedAssetReadFailed(targetPath, current.error) };
     operations.writes.push({ path: targetPath, content });
     records[targetPath] = { hash: desiredHash, owned: true, notifiedHashes: [] };
     return { ok: true, value: undefined };
@@ -455,7 +459,7 @@ async function disableAsset(
   const current = await environment.fs.readFile(targetPath);
   if (!current.ok) {
     if (isNotFound(current.error)) return { ok: true, value: undefined };
-    return { ok: false, error: `Cannot read installed asset ${targetPath}: ${current.error}` };
+    return { ok: false, error: environment.messages.failure.installedAssetReadFailed(targetPath, current.error) };
   }
   const currentHash = hashContent(current.value);
   if (currentHash === prior.hash) {
@@ -471,8 +475,9 @@ async function disableAsset(
       const existing = await environment.fs.readFile(path);
       if (existing.ok) return { ok: true, value: hashContent(existing.value) };
       if (isNotFound(existing.error)) return { ok: true, value: null };
-      return { ok: false, error: `Cannot check backup path ${path}: ${existing.error}` };
+      return { ok: false, error: environment.messages.failure.backupPathCheckFailed(path, existing.error) };
     },
+    environment.messages,
   );
   if (!backup.ok) return backup;
   if (!backup.value.exists) operations.backups.push({ path: backup.value.path, content: current.value });
@@ -491,28 +496,28 @@ function noteOnce(path: string, contentHash: string, previous: readonly string[]
 // symlinks and compared with the resolved boundary.
 async function checkBoundary(environment: AssetEnvironment, paths: readonly string[]): Promise<Result<void>> {
   if (environment.boundaryPath === undefined || paths.length === EMPTY_LENGTH) return { ok: true, value: undefined };
-  const boundary = await nearestRealPath(environment.fs, environment.boundaryPath);
+  const boundary = await nearestRealPath(environment.fs, environment.boundaryPath, environment.messages);
   if (!boundary.ok) return boundary;
   const checkedParents = new Set<string>();
   for (const path of paths) {
     const parent = parentPath(path);
     if (checkedParents.has(parent)) continue;
     checkedParents.add(parent);
-    const real = await nearestRealPath(environment.fs, parent);
+    const real = await nearestRealPath(environment.fs, parent, environment.messages);
     if (!real.ok) return real;
     if (real.value !== boundary.value && !real.value.startsWith(`${boundary.value}/`)) {
-      return { ok: false, error: `Asset path ${path} leaves ${environment.boundaryPath} through a symlink (it resolves to ${real.value}); nothing was written.` };
+      return { ok: false, error: environment.messages.failure.assetLeavesBoundary(path, environment.boundaryPath, real.value) };
     }
   }
   return { ok: true, value: undefined };
 }
 
-async function nearestRealPath(fs: FileSystem, path: string): Promise<Result<string>> {
+async function nearestRealPath(fs: FileSystem, path: string, messages: Messages): Promise<Result<string>> {
   let candidate = path;
   for (;;) {
     const real = await fs.realPath(candidate);
     if (real.ok) return { ok: true, value: normalizeRealPath(real.value) };
-    if (!isNotFound(real.error)) return { ok: false, error: `Cannot resolve ${candidate}: ${real.error}` };
+    if (!isNotFound(real.error)) return { ok: false, error: messages.failure.pathResolveFailed(candidate, real.error) };
     const parent = parentPath(candidate);
     // Nothing on the way exists, so nothing can be a symlink and the written path is its own real path.
     if (parent === "." || parent === candidate) return { ok: true, value: normalizeRealPath(path) };
@@ -573,11 +578,11 @@ function isNotFound(error: string): boolean {
 
 async function runClaude(environment: PluginEnvironment, args: readonly string[]): Promise<Result<ProcessResult>> {
   const result = await environment.runner.run(environment.claudeCommand, args);
-  if (!result.ok) return { ok: false, error: `claude ${args.join(" ")} failed: ${result.error}` };
+  if (!result.ok) return { ok: false, error: environment.messages.failure.claudeFailed(args.join(" "), result.error) };
   if (result.value.exitCode !== SUCCESS_EXIT_CODE) {
     return {
       ok: false,
-      error: `claude ${args.join(" ")} exited ${result.value.exitCode}: ${result.value.stderr || result.value.stdout}`,
+      error: environment.messages.failure.claudeExited(args.join(" "), result.value.exitCode, result.value.stderr || result.value.stdout),
     };
   }
   return result;
@@ -592,38 +597,38 @@ function samePath(left: string | null, right: string): boolean {
   return normalize(left) === normalize(right);
 }
 
-function parseMarketplaces(output: string): Result<MarketplaceEntry[]> {
+function parseMarketplaces(output: string, messages: Messages): Result<MarketplaceEntry[]> {
   let parsed: unknown;
   try {
     parsed = JSON.parse(output);
   } catch {
-    return { ok: false, error: "claude plugin marketplace list --json returned invalid JSON" };
+    return { ok: false, error: messages.failure.claudeMarketplacesInvalidJson() };
   }
-  if (!Array.isArray(parsed)) return { ok: false, error: "claude plugin marketplace list --json returned an unexpected value" };
+  if (!Array.isArray(parsed)) return { ok: false, error: messages.failure.claudeMarketplacesUnexpected() };
 
   const entries: MarketplaceEntry[] = [];
   for (const item of parsed) {
     if (!isRecord(item) || typeof item.name !== "string") {
-      return { ok: false, error: "claude plugin marketplace list --json returned a marketplace without a name" };
+      return { ok: false, error: messages.failure.claudeMarketplaceNoName() };
     }
     entries.push({ name: item.name, path: typeof item.path === "string" ? item.path : null });
   }
   return { ok: true, value: entries };
 }
 
-function parseInstalledPlugins(output: string): Result<Set<string>> {
+function parseInstalledPlugins(output: string, messages: Messages): Result<Set<string>> {
   let parsed: unknown;
   try {
     parsed = JSON.parse(output);
   } catch {
-    return { ok: false, error: "claude plugin list --json returned invalid JSON" };
+    return { ok: false, error: messages.failure.claudePluginsInvalidJson() };
   }
-  if (!Array.isArray(parsed)) return { ok: false, error: "claude plugin list --json returned an unexpected value" };
+  if (!Array.isArray(parsed)) return { ok: false, error: messages.failure.claudePluginsUnexpected() };
 
   const ids = new Set<string>();
   for (const item of parsed) {
     if (!isRecord(item) || typeof item.id !== "string") {
-      return { ok: false, error: "claude plugin list --json returned a plugin without an id" };
+      return { ok: false, error: messages.failure.claudePluginNoId() };
     }
     ids.add(item.id);
   }

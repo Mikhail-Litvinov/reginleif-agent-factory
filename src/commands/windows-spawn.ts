@@ -1,3 +1,4 @@
+import type { Language, Messages } from "../messages.js";
 import type { Result } from "../result.js";
 
 import { spawn } from "node:child_process";
@@ -5,6 +6,7 @@ import { readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dlopen, FFIType, ptr } from "bun:ffi";
 
+import { isLanguage, messagesFor } from "../messages.js";
 import { err, errorText, ok } from "../result.js";
 
 // Detached processes on Windows that outlive the job of whoever starts them.
@@ -86,6 +88,8 @@ export type DetachedRequest = {
 	hide: boolean;
 	// The complete environment of the new process; Windows needs it explicit (the broker passes none).
 	environment: Record<string, string | undefined>;
+	// The language of the failure texts; the broker runs in another process and builds its own catalogue from it.
+	language: Language;
 };
 
 type OutsideJobProcess = { pid: number; handle: bigint };
@@ -138,9 +142,9 @@ const inheritableAttributes = (): Uint8Array => {
 	return attributes;
 };
 
-const openInheritable = (api: Kernel, path: string, access: number, disposition: number): Result<bigint> => {
+const openInheritable = (api: Kernel, path: string, access: number, disposition: number, messages: Messages): Result<bigint> => {
 	const handle = api.symbols.CreateFileW(ptr(wide(path)), access, FILE_SHARE_READ_WRITE, ptr(inheritableAttributes()), disposition, FILE_ATTRIBUTE_NORMAL, 0n);
-	return handle === INVALID_HANDLE_VALUE ? err(`CreateFileW ${path} failed: ${api.symbols.GetLastError()}`) : ok(handle);
+	return handle === INVALID_HANDLE_VALUE ? err(messages.failure.win32CallFailed(`CreateFileW ${path}`, api.symbols.GetLastError())) : ok(handle);
 };
 
 // Step 1: CreateProcessW with CREATE_BREAKAWAY_FROM_JOB and only stdin, stdout and stderr inherited (the caller's other
@@ -151,14 +155,15 @@ const startOutsideJob = (request: DetachedRequest): OutsideJobStart => {
 	let api: Kernel | undefined;
 	try {
 		const opened = kernel();
+		const messages = messagesFor(request.language);
 		api = opened;
-		const stdin = openInheritable(opened, NUL_DEVICE, GENERIC_READ, OPEN_EXISTING);
+		const stdin = openInheritable(opened, NUL_DEVICE, GENERIC_READ, OPEN_EXISTING, messages);
 		if (!stdin.ok) return { kind: "failed", error: stdin.error };
 		handles.push(stdin.value);
-		const stdout = openInheritable(opened, NUL_DEVICE, GENERIC_WRITE, OPEN_EXISTING);
+		const stdout = openInheritable(opened, NUL_DEVICE, GENERIC_WRITE, OPEN_EXISTING, messages);
 		if (!stdout.ok) return { kind: "failed", error: stdout.error };
 		handles.push(stdout.value);
-		const stderr = openInheritable(opened, request.stderrPath, GENERIC_WRITE, CREATE_ALWAYS);
+		const stderr = openInheritable(opened, request.stderrPath, GENERIC_WRITE, CREATE_ALWAYS, messages);
 		if (!stderr.ok) return { kind: "failed", error: stderr.error };
 		handles.push(stderr.value);
 		return createProcess(opened, request, handles);
@@ -170,6 +175,7 @@ const startOutsideJob = (request: DetachedRequest): OutsideJobStart => {
 };
 
 const createProcess = (api: Kernel, request: DetachedRequest, inherited: readonly bigint[]): OutsideJobStart => {
+	const messages = messagesFor(request.language);
 	const handleList = new Uint8Array(inherited.length * POINTER_SIZE);
 	const listView = new DataView(handleList.buffer);
 	inherited.forEach((handle, index) => { listView.setBigUint64(index * POINTER_SIZE, handle, true); });
@@ -177,9 +183,9 @@ const createProcess = (api: Kernel, request: DetachedRequest, inherited: readonl
 	// The first call only reports the size the attribute list needs.
 	api.symbols.InitializeProcThreadAttributeList(null, 1, 0, ptr(sizeBuffer));
 	const attributeList = new Uint8Array(Number(sizeBuffer[0] ?? 0n));
-	if (api.symbols.InitializeProcThreadAttributeList(ptr(attributeList), 1, 0, ptr(sizeBuffer)) === WIN32_FALSE) return { kind: "failed", error: `InitializeProcThreadAttributeList failed: ${api.symbols.GetLastError()}` };
+	if (api.symbols.InitializeProcThreadAttributeList(ptr(attributeList), 1, 0, ptr(sizeBuffer)) === WIN32_FALSE) return { kind: "failed", error: messages.failure.win32CallFailed("InitializeProcThreadAttributeList", api.symbols.GetLastError()) };
 	try {
-		if (api.symbols.UpdateProcThreadAttribute(ptr(attributeList), 0, BigInt(PROC_THREAD_ATTRIBUTE_HANDLE_LIST), ptr(handleList), BigInt(handleList.length), null, null) === WIN32_FALSE) return { kind: "failed", error: `UpdateProcThreadAttribute failed: ${api.symbols.GetLastError()}` };
+		if (api.symbols.UpdateProcThreadAttribute(ptr(attributeList), 0, BigInt(PROC_THREAD_ATTRIBUTE_HANDLE_LIST), ptr(handleList), BigInt(handleList.length), null, null) === WIN32_FALSE) return { kind: "failed", error: messages.failure.win32CallFailed("UpdateProcThreadAttribute", api.symbols.GetLastError()) };
 		const [stdin, stdout, stderr] = inherited;
 		const startup = new Uint8Array(STARTUPINFOEX_SIZE);
 		const view = new DataView(startup.buffer);
@@ -196,7 +202,7 @@ const createProcess = (api: Kernel, request: DetachedRequest, inherited: readonl
 		const flags = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT;
 		if (api.symbols.CreateProcessW(null, ptr(commandLine), null, null, WIN32_TRUE, flags, ptr(environment), null, ptr(startup), ptr(information)) === WIN32_FALSE) {
 			const code = api.symbols.GetLastError();
-			return code === ERROR_ACCESS_DENIED ? { kind: "denied" } : { kind: "failed", error: `CreateProcessW failed: ${code}` };
+			return code === ERROR_ACCESS_DENIED ? { kind: "denied" } : { kind: "failed", error: messages.failure.win32CallFailed("CreateProcessW", code) };
 		}
 		const result = new DataView(information.buffer);
 		api.symbols.CloseHandle(result.getBigUint64(POINTER_SIZE, true));
@@ -207,13 +213,13 @@ const createProcess = (api: Kernel, request: DetachedRequest, inherited: readonl
 };
 
 // The exit code of the process, or null while it still runs.
-const exitCodeOf = (process: OutsideJobProcess): Result<number | null> => {
+const exitCodeOf = (process: OutsideJobProcess, messages: Messages): Result<number | null> => {
 	const api = kernel();
 	const state = api.symbols.WaitForSingleObject(process.handle, 0);
 	if (state === WAIT_TIMEOUT) return ok(null);
-	if (state !== WAIT_OBJECT_0) return err(`WaitForSingleObject failed: ${api.symbols.GetLastError()}`);
+	if (state !== WAIT_OBJECT_0) return err(messages.failure.win32CallFailed("WaitForSingleObject", api.symbols.GetLastError()));
 	const code = new Uint32Array(1);
-	if (api.symbols.GetExitCodeProcess(process.handle, ptr(code)) === WIN32_FALSE) return err(`GetExitCodeProcess failed: ${api.symbols.GetLastError()}`);
+	if (api.symbols.GetExitCodeProcess(process.handle, ptr(code)) === WIN32_FALSE) return err(messages.failure.win32CallFailed("GetExitCodeProcess", api.symbols.GetLastError()));
 	return ok(code[0] ?? 0);
 };
 
@@ -227,9 +233,10 @@ const readStderr = (path: string, limit: number): string => {
 // still running after it is reported as started.
 const awaitGrace = async (process: OutsideJobProcess, request: DetachedRequest): Promise<Result<DetachedOutcome>> => {
 	const deadline = Date.now() + request.graceMs;
+	const messages = messagesFor(request.language);
 	try {
 		for (;;) {
-			const code = exitCodeOf(process);
+			const code = exitCodeOf(process, messages);
 			if (!code.ok) return code;
 			if (code.value !== null) return ok({ exited: true, exitCode: code.value, stderr: code.value === 0 ? "" : readStderr(request.stderrPath, request.stderrLimit), pid: process.pid });
 			if (Date.now() >= deadline) return ok({ exited: false, exitCode: null, stderr: "", pid: process.pid });
@@ -245,7 +252,7 @@ const awaitGrace = async (process: OutsideJobProcess, request: DetachedRequest):
  * period. Uses the broker when the caller's job forbids breakaway.
  */
 export const spawnDetachedWindows = async (request: DetachedRequest): Promise<Result<DetachedOutcome>> => {
-	if (request.command.length === 0) return err("Empty launch command");
+	if (request.command.length === 0) return err(messagesFor(request.language).failure.emptyLaunchCommand());
 	const started = startOutsideJob(request);
 	if (started.kind === "failed") return err(started.error);
 	if (started.kind === "started") return await awaitGrace(started.process, request);
@@ -255,6 +262,7 @@ export const spawnDetachedWindows = async (request: DetachedRequest): Promise<Re
 type BrokerSpec = { request: DetachedRequest; resultPath: string };
 
 const spawnThroughBroker = async (request: DetachedRequest): Promise<Result<DetachedOutcome>> => {
+	const messages = messagesFor(request.language);
 	const specPath = `${request.stderrPath}${BROKER_SPEC_SUFFIX}`;
 	const resultPath = `${request.stderrPath}${BROKER_RESULT_SUFFIX}`;
 	const cleanup = (): void => {
@@ -265,14 +273,14 @@ const spawnThroughBroker = async (request: DetachedRequest): Promise<Result<Deta
 		const spec: BrokerSpec = { request, resultPath };
 		writeFileSync(specPath, JSON.stringify(spec));
 		const brokerCommand = [process.execPath, BROKER_SCRIPT, specPath].map(quoteWindowsArgument).join(" ");
-		const created = await runBrokerLauncher(brokerCommand);
+		const created = await runBrokerLauncher(brokerCommand, messages);
 		if (!created.ok) return created;
 		const deadline = Date.now() + request.graceMs + BROKER_START_ALLOWANCE_MS;
 		for (;;) {
 			let text: string | null = null;
 			try { text = readFileSync(resultPath, "utf8"); } catch { /* The broker has not answered yet. */ }
-			if (text !== null) return parseBrokerResult(text);
-			if (Date.now() >= deadline) return err("The process broker did not answer");
+			if (text !== null) return parseBrokerResult(text, messages);
+			if (Date.now() >= deadline) return err(messages.failure.brokerNoAnswer());
 			await sleep(BROKER_POLL_MS);
 		}
 	} catch (error) {
@@ -283,7 +291,7 @@ const spawnThroughBroker = async (request: DetachedRequest): Promise<Result<Deta
 };
 
 // Asks WMI (through a short-lived powershell) to create the broker process, which then lives outside the caller's job.
-const runBrokerLauncher = (brokerCommand: string): Promise<Result<void>> => new Promise((resolve) => {
+const runBrokerLauncher = (brokerCommand: string, messages: Messages): Promise<Result<void>> => new Promise((resolve) => {
 	let stderr = "";
 	const child = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", BROKER_POWERSHELL], {
 		env: { ...process.env, [BROKER_COMMAND_VARIABLE]: brokerCommand },
@@ -292,18 +300,18 @@ const runBrokerLauncher = (brokerCommand: string): Promise<Result<void>> => new 
 	});
 	child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString("utf8"); });
 	child.once("error", (error) => { resolve(err(error.message)); });
-	child.once("close", (code) => { resolve(code === 0 ? ok(undefined) : err(stderr.trim() || `powershell exited with ${code}`)); });
+	child.once("close", (code) => { resolve(code === 0 ? ok(undefined) : err(stderr.trim() || messages.failure.powershellExited(code))); });
 });
 
 const isOutcome = (value: unknown): value is DetachedOutcome =>
 	typeof value === "object" && value !== null && "exited" in value && typeof value.exited === "boolean" && "stderr" in value && typeof value.stderr === "string";
 
-const parseBrokerResult = (text: string): Result<DetachedOutcome> => {
+const parseBrokerResult = (text: string, messages: Messages): Result<DetachedOutcome> => {
 	try {
 		const parsed: unknown = JSON.parse(text);
 		if (typeof parsed === "object" && parsed !== null && "error" in parsed && typeof parsed.error === "string") return err(parsed.error);
 		if (typeof parsed === "object" && parsed !== null && "outcome" in parsed && isOutcome(parsed.outcome)) return ok(parsed.outcome);
-		return err("The process broker answered with an invalid result");
+		return err(messages.failure.brokerInvalidResult());
 	} catch (error) {
 		return err(errorText(error));
 	}
@@ -325,7 +333,7 @@ export const runBroker = async (specPath: string): Promise<number> => {
 			const outcome = await awaitGrace(started.process, request);
 			result = outcome.ok ? { outcome: outcome.value } : { error: outcome.error };
 		} else {
-			result = { error: started.kind === "denied" ? "The process broker's job forbids breakaway" : started.error };
+			result = { error: started.kind === "denied" ? messagesFor(request.language).failure.brokerForbidsBreakaway() : started.error };
 		}
 		const temporary = `${resultPath}${BROKER_RESULT_TEMP_SUFFIX}`;
 		writeFileSync(temporary, JSON.stringify(result));
@@ -344,4 +352,5 @@ const isRequest = (value: unknown): value is DetachedRequest =>
 	&& "stderrLimit" in value && typeof value.stderrLimit === "number"
 	&& "stderrPath" in value && typeof value.stderrPath === "string"
 	&& "hide" in value && typeof value.hide === "boolean"
-	&& "environment" in value && typeof value.environment === "object" && value.environment !== null;
+	&& "environment" in value && typeof value.environment === "object" && value.environment !== null
+	&& "language" in value && isLanguage(value.language);

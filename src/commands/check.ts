@@ -171,18 +171,19 @@ const resolveExpectedHooks = (
 		HOME: toSlashPath(runtime.home),
 		PYTHON: toSlashPath(runtime.pythonCommand),
 	};
+	const messages = messagesFor(runtime.language);
 	const hooks: ExpectedHook[] = [];
 	for (const feature of features) {
 		if (!enabled.has(feature.name) || !feature.platforms.includes(runtime.platform)) continue;
 		for (const hook of feature.hooks) {
 			if (hook.platform !== undefined && hook.platform !== runtime.platform) continue;
-			const command = resolvePlaceholders(resolvedHookCommand(hook.command, programs, hook.args !== undefined, hook.shell), placeholders, `${feature.name}/${hook.event} command`);
+			const command = resolvePlaceholders(resolvedHookCommand(hook.command, programs, hook.args !== undefined, hook.shell), placeholders, `${feature.name}/${hook.event} command`, messages);
 			if (!command.ok) return command;
 			let args: string[] | undefined;
 			if (hook.args !== undefined) {
 				args = [];
 				for (const [index, argument] of hook.args.entries()) {
-					const resolved = resolvePlaceholders(argument, placeholders, `${feature.name}/${hook.event} arg ${index}`);
+					const resolved = resolvePlaceholders(argument, placeholders, `${feature.name}/${hook.event} arg ${index}`, messages);
 					if (!resolved.ok) return resolved;
 					args.push(resolved.value);
 				}

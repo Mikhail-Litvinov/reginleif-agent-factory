@@ -5,6 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { createRealGitAdapter, createRealRuntime } from "../src/commands/real-runtime.js";
+import { messagesFor } from "../src/messages";
+
+const TEST_MESSAGES = messagesFor("en");
 
 const TEMP_DIRECTORY_PREFIX = "agent-rig-real-git-";
 const TRACKED_FILE = "tracked.txt";
@@ -44,7 +47,7 @@ describe("real git adapter", () => {
 		const runtime = await createRealRuntime();
 		expect(runtime.ok).toBe(true);
 		if (!runtime.ok) return;
-		const git = createRealGitAdapter(runtime.value.process, { repo: repositoryPath, hub: repositoryPath });
+		const git = createRealGitAdapter(runtime.value.process, { repo: repositoryPath, hub: repositoryPath }, TEST_MESSAGES);
 
 		const reset = await git.resetKeep("rig", before);
 
@@ -65,7 +68,7 @@ describe("real git adapter", () => {
 		const runtime = await createRealRuntime();
 		expect(runtime.ok).toBe(true);
 		if (!runtime.ok) return;
-		const git = createRealGitAdapter(runtime.value.process, { repo: repositoryPath, hub: repositoryPath });
+		const git = createRealGitAdapter(runtime.value.process, { repo: repositoryPath, hub: repositoryPath }, TEST_MESSAGES);
 
 		const reset = await git.resetKeep("rig", before);
 

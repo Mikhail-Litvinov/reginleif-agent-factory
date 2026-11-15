@@ -60,23 +60,23 @@ type RealRuntimeOptions = { hostName?: NodeJS.Platform };
 const realHome = (): string => toSlashPath(process.env.USERPROFILE ?? process.env.HOME ?? homedir());
 
 // Reads only the language (state.json), without building the runtime: for `rig help` and usage errors.
-export const readRealLanguage = async (): Promise<Language> => readStoredLanguage(createFileSystem(), realHome());
+export const readRealLanguage = async (): Promise<Language> => readStoredLanguage(createFileSystem(messagesFor(DEFAULT_LANGUAGE)), realHome());
 
 export const createRealRuntime = async (options: RealRuntimeOptions = {}): Promise<Result<RuntimePorts>> => {
-	const fileSystem = createFileSystem();
 	const home = realHome();
 	// The language is read here, once per command run, before anything that can fail and print; it travels in the
 	// runtime from now on. A missing or unreadable state.json means the default language.
-	const language = await readStoredLanguage(fileSystem, home);
+	const language = await readStoredLanguage(createFileSystem(messagesFor(DEFAULT_LANGUAGE)), home);
 	const startMessages = messagesFor(language);
+	const fileSystem = createFileSystem(startMessages);
 	const hostName = options.hostName ?? hostPlatform();
 	const platform = toPlatform(hostName);
 	if (platform === null) return err(startMessages.runtime.platformUnsupported(hostName));
 	const pathSeparator = platform === "windows" ? ";" : ":";
 	const additionalPaths = [join(home, ".local", "bin"), join(home, ".bun", "bin")];
 	const pathEnvironment = [...additionalPaths, process.env.PATH ?? ""].join(pathSeparator);
-	const processPorts = createProcessPorts(pathEnvironment);
-	const processStart = await ownerStartTime(process.pid, processPorts);
+	const processPorts = createProcessPorts(pathEnvironment, language);
+	const processStart = await ownerStartTime(process.pid, processPorts, startMessages);
 	if (!processStart.ok) return err(startMessages.runtime.processStartUnknown(processStart.error));
 	if (processStart.value === null) return err(startMessages.runtime.processNotFound());
 	const pythonCommand = platform === "windows" ? "python" : "python3";
@@ -92,10 +92,11 @@ export const createRealRuntime = async (options: RealRuntimeOptions = {}): Promi
 			process: {
 				pid: process.pid,
 				startTime: processStart.value,
-				ownerStartTime: (pid) => ownerStartTime(pid, processPorts),
+				ownerStartTime: (pid) => ownerStartTime(pid, processPorts, startMessages),
 			},
 			clock: { sleep: sleepFor, now: () => Date.now() },
 			pollIntervalMs: LOCK_POLL_INTERVAL_MS,
+			messages: startMessages,
 		},
 		home,
 		currentDirectory: process.cwd(),
@@ -137,14 +138,14 @@ export const createRealRuntime = async (options: RealRuntimeOptions = {}): Promi
 			},
 		},
 		writeExecutable: async (path, content) => {
-			const written = await atomicWrite(fileSystem, path, content);
+			const written = await atomicWrite(fileSystem, path, content, startMessages);
 			if (!written.ok) return written;
 			if (platform === "windows") return ok(undefined);
 			try {
 				await fs.chmod(path, EXECUTABLE_FILE_MODE);
 				return ok(undefined);
 			} catch (error) {
-				return err(`Could not make ${path} executable: ${errorText(error)}`);
+				return err(startMessages.failure.executableFailed(path, errorText(error)));
 			}
 		},
 	};
@@ -154,23 +155,24 @@ export const createRealRuntime = async (options: RealRuntimeOptions = {}): Promi
 export const createRealGitAdapter = (
 	processPorts: RuntimePorts["process"],
 	paths: RigState["paths"],
+	messages: Messages,
 ): UpdatePorts["git"] => ({
 	isClean: async (repository) => {
-		const result = await runGit(processPorts, repository, ["status", "--porcelain"], paths);
+		const result = await runGit(processPorts, repository, ["status", "--porcelain"], paths, messages);
 		return result.ok ? ok(result.value.trim().length === 0) : result;
 	},
 	branchProblem: async (repository) => {
-		const branch = await runGit(processPorts, repository, ["branch", "--show-current"], paths);
+		const branch = await runGit(processPorts, repository, ["branch", "--show-current"], paths, messages);
 		if (!branch.ok) return branch;
 		if (branch.value.trim() !== UPDATE_BRANCH) return ok("not-on-main");
-		const ahead = await runGit(processPorts, repository, ["rev-list", "--count", `origin/${UPDATE_BRANCH}..HEAD`], paths);
+		const ahead = await runGit(processPorts, repository, ["rev-list", "--count", `origin/${UPDATE_BRANCH}..HEAD`], paths, messages);
 		if (!ahead.ok) return ahead;
 		return ok(Number(ahead.value.trim()) > NO_LOCAL_COMMITS ? "local-commits" : null);
 	},
 	fetchMain: async (repository) => {
-		const fetched = await runGit(processPorts, repository, ["fetch", "origin", "+refs/heads/main:refs/remotes/origin/main"], paths);
+		const fetched = await runGit(processPorts, repository, ["fetch", "origin", "+refs/heads/main:refs/remotes/origin/main"], paths, messages);
 		if (!fetched.ok) return fetched;
-		const target = await runGit(processPorts, repository, ["rev-parse", "origin/main"], paths);
+		const target = await runGit(processPorts, repository, ["rev-parse", "origin/main"], paths, messages);
 		return target.ok ? ok(target.value.trim()) : target;
 	},
 	readVersion: async (repository, commit) => {
@@ -179,19 +181,19 @@ export const createRealGitAdapter = (
 		const exists = await processPorts.run("git", ["-C", repositoryPath, "cat-file", "-e", `${commit}:${path}`]);
 		if (!exists.ok) return exists;
 		if (exists.value.exitCode !== PROCESS_SUCCESS_EXIT_CODE) return ok(null);
-		const file = await runGit(processPorts, repository, ["show", `${commit}:${path}`], paths);
+		const file = await runGit(processPorts, repository, ["show", `${commit}:${path}`], paths, messages);
 		return file.ok ? ok(parseVersion(file.value)) : file;
 	},
 	head: async (repository) => {
-		const result = await runGit(processPorts, repository, ["rev-parse", "HEAD"], paths);
+		const result = await runGit(processPorts, repository, ["rev-parse", "HEAD"], paths, messages);
 		return result.ok ? ok(result.value.trim()) : result;
 	},
 	fastForward: async (repository, commit) => {
-		const result = await runGit(processPorts, repository, ["merge", "--ff-only", commit], paths);
+		const result = await runGit(processPorts, repository, ["merge", "--ff-only", commit], paths, messages);
 		return result.ok ? ok(undefined) : result;
 	},
 	resetKeep: async (repository, commit) => {
-		const result = await runGit(processPorts, repository, ["reset", "--keep", commit], paths);
+		const result = await runGit(processPorts, repository, ["reset", "--keep", commit], paths, messages);
 		return result.ok ? ok(undefined) : result;
 	},
 });
@@ -201,19 +203,20 @@ const runGit = async (
 	repository: RepositoryName,
 	args: readonly string[],
 	paths: RigState["paths"],
+	messages: Messages,
 ): Promise<Result<string>> => {
 	const repositoryPath = repository === "rig" ? paths.repo : paths.hub;
 	const result = await processPorts.run("git", ["-C", repositoryPath, ...args]);
 	if (!result.ok) return result;
 	return result.value.exitCode === PROCESS_SUCCESS_EXIT_CODE
 		? ok(result.value.stdout)
-		: err(result.value.stderr || result.value.stdout || `git ${args.join(" ")} failed with code ${result.value.exitCode}`);
+		: err(result.value.stderr || result.value.stdout || messages.failure.gitFailed(args.join(" "), result.value.exitCode));
 };
 
 const isMissingPath = (error: unknown): boolean =>
 	typeof error === "object" && error !== null && "code" in error && (error.code === "ENOENT" || error.code === "ENOTDIR");
 
-export const createFileSystem = (hostKind: HostPlatform = hostPlatform() === "win32" ? "windows" : "posix"): FileSystem => ({
+export const createFileSystem = (messages: Messages, hostKind: HostPlatform = hostPlatform() === "win32" ? "windows" : "posix"): FileSystem => ({
 	readText: (path) => fs.readFile(path, "utf8"),
 	stat: async (path) => {
 		try {
@@ -250,7 +253,7 @@ export const createFileSystem = (hostKind: HostPlatform = hostPlatform() === "wi
 	remove: (path) => fs.unlink(path),
 	ensureDirectory: async (path) => { await fs.mkdir(path, { recursive: true }); },
 	removeDirectoryTree: async (path) => { await fs.rm(path, { recursive: true, force: true }); },
-	writeExclusive: (path, value) => writeExclusiveAtomic(path, value, hostKind),
+	writeExclusive: (path, value) => writeExclusiveAtomic(path, value, hostKind, messages),
 	resolveTarget,
 	modeOf,
 	writeDurable: (path, value, mode) => writeDurable(path, value, mode, hostKind),
@@ -261,16 +264,17 @@ export const createFileSystem = (hostKind: HostPlatform = hostPlatform() === "wi
 	uniqueSuffix: () => `${Date.now()}-${randomUUID()}`,
 });
 
-const createProcessPorts = (pathEnvironment: string): ProcessPorts => {
+const createProcessPorts = (pathEnvironment: string, language: Language): ProcessPorts => {
+	const messages = messagesFor(language);
 	const ports: ProcessPorts = {
-	run: (command: string, args: readonly string[], options?: ProcessOptions) => runProcess(pathEnvironment, command, args, options),
-	spawnDetached,
+	run: (command: string, args: readonly string[], options?: ProcessOptions) => runProcess(pathEnvironment, command, args, messages, options),
+	spawnDetached: (command, graceMs, stderrLimit, stderrPath, options) => spawnDetached(command, graceMs, stderrLimit, stderrPath, language, options),
 	runStreaming: async (argv, cwd, env, append, verbatimArguments, appendStdout) => {
 		const [command, ...args] = argv;
-		if (!command) return err("Empty command");
+		if (!command) return err(messages.failure.emptyCommand());
 		if (hostPlatform() === "win32") {
 			// A stopped run must take down every descendant, including ones taskkill /T cannot reach.
-			const confined = confineToKillOnCloseJob();
+			const confined = confineToKillOnCloseJob(messages);
 			if (!confined.ok) return confined;
 		}
 		return await new Promise((resolve) => {
@@ -303,18 +307,18 @@ const createProcessPorts = (pathEnvironment: string): ProcessPorts => {
 		});
 	},
 	runMembers: async (): Promise<Result<number>> => {
-		if (hostPlatform() === "win32") return jobMembersOtherThanSelf();
+		if (hostPlatform() === "win32") return jobMembersOtherThanSelf(messages);
 		const table = await ports.run("ps", PROCESS_TABLE_ARGUMENTS);
 		if (!table.ok) return table;
-		if (table.value.exitCode !== PROCESS_SUCCESS_EXIT_CODE) return err(table.value.stderr || "Process table query failed");
+		if (table.value.exitCode !== PROCESS_SUCCESS_EXIT_CODE) return err(table.value.stderr || messages.failure.processTableQueryFailed());
 		// The runner leads its own process group (it is started detached), so the group id is its own pid.
 		return ok(countGroupMembers(table.value.stdout, process.pid, process.pid));
 	},
 	killRunMembers: async (): Promise<Result<void>> => {
-		if (hostPlatform() === "win32") return terminateJobMembersOtherThanSelf();
+		if (hostPlatform() === "win32") return terminateJobMembersOtherThanSelf(messages);
 		const table = await ports.run("ps", PROCESS_TABLE_ARGUMENTS);
 		if (!table.ok) return table;
-		if (table.value.exitCode !== PROCESS_SUCCESS_EXIT_CODE) return err(table.value.stderr || "Process table query failed");
+		if (table.value.exitCode !== PROCESS_SUCCESS_EXIT_CODE) return err(table.value.stderr || messages.failure.processTableQueryFailed());
 		const members = groupMemberPids(table.value.stdout, process.pid, process.pid);
 		if (members.length === 0) return ok(undefined);
 		// A member that ended since the listing makes `kill` report it; that is the goal, so only a failed start is an error and the next count verifies.
@@ -328,7 +332,7 @@ const createProcessPorts = (pathEnvironment: string): ProcessPorts => {
 		}
 		const table = await ports.run("ps", ["-eo", "pid=,ppid="]);
 		if (!table.ok) return table;
-		if (table.value.exitCode !== PROCESS_SUCCESS_EXIT_CODE) return err(table.value.stderr || "Process table query failed");
+		if (table.value.exitCode !== PROCESS_SUCCESS_EXIT_CODE) return err(table.value.stderr || messages.failure.processTableQueryFailed());
 		const children = new Map<number, number[]>();
 		for (const line of table.value.stdout.split("\n")) {
 			const match = /^\s*(\d+)\s+(\d+)\s*$/.exec(line);
@@ -339,12 +343,12 @@ const createProcessPorts = (pathEnvironment: string): ProcessPorts => {
 		for (const child of tree.reverse()) {
 			const result = await ports.run("kill", [force ? "-KILL" : "-TERM", String(child)]);
 			if (!result.ok) return result;
-			if (result.value.exitCode !== PROCESS_SUCCESS_EXIT_CODE && child === pid) return err(result.value.stderr || "Could not stop process");
+			if (result.value.exitCode !== PROCESS_SUCCESS_EXIT_CODE && child === pid) return err(result.value.stderr || messages.failure.processStopFailed());
 		}
 		return ok(undefined);
 	},
 	killGroup: async (pid): Promise<Result<void>> => {
-		if (hostPlatform() === "win32") return err("Process groups are not available on Windows");
+		if (hostPlatform() === "win32") return err(messages.failure.processGroupsUnavailable());
 		const result = await ports.run("kill", ["-KILL", "--", `-${pid}`]);
 		return processSuccess(result, "kill");
 	},
@@ -354,18 +358,18 @@ const createProcessPorts = (pathEnvironment: string): ProcessPorts => {
 		const script = fileURLToPath(new URL("../../base/hooks/session_record.py", import.meta.url));
 		const result = await ports.run(python, ["-I", script, "created-at", ...pids.map(String)]);
 		if (!result.ok) return result;
-		if (result.value.exitCode !== PROCESS_SUCCESS_EXIT_CODE) return err(result.value.stderr || "Process table query failed");
+		if (result.value.exitCode !== PROCESS_SUCCESS_EXIT_CODE) return err(result.value.stderr || messages.failure.processTableQueryFailed());
 		try {
 			const value: unknown = JSON.parse(result.value.stdout);
-			if (typeof value !== "object" || value === null || Array.isArray(value)) return err("Invalid process table response");
+			if (typeof value !== "object" || value === null || Array.isArray(value)) return err(messages.failure.processTableInvalid());
 			const times: Record<string, string | null> = {};
 			for (const [key, time] of Object.entries(value)) {
-				if (time !== null && typeof time !== "string") return err("Invalid process table response");
+				if (time !== null && typeof time !== "string") return err(messages.failure.processTableInvalid());
 				times[key] = time;
 			}
-			if (pids.some((pid) => !Object.hasOwn(times, String(pid)))) return err("Incomplete process table response");
+			if (pids.some((pid) => !Object.hasOwn(times, String(pid)))) return err(messages.failure.processTableIncomplete());
 			return ok(times);
-		} catch { return err("Invalid process table response"); }
+		} catch { return err(messages.failure.processTableInvalid()); }
 	},
 	isAvailable: async (command: string): Promise<boolean> => {
 		if (command.includes("/") || command.includes("\\")) {
@@ -378,8 +382,8 @@ const createProcessPorts = (pathEnvironment: string): ProcessPorts => {
 		}
 		const windows = hostPlatform() === "win32";
 		const lookup = windows
-			? await runProcess(pathEnvironment, "where.exe", [command])
-			: await runProcess(pathEnvironment, "sh", ["-c", "command -v -- \"$1\"", "rig-command-lookup", command]);
+			? await runProcess(pathEnvironment, "where.exe", [command], messages)
+			: await runProcess(pathEnvironment, "sh", ["-c", "command -v -- \"$1\"", "rig-command-lookup", command], messages);
 		return lookup.ok && lookup.value.exitCode === PROCESS_SUCCESS_EXIT_CODE;
 	},
 	};
@@ -391,16 +395,17 @@ const createProcessPorts = (pathEnvironment: string): ProcessPorts => {
 export const ownerStartTime = async (
 	pid: number,
 	processPorts: Pick<RuntimePorts["process"], "run">,
+	messages: Messages,
 	hostName: NodeJS.Platform = hostPlatform(),
 ): Promise<Result<number | null>> => {
 	if (hostName === "linux") {
 		try {
 			const text = await fs.readFile(`/proc/${pid}/stat`, "utf8");
 			const closingParenthesis = text.lastIndexOf(")");
-			if (closingParenthesis < 0) return err(`Unreadable /proc/${pid}/stat`);
+			if (closingParenthesis < 0) return err(messages.failure.procStatUnreadable(pid));
 			const fields = text.slice(closingParenthesis + 1).trim().split(/\s+/);
 			const startTicks = Number(fields[LINUX_PROC_START_TIME_INDEX]);
-			return Number.isFinite(startTicks) ? ok(startTicks) : err(`Unreadable start time in /proc/${pid}/stat`);
+			return Number.isFinite(startTicks) ? ok(startTicks) : err(messages.failure.procStartUnreadable(pid));
 		} catch (error) {
 			return isNotFound(error) ? ok(null) : err(errorText(error));
 		}
@@ -410,11 +415,11 @@ export const ownerStartTime = async (
 		const script = `$p = Get-Process -Id ${pid} -ErrorAction SilentlyContinue; if ($p) { $p.StartTime.ToUniversalTime().Ticks }`;
 		const result = await processPorts.run("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script]);
 		if (!result.ok) return err(result.error);
-		if (result.value.exitCode !== PROCESS_SUCCESS_EXIT_CODE) return err(result.value.stderr || `powershell exited with ${result.value.exitCode}`);
+		if (result.value.exitCode !== PROCESS_SUCCESS_EXIT_CODE) return err(result.value.stderr || messages.failure.powershellExited(result.value.exitCode));
 		const text = result.value.stdout.trim();
 		if (text.length === 0) return ok(null);
 		const ticks = Number(text);
-		return Number.isFinite(ticks) ? ok(ticks) : err(`Unexpected start time from powershell: ${text}`);
+		return Number.isFinite(ticks) ? ok(ticks) : err(messages.failure.startTimeUnexpectedPowershell(text));
 	}
 	if (hostName === "darwin") {
 		// BSD ps prints lstart in the user's locale; LC_ALL=C keeps the English format that Date.parse reads.
@@ -423,9 +428,9 @@ export const ownerStartTime = async (
 		const text = result.value.stdout.trim();
 		if (result.value.exitCode !== PROCESS_SUCCESS_EXIT_CODE) return text.length === 0 && result.value.stderr.trim().length === 0 ? ok(null) : err(result.value.stderr);
 		const start = Date.parse(text);
-		return Number.isFinite(start) ? ok(start) : err(`Unexpected start time from ps: ${text}`);
+		return Number.isFinite(start) ? ok(start) : err(messages.failure.startTimeUnexpectedPs(text));
 	}
-	return err(`Process start time is not supported on ${hostName}`);
+	return err(messages.failure.startTimeUnsupported(hostName));
 };
 
 type ProcessRunner = Pick<ProcessPorts, "run" | "spawnDetached">;
@@ -535,12 +540,12 @@ const installProgram = async (
 	platform: RuntimePorts["platform"],
 ): Promise<Result<void>> => {
 	if (name === "codex") {
-		const result = await runProcess(runtime.pathEnvironment, runtime.executablePath, ["add", "--global", CODEX_PACKAGE]);
+		const result = await runProcess(runtime.pathEnvironment, runtime.executablePath, ["add", "--global", CODEX_PACKAGE], messagesFor(runtime.language));
 		return processSuccess(result, messagesFor(runtime.language).runtime.codexInstallLabel());
 	}
 	if (name === "opencode") {
 		const command = platform === "windows" ? "npm.cmd" : "npm";
-		const result = await runProcess(runtime.pathEnvironment, command, ["install", "--global", "--prefix", binDirectory, OPENCODE_PACKAGE]);
+		const result = await runProcess(runtime.pathEnvironment, command, ["install", "--global", "--prefix", binDirectory, OPENCODE_PACKAGE], messagesFor(runtime.language));
 		return processSuccess(result, messagesFor(runtime.language).runtime.opencodeInstallLabel());
 	}
 	if (name === "rtk") return installRtk(binDirectory, platform, runtime);
@@ -556,12 +561,12 @@ const installRtk = async (binDirectory: string, platform: RuntimePorts["platform
 	if (!temporary.ok) return temporary;
 	try {
 		const archivePath = join(temporary.value, release.value.asset.name);
-		const archive = await fetchBytes(release.value.asset.url);
+		const archive = await fetchBytes(release.value.asset.url, messages);
 		if (!archive.ok) return archive;
 		const digest = createHash("sha256").update(archive.value).digest("hex");
 		if (digest !== release.value.checksum) return err(messages.runtime.rtkChecksumMismatch(release.value.asset.name));
 		await fs.writeFile(archivePath, archive.value);
-		const extracted = await runProcess(runtime.pathEnvironment, platform === "windows" ? "tar.exe" : "tar", ["-xf", archivePath, "-C", temporary.value]);
+		const extracted = await runProcess(runtime.pathEnvironment, platform === "windows" ? "tar.exe" : "tar", ["-xf", archivePath, "-C", temporary.value], messages);
 		const extractedResult = processSuccess(extracted, messages.runtime.rtkExtractLabel());
 		if (!extractedResult.ok) return extractedResult;
 		const sourcePath = join(temporary.value, targetName);
@@ -604,7 +609,7 @@ const fetchRtkRelease = async (platform: RuntimePorts["platform"], messages: Mes
 		const asset = assets.find((candidate) => candidate.name === target);
 		const checksums = assets.find((candidate) => candidate.name === "checksums.txt");
 		if (asset === undefined || checksums === undefined) return err(messages.runtime.rtkAssetsMissing(target));
-		const checksumText = await fetchText(checksums.url);
+		const checksumText = await fetchText(checksums.url, messages);
 		if (!checksumText.ok) return checksumText;
 		const checksum = checksumText.value.split(/\r?\n/).map(parseChecksumLine).find((entry) => entry?.name === target)?.hash;
 		return checksum === undefined ? err(messages.runtime.checksumMissing(target)) : ok({ asset, checksum });
@@ -629,19 +634,19 @@ const parseChecksumLine = (line: string): { name: string; hash: string } | null 
 		: null;
 };
 
-const fetchText = async (url: string): Promise<Result<string>> => {
+const fetchText = async (url: string, messages: Messages): Promise<Result<string>> => {
 	try {
 		const response = await fetch(url, { headers: { "User-Agent": "agent-rig" } });
-		return response.ok ? ok(await response.text()) : err(`Download failed with HTTP ${response.status}`);
+		return response.ok ? ok(await response.text()) : err(messages.failure.downloadFailed(response.status));
 	} catch (error) {
 		return err(errorText(error));
 	}
 };
 
-const fetchBytes = async (url: string): Promise<Result<Uint8Array>> => {
+const fetchBytes = async (url: string, messages: Messages): Promise<Result<Uint8Array>> => {
 	try {
 		const response = await fetch(url, { headers: { "User-Agent": "agent-rig" } });
-		return response.ok ? ok(new Uint8Array(await response.arrayBuffer())) : err(`Download failed with HTTP ${response.status}`);
+		return response.ok ? ok(new Uint8Array(await response.arrayBuffer())) : err(messages.failure.downloadFailed(response.status));
 	} catch (error) {
 		return err(errorText(error));
 	}

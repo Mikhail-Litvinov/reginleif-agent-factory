@@ -12,10 +12,10 @@ import { readState } from "../state.js";
 import { err, errorText, ok } from "../result.js";
 
 export const readRigState = async (runtime: RuntimePorts): Promise<Result<RigState>> =>
-	readState(runtime.fs, runtime.home);
+	readState(runtime.fs, runtime.home, messagesFor(runtime.language));
 
 export const readFeatureManifests = async (runtime: RuntimePorts, repoPath: string): Promise<Result<FeatureManifest[]>> =>
-	loadFeatures(runtime.fs, repoPath);
+	loadFeatures(runtime.fs, repoPath, messagesFor(runtime.language));
 
 export const emitRigEvent = async (
 	runtime: RuntimePorts,
@@ -28,6 +28,7 @@ export const emitRigEvent = async (
 		home: runtime.home,
 		now: () => runtime.clock.nowText(),
 		createId: () => runtime.ids.next(),
+		messages: messagesFor(runtime.language),
 	}, { type, level, text });
 	return event.ok ? ok(undefined) : event;
 };

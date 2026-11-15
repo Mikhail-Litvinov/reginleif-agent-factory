@@ -1,3 +1,4 @@
+import type { Messages } from "../messages.js";
 import type { Result } from "../result.js";
 
 import { chooseBackupPath } from "../backup-path.js";
@@ -26,6 +27,7 @@ export type RuleFilePorts = {
   write: (path: string, content: string) => Promise<Result<void>>;
   rename: (from: string, to: string) => Promise<Result<void>>;
   clock: () => string;
+  messages: Messages;
 };
 
 const BEGIN_MARKER = "<!-- rig:begin -->";
@@ -129,6 +131,7 @@ export async function planRuleFiles(
           const existing = await ports.read(path);
           return existing.ok ? { ok: true, value: existing.value === null ? null : hashText(existing.value) } : existing;
         },
+        ports.messages,
       );
       if (!backup.ok) {
         return backup;

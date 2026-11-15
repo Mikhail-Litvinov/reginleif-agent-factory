@@ -2,6 +2,9 @@ import type { AssetPlan, FileSystem, PluginPlan, ProcessRunner } from "../../src
 
 import { describe, expect, test } from "bun:test";
 import { applyAssets, applyPlugins } from "../../src/assets/installer";
+import { messagesFor } from "../../src/messages";
+
+const TEST_MESSAGES = messagesFor("en");
 
 const DAY = "2026-10-30";
 const LAST_CALL_INDEX = -1;
@@ -81,7 +84,7 @@ describe("applyAssets", () => {
       "C:/clone/features/skills/one/nested/run.py": "{{CLONE}}",
     });
 
-    const result = await applyAssets({ fs, now: () => DAY }, [assetPlan], {});
+    const result = await applyAssets({ fs, now: () => DAY, messages: TEST_MESSAGES }, [assetPlan], {});
 
     expect(result.ok).toBe(true);
     expect(fs.files.get("C:/Users/me/.claude/skills/one/SKILL.md")).toBe("C:/clone C:/Users/me/.agent-rig/hub python C:/Users/me");
@@ -92,13 +95,13 @@ describe("applyAssets", () => {
     if (!result.ok) return;
     expect(fs.writes).toHaveLength(EXPECTED_DIRECTORY_FILE_COUNT);
 
-    const repeated = await applyAssets({ fs, now: () => DAY }, [assetPlan], result.value.records);
+    const repeated = await applyAssets({ fs, now: () => DAY, messages: TEST_MESSAGES }, [assetPlan], result.value.records);
     expect(repeated.ok).toBe(true);
     expect(fs.writes).toHaveLength(EXPECTED_DIRECTORY_FILE_COUNT);
     if (!repeated.ok) return;
 
     const removed = await applyAssets(
-      { fs, now: () => DAY },
+      { fs, now: () => DAY, messages: TEST_MESSAGES },
       [{ ...assetPlan, enabled: false }],
       repeated.value.records,
     );
@@ -113,22 +116,22 @@ describe("applyAssets", () => {
       ...assetPlan,
       files: [{ sourcePath: "C:/clone/features/skills/one/SKILL.md", targetPath: "C:/Users/me/.claude/skills/one/SKILL.md" }],
     };
-    const first = await applyAssets({ fs, now: () => DAY }, [plan], {});
+    const first = await applyAssets({ fs, now: () => DAY, messages: TEST_MESSAGES }, [plan], {});
     expect(first.ok).toBe(true);
     if (!first.ok) return;
 
     fs.files.set("C:/Users/me/.claude/skills/one/SKILL.md", "human edit");
-    const kept = await applyAssets({ fs, now: () => DAY }, [plan], first.value.records);
+    const kept = await applyAssets({ fs, now: () => DAY, messages: TEST_MESSAGES }, [plan], first.value.records);
     expect(kept.ok && kept.value.events).toEqual([
       { type: "setting-kept", path: "C:/Users/me/.claude/skills/one/SKILL.md" },
     ]);
     if (!kept.ok) return;
-    const repeated = await applyAssets({ fs, now: () => DAY }, [plan], kept.value.records);
+    const repeated = await applyAssets({ fs, now: () => DAY, messages: TEST_MESSAGES }, [plan], kept.value.records);
     expect(repeated.ok && repeated.value.events).toEqual([]);
     expect(fs.writes).toEqual(["C:/Users/me/.claude/skills/one/SKILL.md"]);
 
     fs.files.delete("C:/Users/me/.claude/skills/one/SKILL.md");
-    const restored = await applyAssets({ fs, now: () => DAY }, [plan], repeated.ok ? repeated.value.records : {});
+    const restored = await applyAssets({ fs, now: () => DAY, messages: TEST_MESSAGES }, [plan], repeated.ok ? repeated.value.records : {});
     expect(restored.ok && fs.files.get("C:/Users/me/.claude/skills/one/SKILL.md")).toBe("original");
   });
 
@@ -137,13 +140,13 @@ describe("applyAssets", () => {
     const source = "C:/clone/agents/guide.md";
     const fs = makeFileSystem({ [source]: "same", [target]: "same" });
     const plan: AssetPlan = { ...assetPlan, files: [{ sourcePath: source, targetPath: target }] };
-    const adopted = await applyAssets({ fs, now: () => DAY }, [plan], {});
+    const adopted = await applyAssets({ fs, now: () => DAY, messages: TEST_MESSAGES }, [plan], {});
     expect(adopted.ok && adopted.value.records[target]).toBeDefined();
     if (!adopted.ok) return;
 
     fs.files.set(target, "edited");
     const disabled = await applyAssets(
-      { fs, now: () => DAY },
+      { fs, now: () => DAY, messages: TEST_MESSAGES },
       [{ ...plan, enabled: false }],
       adopted.value.records,
     );
@@ -161,11 +164,11 @@ describe("applyAssets", () => {
     const source = "C:/clone/agents/guide.md";
     const fs = makeFileSystem({ [source]: "same", [target]: "same" });
     const plan: AssetPlan = { ...assetPlan, files: [{ sourcePath: source, targetPath: target }] };
-    const adopted = await applyAssets({ fs, now: () => DAY }, [plan], {});
+    const adopted = await applyAssets({ fs, now: () => DAY, messages: TEST_MESSAGES }, [plan], {});
     if (!adopted.ok) throw new Error(adopted.error);
     fs.files.set(target, "edited");
 
-    const disabled = await applyAssets({ fs, now: () => "2026-10-30T12:34:56.789Z" }, [{ ...plan, enabled: false }], adopted.value.records);
+    const disabled = await applyAssets({ fs, now: () => "2026-10-30T12:34:56.789Z", messages: TEST_MESSAGES }, [{ ...plan, enabled: false }], adopted.value.records);
 
     expect(disabled.ok).toBe(true);
     expect(fs.files.get(`${target}.bak-${DAY}`)).toBe("edited");
@@ -177,11 +180,11 @@ describe("applyAssets", () => {
     const source = "C:/clone/agents/guide.md";
     const fs = makeFileSystem({ [source]: "same", [target]: "same", [`${target}.bak-${DAY}`]: "older backup" });
     const plan: AssetPlan = { ...assetPlan, files: [{ sourcePath: source, targetPath: target }] };
-    const adopted = await applyAssets({ fs, now: () => DAY }, [plan], {});
+    const adopted = await applyAssets({ fs, now: () => DAY, messages: TEST_MESSAGES }, [plan], {});
     if (!adopted.ok) throw new Error(adopted.error);
     fs.files.set(target, "edited");
 
-    const disabled = await applyAssets({ fs, now: () => DAY }, [{ ...plan, enabled: false }], adopted.value.records);
+    const disabled = await applyAssets({ fs, now: () => DAY, messages: TEST_MESSAGES }, [{ ...plan, enabled: false }], adopted.value.records);
 
     expect(disabled.ok).toBe(true);
     expect(fs.files.get(`${target}.bak-${DAY}`)).toBe("older backup");
@@ -193,10 +196,10 @@ describe("applyAssets", () => {
     const target = "C:/Users/me/.claude/agents/guide.md";
     const fs = makeFileSystem({ [source]: "guide" });
     const plan: AssetPlan = { ...assetPlan, files: [{ sourcePath: source, targetPath: target }] };
-    const installed = await applyAssets({ fs, now: () => DAY }, [plan], {});
+    const installed = await applyAssets({ fs, now: () => DAY, messages: TEST_MESSAGES }, [plan], {});
     if (!installed.ok) throw new Error(installed.error);
 
-    const removed = await applyAssets({ fs, now: () => DAY }, [{ ...plan, files: [] }], installed.value.records);
+    const removed = await applyAssets({ fs, now: () => DAY, messages: TEST_MESSAGES }, [{ ...plan, files: [] }], installed.value.records);
 
     expect(removed.ok && removed.value.records).toEqual({});
     expect(fs.files.has(target)).toBe(false);
@@ -207,11 +210,11 @@ describe("applyAssets", () => {
     const target = "C:/Users/me/.claude/agents/guide.md";
     const fs = makeFileSystem({ [source]: "guide" });
     const plan: AssetPlan = { ...assetPlan, files: [{ sourcePath: source, targetPath: target }] };
-    const installed = await applyAssets({ fs, now: () => DAY }, [plan], {});
+    const installed = await applyAssets({ fs, now: () => DAY, messages: TEST_MESSAGES }, [plan], {});
     expect(installed.ok).toBe(true);
     if (!installed.ok) return;
 
-    const removed = await applyAssets({ fs, now: () => DAY }, [{ ...plan, enabled: false }], installed.value.records);
+    const removed = await applyAssets({ fs, now: () => DAY, messages: TEST_MESSAGES }, [{ ...plan, enabled: false }], installed.value.records);
     expect(removed.ok).toBe(true);
     expect(fs.files.has(target)).toBe(false);
   });
@@ -240,14 +243,14 @@ describe("applyAssets bytes (A8)", () => {
       },
     };
 
-    const result = await applyAssets({ fs, now: () => DAY }, [assetPlan], {});
+    const result = await applyAssets({ fs, now: () => DAY, messages: TEST_MESSAGES }, [assetPlan], {});
 
     expect(result.ok).toBe(true);
     expect(stored.get("C:/Users/me/.claude/skills/one/logo.png")?.bytes).toEqual(binary);
     expect(stored.get("C:/Users/me/.claude/skills/one/run.sh")?.executable).toBe(true);
     expect(new TextDecoder().decode(stored.get("C:/Users/me/.claude/skills/one/run.sh")?.bytes)).toBe("echo C:/Users/me");
 
-    const repeated = await applyAssets({ fs, now: () => DAY }, [assetPlan], result.ok ? result.value.records : {});
+    const repeated = await applyAssets({ fs, now: () => DAY, messages: TEST_MESSAGES }, [assetPlan], result.ok ? result.value.records : {});
     expect(repeated.ok && repeated.value.events).toEqual([]);
   });
 });
@@ -264,7 +267,7 @@ describe("applyPlugins", () => {
       "plugin list --json": "[]",
     });
 
-    const first = await applyPlugins({ runner, claudeCommand: "claude" }, plan);
+    const first = await applyPlugins({ runner, claudeCommand: "claude", messages: TEST_MESSAGES }, plan);
     expect(first.ok).toBe(true);
     expect(runner.calls).toEqual([
       ["claude", "plugin", "marketplace", "list", "--json"],
@@ -281,7 +284,7 @@ describe("applyPlugins", () => {
       [MARKETPLACE_LIST_JSON]: marketplaceListJson(["openai-codex", "claude-plugins-official", "telegram-hub-local"]),
       "plugin list --json": JSON.stringify(plan.map(({ id }) => ({ id }))),
     });
-    const second = await applyPlugins({ runner: secondRunner, claudeCommand: "claude" }, plan, first.value.records);
+    const second = await applyPlugins({ runner: secondRunner, claudeCommand: "claude", messages: TEST_MESSAGES }, plan, first.value.records);
     expect(second.ok).toBe(true);
     // The plugin list is always read (a hand-removed plugin must come back), but nothing is changed.
     expect(secondRunner.calls).toEqual([
@@ -296,7 +299,7 @@ describe("applyPlugins", () => {
       "plugin list --json": JSON.stringify([{ id: "codex@openai-codex" }]),
     });
     const result = await applyPlugins(
-      { runner, claudeCommand: "claude" },
+      { runner, claudeCommand: "claude", messages: TEST_MESSAGES },
       [{ enabled: false, id: "codex@openai-codex", marketplace: "openai-codex", source: "openai/codex-plugin-cc" }],
     );
     expect(result.ok).toBe(true);
@@ -317,7 +320,7 @@ describe("applyPlugins", () => {
       "plugin list --json": JSON.stringify([{ id: "codex@openai-codex" }]),
     });
     const result = await applyPlugins(
-      { runner, claudeCommand: "claude" },
+      { runner, claudeCommand: "claude", messages: TEST_MESSAGES },
       [{ enabled: true, id: "codex@openai-codex", marketplace: "openai-codex", source: "openai/codex-plugin-cc" }],
     );
     expect(result.ok).toBe(true);
@@ -339,7 +342,7 @@ describe("applyPlugins", () => {
       "plugin list --json": "[]",
     });
 
-    const result = await applyPlugins({ runner, claudeCommand: "claude" }, plan);
+    const result = await applyPlugins({ runner, claudeCommand: "claude", messages: TEST_MESSAGES }, plan);
 
     expect(result.ok).toBe(true);
     expect(runner.calls).toEqual([
@@ -360,7 +363,7 @@ describe("applyPlugins", () => {
     });
 
     const result = await applyPlugins(
-      { runner, claudeCommand: "claude" },
+      { runner, claudeCommand: "claude", messages: TEST_MESSAGES },
       [{ enabled: true, id: "codex@openai-codex", marketplace: "openai-codex", source: "openai/codex-plugin-cc" }],
     );
 
@@ -385,7 +388,7 @@ describe("applyPlugins stale local marketplaces", () => {
       "plugin list --json": JSON.stringify([{ id: "tg-hub@old-hub" }, { id: "other@elsewhere" }]),
     });
 
-    const result = await applyPlugins({ runner, claudeCommand: "claude" }, hubPlan);
+    const result = await applyPlugins({ runner, claudeCommand: "claude", messages: TEST_MESSAGES }, hubPlan);
 
     expect(result.ok).toBe(true);
     expect(runner.calls).toEqual([
@@ -404,7 +407,7 @@ describe("applyPlugins stale local marketplaces", () => {
       "plugin list --json": "[]",
     });
 
-    await applyPlugins({ runner, claudeCommand: "claude" }, hubPlan);
+    await applyPlugins({ runner, claudeCommand: "claude", messages: TEST_MESSAGES }, hubPlan);
 
     expect(runner.calls).toEqual([
       ["claude", "plugin", "marketplace", "list", "--json"],
@@ -420,7 +423,7 @@ describe("applyPlugins stale local marketplaces", () => {
     });
 
     const result = await applyPlugins(
-      { runner, claudeCommand: "claude" },
+      { runner, claudeCommand: "claude", messages: TEST_MESSAGES },
       [{ enabled: true, id: "agent-rig-window@agent-rig", marketplace: "agent-rig", source: "C:/projects/rig/plugins/agent-rig-window" }],
     );
 
@@ -441,7 +444,7 @@ describe("applyPlugins stale local marketplaces", () => {
       "plugin list --json": JSON.stringify([{ id: "x@other-hub" }]),
     });
 
-    await applyPlugins({ runner, claudeCommand: "claude" }, hubPlan);
+    await applyPlugins({ runner, claudeCommand: "claude", messages: TEST_MESSAGES }, hubPlan);
 
     expect(runner.calls.filter((call) => call.includes("remove") || call.includes("uninstall"))).toEqual([]);
   });

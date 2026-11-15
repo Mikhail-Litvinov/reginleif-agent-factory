@@ -8,6 +8,9 @@ import { join } from "node:path";
 import { applyAssets } from "../../src/assets/installer";
 import { createNodeAssetFileSystem } from "../../src/assets/node-asset-file-system";
 import { hashContent } from "../../src/content-hash";
+import { messagesFor } from "../../src/messages";
+
+const TEST_MESSAGES = messagesFor("en");
 
 const DAY = "2026-10-30";
 const TEMP_PREFIX = "rig-asset-paths-";
@@ -76,7 +79,7 @@ describe("asset paths have one form: forward slashes", () => {
   test("a directory listing with backslashes (Windows) is read and the targets and record keys use forward slashes", async () => {
     const fs = makeFileSystem({ [`${SKILL_SOURCE}/SKILL.md`]: "skill", [`${SKILL_SOURCE}/nested/run.py`]: "run" }, true);
 
-    const result = await applyAssets({ fs, now: () => DAY }, [plan([{ sourcePath: SKILL_SOURCE, targetPath: "C:/Users/me/.claude/skills/one" }])], {});
+    const result = await applyAssets({ fs, now: () => DAY, messages: TEST_MESSAGES }, [plan([{ sourcePath: SKILL_SOURCE, targetPath: "C:/Users/me/.claude/skills/one" }])], {});
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -87,7 +90,7 @@ describe("asset paths have one form: forward slashes", () => {
   test("a target given with backslashes gets forward-slash keys and writes", async () => {
     const fs = makeFileSystem({ [`${SKILL_SOURCE}/SKILL.md`]: "skill" }, true);
 
-    const result = await applyAssets({ fs, now: () => DAY }, [plan([{ sourcePath: SKILL_SOURCE, targetPath: "C:\\Users\\me\\.claude\\skills\\one" }])], {});
+    const result = await applyAssets({ fs, now: () => DAY, messages: TEST_MESSAGES }, [plan([{ sourcePath: SKILL_SOURCE, targetPath: "C:\\Users\\me\\.claude\\skills\\one" }])], {});
 
     expect(result.ok && Object.keys(result.value.records)).toEqual([SKILL_TARGET]);
   });
@@ -97,7 +100,7 @@ describe("asset paths have one form: forward slashes", () => {
     const oldKey = "C:\\Users\\me\\.claude\\skills\\one\\SKILL.md";
     const prior: AssetRecords = { [oldKey]: { hash: textHash("skill"), owned: true, notifiedHashes: [] } };
 
-    const result = await applyAssets({ fs, now: () => DAY }, [plan([{ sourcePath: SKILL_SOURCE, targetPath: "C:/Users/me/.claude/skills/one" }])], prior);
+    const result = await applyAssets({ fs, now: () => DAY, messages: TEST_MESSAGES }, [plan([{ sourcePath: SKILL_SOURCE, targetPath: "C:/Users/me/.claude/skills/one" }])], prior);
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -112,7 +115,7 @@ describe("asset paths have one form: forward slashes", () => {
     const oldKey = "C:\\Users\\me\\.claude\\skills\\one\\SKILL.md";
     const prior: AssetRecords = { [oldKey]: { hash: textHash("skill"), owned: true, notifiedHashes: [] } };
 
-    const result = await applyAssets({ fs, now: () => DAY }, [{ ...plan([{ sourcePath: SKILL_SOURCE, targetPath: "C:/Users/me/.claude/skills/one" }]), enabled: false }], prior);
+    const result = await applyAssets({ fs, now: () => DAY, messages: TEST_MESSAGES }, [{ ...plan([{ sourcePath: SKILL_SOURCE, targetPath: "C:/Users/me/.claude/skills/one" }]), enabled: false }], prior);
 
     expect(result.ok && result.value.records).toEqual({});
     expect(fs.bytes.has(SKILL_TARGET)).toBe(false);
@@ -122,7 +125,7 @@ describe("asset paths have one form: forward slashes", () => {
     const fs = makeFileSystem({ [RULE_SOURCE]: "{{HOME}}|{{CLONE}}|{{HUB}}" }, false);
     const windowsPlan: AssetPlan = { ...plan([{ sourcePath: RULE_SOURCE, targetPath: RULE_TARGET }]), homePath: "C:\\Users\\me", clonePath: "C:\\clone", hubPath: "C:\\hub" };
 
-    const result = await applyAssets({ fs, now: () => DAY }, [windowsPlan], {});
+    const result = await applyAssets({ fs, now: () => DAY, messages: TEST_MESSAGES }, [windowsPlan], {});
 
     expect(result.ok).toBe(true);
     expect(new TextDecoder().decode(fs.bytes.get(RULE_TARGET))).toBe("C:/Users/me|C:/clone|C:/hub");
@@ -133,14 +136,14 @@ describe("line endings do not make a text file foreign", () => {
   test("a live text file that differs only by CRLF is accepted as rig's own, not reported and not rewritten", async () => {
     const fs = makeFileSystem({ [RULE_SOURCE]: "one\ntwo\n", [RULE_TARGET]: "one\r\ntwo\r\n" }, false);
 
-    const result = await applyAssets({ fs, now: () => DAY }, [plan([{ sourcePath: RULE_SOURCE, targetPath: RULE_TARGET }])], {});
+    const result = await applyAssets({ fs, now: () => DAY, messages: TEST_MESSAGES }, [plan([{ sourcePath: RULE_SOURCE, targetPath: RULE_TARGET }])], {});
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.value.events).toEqual([]);
     expect(result.value.records[RULE_TARGET]?.owned).toBe(true);
     expect(fs.writes).toEqual([]);
-    const again = await applyAssets({ fs, now: () => DAY }, [plan([{ sourcePath: RULE_SOURCE, targetPath: RULE_TARGET }])], result.value.records);
+    const again = await applyAssets({ fs, now: () => DAY, messages: TEST_MESSAGES }, [plan([{ sourcePath: RULE_SOURCE, targetPath: RULE_TARGET }])], result.value.records);
     expect(again.ok && again.value.events).toEqual([]);
     expect(fs.writes).toEqual([]);
   });
@@ -149,7 +152,7 @@ describe("line endings do not make a text file foreign", () => {
     const fs = makeFileSystem({ [RULE_SOURCE]: "one\ntwo\n", [RULE_TARGET]: "one\r\ntwo\r\n" }, false);
     const owned: AssetRecords = { [RULE_TARGET]: { hash: hashContent({ bytes: new TextEncoder().encode("one\ntwo\n"), executable: false }), owned: true, notifiedHashes: [] } };
 
-    const result = await applyAssets({ fs, now: () => DAY }, [plan([{ sourcePath: RULE_SOURCE, targetPath: RULE_TARGET }])], owned);
+    const result = await applyAssets({ fs, now: () => DAY, messages: TEST_MESSAGES }, [plan([{ sourcePath: RULE_SOURCE, targetPath: RULE_TARGET }])], owned);
 
     expect(result.ok && result.value.events).toEqual([]);
     expect(result.ok && result.value.records[RULE_TARGET]?.owned).toBe(true);
@@ -161,7 +164,7 @@ describe("line endings do not make a text file foreign", () => {
     const crlfHash = hashContent({ bytes: new TextEncoder().encode("one\r\ntwo\r\n"), executable: false });
     const foreign: AssetRecords = { [RULE_TARGET]: { hash: crlfHash, owned: false, notifiedHashes: [crlfHash] } };
 
-    const result = await applyAssets({ fs, now: () => DAY }, [plan([{ sourcePath: RULE_SOURCE, targetPath: RULE_TARGET }])], foreign);
+    const result = await applyAssets({ fs, now: () => DAY, messages: TEST_MESSAGES }, [plan([{ sourcePath: RULE_SOURCE, targetPath: RULE_TARGET }])], foreign);
 
     expect(result.ok && result.value.events).toEqual([]);
     expect(result.ok && result.value.records[RULE_TARGET]?.owned).toBe(true);
@@ -171,7 +174,7 @@ describe("line endings do not make a text file foreign", () => {
   test("a real text difference is still foreign", async () => {
     const fs = makeFileSystem({ [RULE_SOURCE]: "one\ntwo\n", [RULE_TARGET]: "one\r\nthree\r\n" }, false);
 
-    const result = await applyAssets({ fs, now: () => DAY }, [plan([{ sourcePath: RULE_SOURCE, targetPath: RULE_TARGET }])], {});
+    const result = await applyAssets({ fs, now: () => DAY, messages: TEST_MESSAGES }, [plan([{ sourcePath: RULE_SOURCE, targetPath: RULE_TARGET }])], {});
 
     expect(result.ok && result.value.events).toEqual([{ type: "setting-kept", path: RULE_TARGET }]);
   });
@@ -180,7 +183,7 @@ describe("line endings do not make a text file foreign", () => {
     const lineFeedOnly = new Uint8Array([0x00, 0x0a, 0xff, 0xfe, 0x0a]);
     const fs = makeFileSystem({ [RULE_SOURCE]: lineFeedOnly, [RULE_TARGET]: BINARY_BYTES }, false);
 
-    const result = await applyAssets({ fs, now: () => DAY }, [plan([{ sourcePath: RULE_SOURCE, targetPath: RULE_TARGET }])], {});
+    const result = await applyAssets({ fs, now: () => DAY, messages: TEST_MESSAGES }, [plan([{ sourcePath: RULE_SOURCE, targetPath: RULE_TARGET }])], {});
 
     expect(result.ok && result.value.events).toEqual([{ type: "setting-kept", path: RULE_TARGET }]);
   });
@@ -206,7 +209,7 @@ describe("the real adapter on this machine", () => {
     const target = forward(join(root, "home", ".claude", "skills", "one"));
 
     const result = await applyAssets(
-      { fs: createNodeAssetFileSystem(), now: () => DAY },
+      { fs: createNodeAssetFileSystem(), now: () => DAY, messages: TEST_MESSAGES },
       [{ ...plan([{ sourcePath: forward(source), targetPath: target }]), clonePath: forward(join(root, "clone")), homePath: forward(join(root, "home")) }],
       {},
     );

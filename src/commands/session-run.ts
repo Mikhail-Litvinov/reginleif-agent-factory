@@ -65,13 +65,13 @@ export const prepareLaunch = async (runtime: RuntimePorts, session: SessionRecor
 	if (!state.ok) return apiFail(INFO_ERROR_STATE_UNREADABLE, state.error);
 	const plugins: string[] = [];
 	if (state.value.features.telegram === true) {
-		const feature = await readFeature(runtime.fs, joinPath(state.value.paths.repo, "features", "telegram"));
+		const feature = await readFeature(runtime.fs, joinPath(state.value.paths.repo, "features", "telegram"), messagesFor(runtime.language));
 		if (!feature.ok) return invalid(feature.error);
 		for (const plugin of feature.value.plugins) {
 			const origin = localPluginOrigin(plugin, state.value.paths.hub, state.value.paths.repo);
 			let id = plugin;
 			if (origin !== null) {
-				const marketplace = await readMarketplaceManifest(runtime.fs, origin.path, origin.label);
+				const marketplace = await readMarketplaceManifest(runtime.fs, origin.path, origin.label, messagesFor(runtime.language));
 				if (!marketplace.ok) return invalid(marketplace.error);
 				if (origin.mustBeListed && !marketplace.value.plugins.includes(origin.name)) return invalid(m.pluginMissingFromMarketplace(origin.name, marketplace.value.name));
 				id = `${origin.name}@${marketplace.value.name}`;

@@ -1,5 +1,7 @@
 import type { Messages } from "../messages.js";
 
+import { DEFAULT_LANGUAGE, messagesFor } from "../messages.js";
+
 const JSON_CONTROL_LIMIT = 0x20;
 const JSON_SPACE_CODE = 0x20;
 const JSON_TAB_CODE = 0x09;
@@ -210,6 +212,22 @@ type JsonNode =
   | JsonBooleanNode
   | JsonNullNode;
 
+type JsonReason =
+  | "expectedString"
+  | "unfinishedEscape"
+  | "invalidUnicodeEscape"
+  | "invalidEscape"
+  | "controlCharacter"
+  | "unterminatedString"
+  | "duplicateKey"
+  | "expectedColon"
+  | "expectedCommaOrBrace"
+  | "trailingComma"
+  | "unterminatedObject"
+  | "expectedCommaOrBracket"
+  | "unterminatedArray"
+  | "expectedValue";
+
 type ParseDocumentResult =
   | {
       ok: true;
@@ -217,8 +235,14 @@ type ParseDocumentResult =
     }
   | {
       ok: false;
-      error: string;
+      problem: JsonProblem;
     };
+
+type JsonProblem =
+  | { kind: "invalid" }
+  | { kind: "rootNotObject" }
+  | { kind: "trailing"; position: number }
+  | { kind: "at"; position: number; reason: JsonReason; key: string };
 
 type PathLookup =
   | {
@@ -488,13 +512,43 @@ const cloneJsonObject = (value: JsonObject): JsonObject => {
   return copy;
 };
 
+const describeJsonProblem = (problem: JsonProblem, messages: Messages): string => {
+  const failure = messages.failure;
+  if (problem.kind === "invalid") {
+    return failure.jsonInvalid();
+  }
+  if (problem.kind === "rootNotObject") {
+    return failure.jsonRootNotObject();
+  }
+  if (problem.kind === "trailing") {
+    return failure.jsonTrailing(problem.position);
+  }
+  const reasons: Record<JsonReason, string> = {
+    expectedString: failure.jsonExpectedString(),
+    unfinishedEscape: failure.jsonUnfinishedEscape(),
+    invalidUnicodeEscape: failure.jsonInvalidUnicodeEscape(),
+    invalidEscape: failure.jsonInvalidEscape(),
+    controlCharacter: failure.jsonControlCharacter(),
+    unterminatedString: failure.jsonUnterminatedString(),
+    duplicateKey: failure.jsonDuplicateKey(problem.key),
+    expectedColon: failure.jsonExpectedColon(),
+    expectedCommaOrBrace: failure.jsonExpectedCommaOrBrace(),
+    trailingComma: failure.jsonTrailingComma(),
+    unterminatedObject: failure.jsonUnterminatedObject(),
+    expectedCommaOrBracket: failure.jsonExpectedCommaOrBracket(),
+    unterminatedArray: failure.jsonUnterminatedArray(),
+    expectedValue: failure.jsonExpectedValue(),
+  };
+  return failure.jsonAt(problem.position, reasons[problem.reason]);
+};
+
 const parseSettingsDocument = (text: string): ParseDocumentResult => {
   let cursor = text.charCodeAt(0) === JSON_BOM_CODE ? 1 : 0;
-  let parseError: string | undefined;
+  let parseError: JsonProblem | undefined;
 
-  const fail = (reason: string): undefined => {
+  const fail = (reason: JsonReason, key = ""): undefined => {
     if (parseError === undefined) {
-      parseError = "Invalid settings JSON at character " + cursor + ": " + reason;
+      parseError = { kind: "at", position: cursor, reason, key };
     }
     return undefined;
   };
@@ -511,7 +565,7 @@ const parseSettingsDocument = (text: string): ParseDocumentResult => {
 
   const parseStringToken = (): { value: string; start: number; end: number } | undefined => {
     if (text[cursor] !== "\"") {
-      return fail("expected a string");
+      return fail("expectedString");
     }
 
     const start = cursor;
@@ -529,7 +583,7 @@ const parseSettingsDocument = (text: string): ParseDocumentResult => {
       if (character === "\\") {
         cursor += 1;
         if (cursor >= text.length) {
-          return fail("unfinished escape");
+          return fail("unfinishedEscape");
         }
 
         const escaped = text[cursor];
@@ -568,24 +622,24 @@ const parseSettingsDocument = (text: string): ParseDocumentResult => {
           const hexEnd = hexStart + JSON_UNICODE_ESCAPE_LENGTH;
           const hex = text.slice(hexStart, hexEnd);
           if (hex.length !== JSON_UNICODE_ESCAPE_LENGTH || !UNICODE_ESCAPE_PATTERN.test(hex)) {
-            return fail("invalid unicode escape");
+            return fail("invalidUnicodeEscape");
           }
           value += String.fromCharCode(Number.parseInt(hex, HEX_RADIX));
           cursor = hexEnd;
           continue;
         }
-        return fail("invalid escape");
+        return fail("invalidEscape");
       }
 
       if (code < JSON_CONTROL_LIMIT) {
-        return fail("unescaped control character");
+        return fail("controlCharacter");
       }
 
       value += character;
       cursor += 1;
     }
 
-    return fail("unterminated string");
+    return fail("unterminatedString");
   };
 
   let parseValue: () => JsonNode | undefined = () => undefined;
@@ -609,12 +663,12 @@ const parseSettingsDocument = (text: string): ParseDocumentResult => {
         return undefined;
       }
       if (keys.has(keyToken.value)) {
-        return fail("duplicate object key " + JSON.stringify(keyToken.value));
+        return fail("duplicateKey", JSON.stringify(keyToken.value));
       }
       keys.add(keyToken.value);
       skipWhitespace();
       if (text[cursor] !== ":") {
-        return fail("expected ':'");
+        return fail("expectedColon");
       }
       cursor += 1;
       skipWhitespace();
@@ -636,16 +690,16 @@ const parseSettingsDocument = (text: string): ParseDocumentResult => {
         return { kind: "object", start, end: cursor, closeStart, properties };
       }
       if (text[cursor] !== ",") {
-        return fail("expected ',' or '}'");
+        return fail("expectedCommaOrBrace");
       }
       cursor += 1;
       skipWhitespace();
       if (text[cursor] === "}") {
-        return fail("trailing comma");
+        return fail("trailingComma");
       }
     }
 
-    return fail("unterminated object");
+    return fail("unterminatedObject");
   };
 
   const parseArray = (): JsonArrayNode | undefined => {
@@ -674,16 +728,16 @@ const parseSettingsDocument = (text: string): ParseDocumentResult => {
         return { kind: "array", start, end: cursor, closeStart, items };
       }
       if (text[cursor] !== ",") {
-        return fail("expected ',' or ']'");
+        return fail("expectedCommaOrBracket");
       }
       cursor += 1;
       skipWhitespace();
       if (text[cursor] === "]") {
-        return fail("trailing comma");
+        return fail("trailingComma");
       }
     }
 
-    return fail("unterminated array");
+    return fail("unterminatedArray");
   };
 
   parseValue = (): JsonNode | undefined => {
@@ -721,20 +775,20 @@ const parseSettingsDocument = (text: string): ParseDocumentResult => {
       return { kind: "number", start, end: cursor, value: Number(numberMatch[0]) };
     }
 
-    return fail("expected a JSON value");
+    return fail("expectedValue");
   };
 
   skipWhitespace();
   const root = parseValue();
   if (root === undefined) {
-    return { ok: false, error: parseError ?? "Invalid settings JSON" };
+    return { ok: false, problem: parseError ?? { kind: "invalid" } };
   }
   skipWhitespace();
   if (cursor !== text.length) {
-    return { ok: false, error: "Invalid settings JSON at character " + cursor + ": unexpected trailing content" };
+    return { ok: false, problem: { kind: "trailing", position: cursor } };
   }
   if (root.kind !== "object") {
-    return { ok: false, error: "Invalid settings JSON: the root value must be an object" };
+    return { ok: false, problem: { kind: "rootNotObject" } };
   }
   return { ok: true, root };
 };
@@ -2154,28 +2208,28 @@ const anchorOutputRecord = (
   return record;
 };
 
-const runMerge = (request: SettingsMergeRequest): SettingsMergeResult => {
+const runMerge = (request: SettingsMergeRequest, messages: Messages): SettingsMergeResult => {
   if (typeof request.currentText !== "string"
     || !isUnknownArray(request.desiredEntries)
     || !isUnknownArray(request.ownershipRecords)
     || (request.mode !== "install" && request.mode !== "apply")
     || typeof request.backupPath !== "string") {
-    return { ok: false, error: "Invalid settings merge request" };
+    return { ok: false, error: messages.failure.mergeRequestInvalid() };
   }
 
   const parsedInitial = parseSettingsDocument(request.currentText);
   if (!parsedInitial.ok) {
-    return { ok: false, error: parsedInitial.error };
+    return { ok: false, error: describeJsonProblem(parsedInitial.problem, messages) };
   }
 
   const desiredEntries: DesiredSettingEntry[] = [];
   const desiredById = new Map<string, DesiredSettingEntry>();
   for (const entry of request.desiredEntries) {
     if (!isDesiredSetting(entry) || entry.id.trim().length === 0) {
-      return { ok: false, error: "Invalid desired settings entry" };
+      return { ok: false, error: messages.failure.desiredEntryInvalid() };
     }
     if (desiredById.has(entry.id)) {
-      return { ok: false, error: "Duplicate desired settings entry id: " + entry.id };
+      return { ok: false, error: messages.failure.desiredEntryDuplicate(entry.id) };
     }
     desiredEntries.push(entry);
     desiredById.set(entry.id, entry);
@@ -2186,10 +2240,10 @@ const runMerge = (request: SettingsMergeRequest): SettingsMergeResult => {
   for (const rawRecord of request.ownershipRecords) {
     const record = normalizeOwnershipRecord(rawRecord);
     if (record === undefined) {
-      return { ok: false, error: "Invalid settings ownership record" };
+      return { ok: false, error: messages.failure.ownershipRecordInvalid() };
     }
     if (previousById.has(record.id)) {
-      return { ok: false, error: "Duplicate settings ownership record id: " + record.id };
+      return { ok: false, error: messages.failure.ownershipRecordDuplicate(record.id) };
     }
     previousRecords.push(record);
     previousById.set(record.id, record);
@@ -2263,7 +2317,7 @@ const runMerge = (request: SettingsMergeRequest): SettingsMergeResult => {
 
   const parsedFinal = parseSettingsDocument(work.text);
   if (!parsedFinal.ok) {
-    return { ok: false, error: "Settings merge produced invalid JSON: " + parsedFinal.error };
+    return { ok: false, error: messages.failure.mergeProducedInvalidJson(describeJsonProblem(parsedFinal.problem, messages)) };
   }
 
   const anchoredRecords = outputRecords.map((record) =>
@@ -2280,10 +2334,11 @@ const runMerge = (request: SettingsMergeRequest): SettingsMergeResult => {
 };
 
 export const mergeSettings = (request: SettingsMergeRequest): SettingsMergeResult => {
+  const messages = typeof request.messages === "object" && request.messages !== null ? request.messages : messagesFor(DEFAULT_LANGUAGE);
   try {
-    return runMerge(request);
+    return runMerge(request, messages);
   } catch (error: unknown) {
-    const detail = error instanceof Error ? error.message : "unexpected error";
-    return { ok: false, error: "Settings merge failed: " + detail };
+    const detail = error instanceof Error ? error.message : messages.failure.unexpectedError();
+    return { ok: false, error: messages.failure.mergeFailed(detail) };
   }
 };

@@ -2,7 +2,7 @@ import type { AssetManifest, FeatureManifest, HookManifest } from "./feature.js"
 import type { JsonObject, DesiredSettingEntry } from "./settings/merge-settings.js";
 import type { AssetPlan, AssetRecord, PluginPlan, PluginRecord } from "./assets/installer.js";
 import type { JournalDependencies, PlannedEvent } from "./apply-journal.js";
-import type { Language } from "./messages.js";
+import type { Language, Messages } from "./messages.js";
 import type { RigState } from "./state.js";
 import type { Result } from "./result.js";
 import type { RuntimePorts } from "./ports.js";
@@ -61,7 +61,8 @@ export type PluginChanges = {
 };
 
 export const applyRig = async (runtime: RuntimePorts, request: ApplyRequest): Promise<Result<ApplyOutcome>> => {
-	const featuresResult = await loadFeatures(runtime.fs, request.state.paths.repo);
+	const messages = messagesFor(runtime.language);
+	const featuresResult = await loadFeatures(runtime.fs, request.state.paths.repo, messages);
 	if (!featuresResult.ok) return featuresResult;
 	const manifests = featuresResult.value;
 	const enabled = new Set(manifests.filter((feature) => feature.name === "base" || request.state.features[feature.name] === true).map((feature) => feature.name));
@@ -73,11 +74,11 @@ export const applyRig = async (runtime: RuntimePorts, request: ApplyRequest): Pr
 	const settingsPath = joinPath(claudeHome, SETTINGS_FILENAME);
 	const statePath = joinPath(runtime.home, ".agent-rig", "state.json");
 	const [codexRead, generatedRead, claudeRead, settingsRead, stateRead] = await Promise.all([
-		readOptional(runtime, codexPath),
-		readOptional(runtime, generatedPath),
-		readOptional(runtime, claudePath),
-		readOptional(runtime, settingsPath),
-		readOptional(runtime, statePath),
+		readOptional(runtime, codexPath, messages),
+		readOptional(runtime, generatedPath, messages),
+		readOptional(runtime, claudePath, messages),
+		readOptional(runtime, settingsPath, messages),
+		readOptional(runtime, statePath, messages),
 	]);
 	if (!codexRead.ok) return codexRead;
 	if (!generatedRead.ok) return generatedRead;
@@ -86,12 +87,13 @@ export const applyRig = async (runtime: RuntimePorts, request: ApplyRequest): Pr
 	if (!stateRead.ok) return stateRead;
 	let persistedState: RigState | null = null;
 	if (stateRead.value !== null) {
-		const parsedState = parseState(stateRead.value);
+		const parsedState = parseState(stateRead.value, messages);
 		if (!parsedState.ok) return parsedState;
 		persistedState = parsedState.value;
 	}
 	const baseState = withoutJournal(request.state);
 	const journalDependencies: JournalDependencies = {
+		messages,
 		fs: runtime.fs,
 		assetFs: runtime.assetFs,
 		home: runtime.home,
@@ -126,7 +128,6 @@ export const applyRig = async (runtime: RuntimePorts, request: ApplyRequest): Pr
 	const desiredSettingsResult = buildDesiredSettings(manifests, enabled, runtime, placeholders, request.state.mode, hookPrograms.value);
 	if (!desiredSettingsResult.ok) return desiredSettingsResult;
 	const settingRecords = parseSettingRecords(records);
-	const messages = messagesFor(runtime.language);
 	const invalidSettings = (error: string): string => messages.apply.settingsInvalid(error, settingsPath);
 	// A first merge only checks that settings.json can be merged. Nothing is written until every plan is valid.
 	const draftMerge = mergeSettings({
@@ -139,10 +140,11 @@ export const applyRig = async (runtime: RuntimePorts, request: ApplyRequest): Pr
 	});
 	if (!draftMerge.ok) return err(invalidSettings(draftMerge.error));
 	const pluginRecords = readPluginRecords(records);
-	const pluginPlansResult = await buildPluginPlans(runtime.fs, manifests, enabled, request.state.paths.hub, request.state.paths.repo, runtime.platform, pluginRecords);
+	const pluginPlansResult = await buildPluginPlans(runtime.fs, manifests, enabled, request.state.paths.hub, request.state.paths.repo, runtime.platform, pluginRecords, messages);
 	if (!pluginPlansResult.ok) return pluginPlansResult;
 	const assetEnvironment = {
 		fs: runtime.assetFs,
+		messages,
 		now: () => runtime.clock.nowText(),
 		boundaryPath: claudeHome,
 	};
@@ -153,11 +155,11 @@ export const applyRig = async (runtime: RuntimePorts, request: ApplyRequest): Pr
 		{ path: generatedPath, content: assembled.claude },
 		{ path: claudePath, content: ensureClaudeImports(claudeRead.value ?? "") },
 	];
-	const ruleRead = (path: string) => readOptional(runtime, path);
+	const ruleRead = (path: string) => readOptional(runtime, path, messages);
 	const rulePorts = {
 		read: ruleRead,
 		write: async (path: string, content: string): Promise<Result<void>> => {
-			const result = await atomicWrite(runtime.fs, path, content);
+			const result = await atomicWrite(runtime.fs, path, content, messages);
 			return result.ok ? ok(undefined) : result;
 		},
 		rename: async (from: string, to: string): Promise<Result<void>> => {
@@ -169,6 +171,7 @@ export const applyRig = async (runtime: RuntimePorts, request: ApplyRequest): Pr
 			}
 		},
 		clock: () => today,
+		messages,
 	};
 	const rulePlanned = await planRuleFiles(ruleFiles, rulePorts);
 	if (!rulePlanned.ok) return rulePlanned;
@@ -177,15 +180,16 @@ export const applyRig = async (runtime: RuntimePorts, request: ApplyRequest): Pr
 	const plugins = await applyPlugins({
 		runner: { run: (command, args) => runtime.process.run(command, args) },
 		claudeCommand: "claude",
+		messages,
 	}, keepKnownDisabledPlugins(pluginPlansResult.value, pluginRecords), pluginRecords);
 	if (!plugins.ok) return plugins;
-	const settingsCurrent = await readOptional(runtime, settingsPath);
+	const settingsCurrent = await readOptional(runtime, settingsPath, messages);
 	if (!settingsCurrent.ok) return settingsCurrent;
 	const currentSettingsText = settingsCurrent.value ?? EMPTY_SETTINGS_TEXT;
 	const settingsBackup = await chooseBackupPath(settingsBackupBase, hashText(currentSettingsText), async (path) => {
-		const existing = await readOptional(runtime, path);
+		const existing = await readOptional(runtime, path, messages);
 		return existing.ok ? ok(existing.value === null ? null : hashText(existing.value)) : existing;
-	});
+	}, messages);
 	if (!settingsBackup.ok) return settingsBackup;
 	const settingsMerge = mergeSettings({
 		currentText: currentSettingsText,
@@ -240,10 +244,10 @@ export const applyRig = async (runtime: RuntimePorts, request: ApplyRequest): Pr
 	const changedFiles: string[] = [];
 	if (settingsWriteText !== null) {
 		if (settingsCurrent.value !== null && !settingsBackup.value.exists) {
-			const backup = await atomicWrite(runtime.fs, settingsBackup.value.path, settingsCurrent.value);
+			const backup = await atomicWrite(runtime.fs, settingsBackup.value.path, settingsCurrent.value, messages);
 			if (!backup.ok) return backup;
 		}
-		const settingsWrite = await atomicWrite(runtime.fs, settingsPath, settingsWriteText);
+		const settingsWrite = await atomicWrite(runtime.fs, settingsPath, settingsWriteText, messages);
 		if (!settingsWrite.ok) return settingsWrite;
 		changedFiles.push(settingsPath);
 	}
@@ -283,12 +287,13 @@ const withoutJournal = (state: RigState): RigState => {
 };
 
 const saveState = async (runtime: RuntimePorts, state: RigState): Promise<Result<void>> => {
+	const messages = messagesFor(runtime.language);
 	try {
 		await runtime.fs.ensureDirectory(joinPath(runtime.home, ".agent-rig"));
 	} catch (error) {
-		return err(`Could not write state after apply: ${errorText(error)}`);
+		return err(messages.failure.applyStateWriteFailed(errorText(error)));
 	}
-	const written = await writeState(runtime.fs, runtime.home, state);
+	const written = await writeState(runtime.fs, runtime.home, state, messages);
 	return written.ok ? ok(undefined) : written;
 };
 
@@ -300,6 +305,7 @@ const buildDesiredSettings = (
 	mode: RigState["mode"],
 	programs: HookPrograms,
 ): Result<DesiredSettingEntry[]> => {
+	const messages = messagesFor(runtime.language);
 	const entries: DesiredSettingEntry[] = mode === "server"
 		? [{ id: UPDATE_CHANNEL_SETTING_ID, kind: "install-default", path: UPDATE_CHANNEL_PATH, value: SERVER_UPDATE_CHANNEL }]
 		: [];
@@ -322,7 +328,7 @@ const buildDesiredSettings = (
 		for (const setting of feature.settings) {
 			if (setting.platform !== undefined && setting.platform !== runtime.platform) continue;
 			const path = setting.path ?? setting.key.split(".");
-			const settingValue = resolveJsonPlaceholders(setting.value, placeholders, `${feature.name} setting ${setting.key}`);
+			const settingValue = resolveJsonPlaceholders(setting.value, placeholders, `${feature.name} setting ${setting.key}`, messages);
 			if (!settingValue.ok) return settingValue;
 			// The id names the setting by its key and, for a list, by the entry. A manifest position is not part of it,
 			// so reordering or inserting a setting never changes who owns which value.
@@ -330,7 +336,7 @@ const buildDesiredSettings = (
 			if (setting.kind === "install-default") {
 				entries.push({ id: baseId, kind: "install-default", path, value: settingValue.value });
 			} else if (setting.kind === "list-entry" || (setting.kind === undefined && isListSetting(path))) {
-				if (typeof settingValue.value !== "string") return err(`Feature ${feature.name} setting ${setting.key} must be a string list entry`);
+				if (typeof settingValue.value !== "string") return err(messages.failure.settingNotStringListEntry(feature.name, setting.key));
 				entries.push({ id: setting.id ?? `${baseId}:${settingValue.value}`, feature: feature.name, kind: "list-entry", path, value: settingValue.value });
 			} else {
 				entries.push({ id: baseId, feature: feature.name, kind: "value", path, value: settingValue.value });
@@ -346,13 +352,14 @@ const hookSettingValue = (
 	language: Language,
 	programs: HookPrograms,
 ): Result<JsonObject> => {
-	const command = resolvePlaceholders(resolvedHookCommand(hook.command, programs, hook.args !== undefined, hook.shell), placeholders, `${hook.event} hook command`);
+	const messages = messagesFor(language);
+	const command = resolvePlaceholders(resolvedHookCommand(hook.command, programs, hook.args !== undefined, hook.shell), placeholders, `${hook.event} hook command`, messages);
 	if (!command.ok) return command;
 	const value: JsonObject = { type: "command", command: command.value };
 	if (hook.args !== undefined) {
 		const args: string[] = [];
 		for (const [index, argument] of hook.args.entries()) {
-			const resolved = resolvePlaceholders(argument, placeholders, `${hook.event} hook arg ${index}`);
+			const resolved = resolvePlaceholders(argument, placeholders, `${hook.event} hook arg ${index}`, messages);
 			if (!resolved.ok) return resolved;
 			args.push(resolved.value);
 		}
@@ -401,6 +408,7 @@ const loadRuleChunks = async (
 	repoPath: string,
 	placeholders: Readonly<Record<string, string>>,
 ): Promise<Result<Array<{ target: "shared" | "claude"; text: string }>>> => {
+	const messages = messagesFor(runtime.language);
 	const chunks: Array<{ target: "shared" | "claude"; text: string }> = [];
 	for (const feature of manifests) {
 		if (!enabled.has(feature.name) || !feature.platforms.includes(platform)) continue;
@@ -416,9 +424,9 @@ const loadRuleChunks = async (
 			try {
 				text = await runtime.fs.readText(rulePath);
 			} catch (error) {
-				return err(`Could not read rule chunk ${rulePath}: ${errorText(error)}`);
+				return err(messages.failure.ruleChunkReadFailed(rulePath, errorText(error)));
 			}
-			const resolved = resolvePlaceholders(text, placeholders, rulePath);
+			const resolved = resolvePlaceholders(text, placeholders, rulePath, messages);
 			if (!resolved.ok) return resolved;
 			chunks.push({ target: rule.target, text: resolved.value });
 		}
@@ -458,6 +466,7 @@ const buildPluginPlans = async (
 	repoPath: string,
 	platform: RuntimePorts["platform"],
 	pluginRecords: Readonly<Record<string, PluginRecord>>,
+	messages: Messages,
 ): Promise<Result<PluginPlan[]>> => {
 	const plans: PluginPlan[] = [];
 	const marketplaces = new Map<string, Result<MarketplaceManifest>>();
@@ -471,33 +480,33 @@ const buildPluginPlans = async (
 					continue;
 				}
 				const cached = marketplaces.get(local.path);
-				const manifest = cached ?? await readMarketplaceManifest(fs, local.path, local.label);
+				const manifest = cached ?? await readMarketplaceManifest(fs, local.path, local.label, messages);
 				marketplaces.set(local.path, manifest);
 				if (!manifest.ok) return manifest;
 				if (local.mustBeListed && !manifest.value.plugins.includes(local.name)) {
-					return err(`The ${local.label} ${manifestPathOf(local.path)} does not list the plugin ${local.name}`);
+					return err(messages.failure.pluginNotListed(messages.failure.marketplaceLabel(local.label), manifestPathOf(local.path), local.name));
 				}
 				plans.push({ enabled: true, id: `${local.name}@${manifest.value.name}`, marketplace: manifest.value.name, source: local.path });
 				continue;
 			}
 			const marketplace = plugin.slice(plugin.indexOf("@") + 1);
 			const source = marketplaceSource(marketplace);
-			if (source === null) return err(`Plugin ${plugin} refers to unknown marketplace ${marketplace}`);
+			if (source === null) return err(messages.failure.pluginUnknownMarketplace(plugin, marketplace));
 			plans.push({ enabled: isEnabled, id: plugin, marketplace, source });
 		}
 	}
 	return ok(plans);
 };
 
-type LocalPluginOrigin = { name: string; path: string; label: string; mustBeListed: boolean };
+type LocalPluginOrigin = { name: string; path: string; label: "rig-plugin" | "hub"; mustBeListed: boolean };
 
 export const localPluginOrigin = (plugin: string, hubPath: string, repoPath: string): LocalPluginOrigin | null => {
 	if (plugin.startsWith(RIG_PLUGIN_PREFIX)) {
 		const folder = plugin.slice(RIG_PLUGIN_PREFIX.length);
-		return { name: folder, path: joinPath(repoPath, RIG_PLUGINS_DIRECTORY, folder), label: "rig plugin marketplace manifest", mustBeListed: true };
+		return { name: folder, path: joinPath(repoPath, RIG_PLUGINS_DIRECTORY, folder), label: "rig-plugin", mustBeListed: true };
 	}
 	if (plugin.includes("@")) return null;
-	return { name: plugin, path: hubPath, label: "hub marketplace manifest", mustBeListed: false };
+	return { name: plugin, path: hubPath, label: "hub", mustBeListed: false };
 };
 
 // A disabled local plugin is not looked up again: its recorded ids are uninstalled under the names they were installed with.
@@ -510,21 +519,22 @@ type MarketplaceManifest = { name: string; plugins: string[] };
 
 const manifestPathOf = (directory: string): string => joinPath(directory, MARKETPLACE_DIRECTORY, MARKETPLACE_FILENAME);
 
-export const readMarketplaceManifest = async (fs: FileSystem, directory: string, label: string): Promise<Result<MarketplaceManifest>> => {
+export const readMarketplaceManifest = async (fs: FileSystem, directory: string, kind: "rig-plugin" | "hub", messages: Messages): Promise<Result<MarketplaceManifest>> => {
+	const label = messages.failure.marketplaceLabel(kind);
 	const path = manifestPathOf(directory);
 	let text: string;
 	try {
 		text = await fs.readText(path);
 	} catch (error) {
-		return err(`Cannot read the ${label} ${path}: ${errorText(error)}`);
+		return err(messages.failure.marketplaceReadFailed(label, path, errorText(error)));
 	}
 	let value: unknown;
 	try {
 		value = JSON.parse(text);
 	} catch {
-		return err(`The ${label} ${path} is not valid JSON`);
+		return err(messages.failure.marketplaceInvalidJson(label, path));
 	}
-	if (!isMarketplaceName(value)) return err(`The ${label} ${path} does not declare a marketplace name`);
+	if (!isMarketplaceName(value)) return err(messages.failure.marketplaceNoName(label, path));
 	const listed: unknown[] = Array.isArray(value.plugins) ? value.plugins : [];
 	const plugins = listed.flatMap((entry) => (isObject(entry) && typeof entry.name === "string" ? [entry.name] : []));
 	return ok({ name: value.name, plugins });
@@ -588,12 +598,12 @@ const isPluginRecord = (value: unknown): value is PluginRecord => isObject(value
 
 const isObject = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 
-const readOptional = async (runtime: RuntimePorts, path: string): Promise<Result<string | null>> => {
+const readOptional = async (runtime: RuntimePorts, path: string, messages: Messages): Promise<Result<string | null>> => {
 	try {
 		return ok(await runtime.fs.readText(path));
 	} catch (error) {
 		if (isNotFound(error)) return ok(null);
-		return err(`Could not read ${path}: ${errorText(error)}`);
+		return err(messages.failure.readFailed(path, errorText(error)));
 	}
 };
 

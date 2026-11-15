@@ -1,3 +1,4 @@
+import type { Messages } from "./messages.js";
 import type { Result } from "./result.js";
 
 import { err, errorText, ok } from "./result.js";
@@ -54,7 +55,7 @@ export const joinPath = (...parts: string[]): string => {
 	return first.startsWith(UNC_PREFIX) && !first.startsWith("///") ? `/${collapsed}` : collapsed;
 };
 
-export const atomicWrite = async (fs: FileSystem, path: string, value: string): Promise<Result<void>> => {
+export const atomicWrite = async (fs: FileSystem, path: string, value: string, messages: Messages): Promise<Result<void>> => {
 	let temporaryPath = `${path}.tmp-${fs.uniqueSuffix()}`;
 	try {
 		const separator = path.lastIndexOf("/");
@@ -68,6 +69,6 @@ export const atomicWrite = async (fs: FileSystem, path: string, value: string): 
 		return ok(undefined);
 	} catch (error) {
 		await fs.remove(temporaryPath).catch(() => undefined);
-		return err(`Atomic write failed: ${errorText(error)}`);
+		return err(messages.failure.atomicWriteFailed(errorText(error)));
 	}
 };

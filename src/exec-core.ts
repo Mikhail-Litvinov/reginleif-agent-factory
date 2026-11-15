@@ -175,7 +175,7 @@ type StartTarget = { kind: "shell"; shell: ExecShell; cwd: string; text: string 
 
 const start = async (r: RuntimePorts, target: StartTarget): Promise<ApiResult<JsonValue>> => {
 	const m = messagesFor(r.language).exec;
-	const state = await readState(r.fs, r.home);
+	const state = await readState(r.fs, r.home, messagesFor(r.language));
 	if (!state.ok) return apiFail(EXEC_IO, m.io(state.error));
 	let resolved = "";
 	if (target.kind === "rig") {
@@ -212,7 +212,7 @@ const start = async (r: RuntimePorts, target: StartTarget): Promise<ApiResult<Js
 		if (!created.ok) return apiFail(EXEC_IO, m.io(created.error));
 		if (!created.value) return apiFail(EXEC_INVALID, m.invalid());
 		const spawned = await r.process.spawnDetached([r.executablePath, r.resolvePath(state.value.paths.repo, "src", "cli.ts"), "exec-runner", id], 0, EXEC_RUNNER_STDERR_LIMIT, file(r, id, "runner-stderr"), { windowsHide: true });
-		if (!spawned.ok || spawned.value.pid === undefined) { const reason = spawned.ok ? "Missing process ID" : spawned.error; await r.fs.writeExclusive(file(r, id, "exit.json"), JSON.stringify({ kind: "lost", code: null, at: r.clock.nowText(), reason: "start-failed" })); return apiFail(EXEC_LAUNCH, m.launch(reason)); }
+		if (!spawned.ok || spawned.value.pid === undefined) { const reason = spawned.ok ? messagesFor(r.language).failure.missingProcessId() : spawned.error; await r.fs.writeExclusive(file(r, id, "exit.json"), JSON.stringify({ kind: "lost", code: null, at: r.clock.nowText(), reason: "start-failed" })); return apiFail(EXEC_LAUNCH, m.launch(reason)); }
 		const pid = spawned.value.pid;
 		const started: JsonValue = record.shell === "rig" ? { id, shell: "rig", pid, startedAt: record.startedAt } : { id, shell: record.shell, cwd: resolved, pid, startedAt: record.startedAt };
 		return apiOk(started);
@@ -309,7 +309,7 @@ const stop = async (r: RuntimePorts, id: string): Promise<ApiResult<JsonValue>> 
 		return early.ok ? apiOk({ id, stopping: true }) : early;
 	}
 	const parsed = identity.value;
-	if (!validIdentity(parsed)) return apiFail(EXEC_LAUNCH, messagesFor(r.language).exec.launch("Process identity unavailable"));
+	if (!validIdentity(parsed)) return apiFail(EXEC_LAUNCH, messagesFor(r.language).exec.launch(messagesFor(r.language).failure.processIdentityUnavailable()));
 	const { pid, pidCreated } = parsed;
 	const created = await r.process.createdAt([pid]);
 	if (!created.ok) return apiFail(EXEC_IO, messagesFor(r.language).exec.io(created.error));
@@ -344,7 +344,7 @@ export const listExecs = async (r: RuntimePorts): Promise<ApiResult<{ runs: Summ
 
 // Rig's own CLI runs with the runner's environment minus the secret-bearing variables: its commands read none of them.
 const rigLaunch = async (r: RuntimePorts, args: readonly string[]): Promise<ApiResult<ShellLaunch>> => {
-	const state = await readState(r.fs, r.home);
+	const state = await readState(r.fs, r.home, messagesFor(r.language));
 	if (!state.ok) return apiFail(EXEC_IO, messagesFor(r.language).exec.io(state.error));
 	return apiOk({ argv: [r.executablePath, r.resolvePath(state.value.paths.repo, "src", "cli.ts"), ...args], env: cleanEnvironment(r.environment.entries()), files: [] });
 };
@@ -435,17 +435,17 @@ export const runExecRunner = async (r: RuntimePorts, id: string, build: ShellBui
 		const pid = r.lock.process.pid;
 		const created = await r.process.createdAt([pid]);
 		const pidCreated = created.ok ? created.value[pid] : null;
-		if (!pidCreated) { await finish({ kind: "exit", code: null, at: r.clock.nowText(), reason: created.ok ? "Process identity unavailable" : created.error }); return 1; }
-		const identity = await atomicWrite(r.fs, file(r, id, "identity.json"), JSON.stringify({ pid, pidCreated }));
+		if (!pidCreated) { await finish({ kind: "exit", code: null, at: r.clock.nowText(), reason: created.ok ? messagesFor(r.language).failure.processIdentityUnavailable() : created.error }); return 1; }
+		const identity = await atomicWrite(r.fs, file(r, id, "identity.json"), JSON.stringify({ pid, pidCreated }), messagesFor(r.language));
 		if (!identity.ok) { await finish({ kind: "exit", code: null, at: r.clock.nowText(), reason: identity.error }); return 1; }
 		// A stop recorded before the identity existed is honoured here: the run ends stopped and no shell is launched.
 		if (await r.fs.stat(file(r, id, "stop-request")) !== null) { return (await finish({ kind: "stopped", code: null, at: r.clock.nowText() })) ? 0 : 1; }
 		const rig = record.value.shell === "rig" ? record.value : null;
-		const launch = rig !== null ? await rigLaunch(r, rig.args) : record.value.shell === "rig" ? apiFail(EXEC_INVALID, "Invalid exec record") : await build(r, record.value.shell, record.value.text, path);
+		const launch = rig !== null ? await rigLaunch(r, rig.args) : record.value.shell === "rig" ? apiFail(EXEC_INVALID, messagesFor(r.language).exec.invalid()) : await build(r, record.value.shell, record.value.text, path);
 		if (!launch.ok) { await finish({ kind: "exit", code: null, at: r.clock.nowText(), reason: launch.error.message }); return 1; }
 		for (const item of launch.value.files) await r.fs.writeBytes(item.path, item.bytes);
-		const beat = (): void => { void atomicWrite(r.fs, file(r, id, "heartbeat"), r.clock.nowText()); };
-		const initialBeat = await atomicWrite(r.fs, file(r, id, "heartbeat"), r.clock.nowText());
+		const beat = (): void => { void atomicWrite(r.fs, file(r, id, "heartbeat"), r.clock.nowText(), messagesFor(r.language)); };
+		const initialBeat = await atomicWrite(r.fs, file(r, id, "heartbeat"), r.clock.nowText(), messagesFor(r.language));
 		if (!initialBeat.ok) { await finish({ kind: "exit", code: null, at: r.clock.nowText(), reason: initialBeat.error }); return 1; }
 		const cancel = r.clock.every(EXEC_HEARTBEAT_MS, beat);
 		try {

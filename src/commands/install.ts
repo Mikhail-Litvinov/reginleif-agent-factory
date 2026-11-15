@@ -61,7 +61,7 @@ const installLocked = (
 		? await resolveDevPaths(runtime)
 		: ok({ repo: pathJoin(runtime.home, SERVER_REPO_PATH), hub: pathJoin(runtime.home, SERVER_HUB_PATH) });
 	if (!paths.ok) return paths;
-	const loaded = await loadFeatures(runtime.fs, paths.value.repo);
+	const loaded = await loadFeatures(runtime.fs, paths.value.repo, messagesFor(runtime.language));
 	if (!loaded.ok) return loaded;
 	const existing = await readExistingState(runtime);
 	if (!existing.ok) return existing;
@@ -115,7 +115,7 @@ const resolveDevPaths = async (runtime: RuntimePorts): Promise<Result<{ repo: st
 const readExistingState = async (runtime: RuntimePorts): Promise<Result<RigState | null>> => {
 	const path = pathJoin(runtime.home, ".agent-rig", "state.json");
 	try {
-		const parsed = parseState(await runtime.fs.readText(path));
+		const parsed = parseState(await runtime.fs.readText(path), messagesFor(runtime.language));
 		return parsed.ok ? ok(parsed.value) : parsed;
 	} catch (error) {
 		if (isNotFound(error)) return ok(null);

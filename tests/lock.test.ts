@@ -5,6 +5,9 @@ import { describe, expect, test } from "bun:test";
 import { TAKEOVER_STALE_MS, acquireLock, tryAcquireLock } from "../src/lock.js";
 import { err, ok } from "../src/result.js";
 import { MemoryFileSystem } from "./fakes/memory-runtime.js";
+import { messagesFor } from "../src/messages";
+
+const TEST_MESSAGES = messagesFor("en");
 
 const HOME = "/home/test";
 const LOCK_PATH = "/home/test/.agent-rig/rig.lock";
@@ -56,6 +59,7 @@ const dependenciesFor = (
 	home: HOME,
 	process: { pid, startTime, ownerStartTime },
 	clock: { sleep, now },
+	messages: TEST_MESSAGES,
 	pollIntervalMs: POLL_INTERVAL_MS,
 });
 
