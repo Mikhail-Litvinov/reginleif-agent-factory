@@ -1,3 +1,4 @@
+import type { Platform } from "../src/feature.js";
 import type { SessionRecord } from "../src/session-core.js";
 
 import { describe, expect, test } from "bun:test";
@@ -18,6 +19,10 @@ const LAUNCH_GRACE_MS = 2000;
 const session: SessionRecord = { id: ID, cwd: "/work", transcriptPath: "/transcript", pid: 42, pidCreated: CREATED, startedAt: CREATED, endedAt: CREATED };
 const raw = { session_id: ID, cwd: session.cwd, transcript_path: session.transcriptPath, pid: session.pid, pid_created: session.pidCreated, started_at: CREATED, ended_at: CREATED, config_dir: "/cfg/1-test" };
 const code = (result: { ok: true } | { ok: false; error: { code: string } }): string => result.ok ? "ok" : result.error.code;
+// Control characters, then every character that some launch-line parser reads as syntax or that is not in the identifier alphabet.
+const CONTROL = ["\t", "\n", "\r", "\x03", "\x15"];
+const CMD_LINE = ["&", "|", "<", ">", "^", "%", "\"", "!"];
+const NOT_IDENTIFIER = [...CONTROL, ...CMD_LINE, ";", "#", "(", ")", "'", "$", "~", "+", "=", ",", "[", "]", "\\", "/", "*", "?", ":", " "];
 const setup = () => {
 	const h = createMemoryRuntime();
 	h.fs.directories.add("/work");
@@ -27,6 +32,23 @@ const setup = () => {
 	h.runtime.clock.now = () => new Date(now);
 	h.runtime.clock.sleep = async (ms) => { now += ms; };
 	return h;
+};
+
+// The launch answer for a directory: the refusal message, or "ok" when the directory passed the check.
+const launchRefusal = async (platform: Platform, cwd: string): Promise<string> => {
+	const h = createMemoryRuntime(platform);
+	h.fs.directories.add(cwd);
+	const result = await prepareLaunch(h.runtime, { ...session, cwd }, "", null);
+	return result.ok ? "ok" : result.error.message;
+};
+// The launch answer for one plugin of the enabled telegram feature, resolved from a hub marketplace with the given name.
+const pluginAnswer = async (plugin: string, market: string): Promise<string> => {
+	const h = setup();
+	h.fs.seed(`${ROOT}/state.json`, JSON.stringify({ mode: "dev", paths: { repo: "/repo", hub: "/hub" }, features: { telegram: true }, records: {}, badPairs: [], pendingHubRestart: null }));
+	seedFeature(h.fs, "/repo", { ...baseManifest(), name: "telegram", plugins: [plugin] });
+	seedHubManifest(h.fs, "/hub", market);
+	const result = await prepareLaunch(h.runtime, session, "", null);
+	return result.ok ? "ok" : result.error.message;
 };
 
 describe("session run and mode", () => {
@@ -105,11 +127,38 @@ describe("session run and mode", () => {
 		expect(buildLaunchCommand({ ...facts, platform: "linux", plugins: [], tmux: true })).toEqual(["tmux", "new-session", "-d", "-c", "/work", "cswap", "run", "12", "--share-history", "--", "--resume", ID, "--permission-mode", "plan"]);
 		expect(buildLaunchCommand({ ...facts, platform: "linux", plugins: [] })).toBeNull();
 		for (const [account, mode] of [["bad&", "plan"], ["1", "unknown"]]) expect(code(await prepareLaunch(h.runtime, session, account, mode))).toBe("launch-invalid");
-		const windows = createMemoryRuntime("windows");
-		for (const character of ['"', "%", "&", "|", "<", ">", "^"]) expect(code(await prepareLaunch(windows.runtime, { ...session, cwd: `C:/bad${character}dir` }, "1", "plan"))).toBe("launch-invalid");
+		for (const character of NOT_IDENTIFIER) {
+			expect(code(await prepareLaunch(h.runtime, session, `1${character}`, null))).toBe("launch-invalid");
+			expect(code(await prepareLaunch(h.runtime, session, "", `plan${character}`))).toBe("launch-invalid");
+			expect(code(await prepareLaunch(h.runtime, { ...session, id: `${ID.slice(0, -1)}${character}` }, "", null))).toBe("launch-invalid");
+		}
 		h.runtime.process.isAvailable = async () => false;
 		expect(code(await prepareLaunch(h.runtime, session, "1", null))).toBe("launch-invalid");
 		expect(code(await prepareLaunch(h.runtime, session, "", null))).toBe("launch-unavailable");
+	});
+	test("refuses a directory whose characters the launch line cannot carry, per platform", async () => {
+		const message = messagesFor("en").session.launchDirectory();
+		for (const character of CMD_LINE) expect(await launchRefusal("windows", `C:/bad${character}dir`)).toBe(message);
+		for (const character of CONTROL) expect(await launchRefusal("windows", `C:/bad${character}dir`)).toBe(message);
+		for (const character of CONTROL) expect(await launchRefusal("darwin", `/bad${character}dir`)).toBe(message);
+		for (const character of [";", "#"]) expect(await launchRefusal("linux", `/bad${character}dir`)).toBe(message);
+	});
+	test("escapes a semicolon in a Windows directory for the wt.exe subcommand delimiter", async () => {
+		for (const [cwd, escaped] of [["C:/a;b", "C:/a\\;b"], ["C:/a\\;b", "C:/a\\\\;b"]]) {
+			const h = createMemoryRuntime("windows");
+			h.fs.directories.add(cwd);
+			h.fs.seed(`${ROOT}/state.json`, JSON.stringify({ mode: "dev", paths: { repo: "/repo", hub: "/hub" }, features: {}, records: {}, badPairs: [], pendingHubRestart: null }));
+			const result = await prepareLaunch(h.runtime, { ...session, cwd }, "", null);
+			expect(result.ok && result.value[result.value.indexOf("-d") + 1]).toBe(escaped);
+		}
+	});
+	test("refuses a plugin or marketplace name the launch line cannot carry", async () => {
+		const message = messagesFor("en").session.launchPlugin();
+		for (const character of NOT_IDENTIFIER) {
+			expect(await pluginAnswer(`p${character}x`, "test-market")).toBe(message);
+			expect(await pluginAnswer("test-channel", `m${character}x`)).toBe(message);
+			expect(await pluginAnswer(`p${character}x@test-market`, "test-market")).toBe(message);
+		}
 	});
 	test("reads last transcript mode including default and malformed records", async () => {
 		const h = setup();

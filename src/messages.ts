@@ -80,6 +80,7 @@ export const en = {
 		launchMode: (): string => "Invalid permission mode",
 		launchDirectory: (): string => "Invalid launch directory",
 		launchDirectoryMissing: (): string => "Launch directory does not exist",
+		launchPlugin: (): string => "Plugin or marketplace name contains characters that a launch command cannot carry",
 		accountNumber: (): string => "Account must be a number",
 		alreadyRunning: (): string => "Session is already running",
 		launchTimeout: (): string => "Session did not start in time",

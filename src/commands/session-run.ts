@@ -6,6 +6,7 @@ import { localPluginOrigin, readMarketplaceManifest } from "../apply.js";
 import { readFeature } from "../feature.js";
 import { joinPath } from "../file-system.js";
 import { buildLaunchCommand } from "../launch-command.js";
+import { launchPath, LAUNCH_TOKEN } from "../launch-safety.js";
 import { messagesFor } from "../messages.js";
 import { apiFail, apiOk, ERROR_CODE_USAGE, LAUNCH_FAILED, LAUNCH_ACCOUNT_LOOKUP, LAUNCH_INVALID, LAUNCH_UNAVAILABLE, LAUNCH_TIMEOUT, SESSION_RUNNING } from "../output.js";
 import { errorText } from "../result.js";
@@ -22,9 +23,7 @@ const MODE_BLOCK_BYTES = 1024 * 1024;
 const DEFAULT_TIMEOUT_SEC = 90;
 const MS_PER_SECOND = 1000;
 const MODES = ["manual", "auto", "acceptEdits", "plan", "dontAsk"] as const;
-const ACCOUNT = /^[\w.@-]+$/;
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const WINDOWS_SPECIAL = /["%&|<>^]/;
 
 type LaunchResult = { session: string; pid: number; mode: string | null; account: number | null };
 type SpawnLaunch = (command: string[]) => Promise<ApiResult<null>>;
@@ -35,9 +34,11 @@ const invalid = (message: string): ApiResult<never> => apiFail(LAUNCH_INVALID, m
 export const prepareLaunch = async (runtime: RuntimePorts, session: SessionRecord, account: string, mode: string | null): Promise<ApiResult<string[]>> => {
 	const m = messagesFor(runtime.language).session;
 	if (!SESSION_ID.test(session.id)) return invalid(m.launchSessionId());
-	if (account !== "" && !ACCOUNT.test(account)) return invalid(m.launchAccount());
+	if (account !== "" && !LAUNCH_TOKEN.test(account)) return invalid(m.launchAccount());
 	if (mode !== null && !validMode(mode)) return invalid(m.launchMode());
-	if (session.cwd === null || (runtime.platform === "windows" && WINDOWS_SPECIAL.test(session.cwd))) return invalid(m.launchDirectory());
+	if (session.cwd === null) return invalid(m.launchDirectory());
+	const cwd = launchPath(runtime.platform, session.cwd);
+	if (!cwd.ok) return invalid(m.launchDirectory());
 	try { await runtime.fs.listDirectory(session.cwd); } catch { return invalid(m.launchDirectoryMissing()); }
 	const state = await readRigState(runtime);
 	if (!state.ok) return apiFail(INFO_ERROR_STATE_UNREADABLE, state.error);
@@ -47,11 +48,15 @@ export const prepareLaunch = async (runtime: RuntimePorts, session: SessionRecor
 		if (!feature.ok) return invalid(feature.error);
 		for (const plugin of feature.value.plugins) {
 			const origin = localPluginOrigin(plugin, state.value.paths.hub, state.value.paths.repo);
-			if (origin === null) { plugins.push(plugin); continue; }
-			const marketplace = await readMarketplaceManifest(runtime.fs, origin.path, origin.label);
-			if (!marketplace.ok) return invalid(marketplace.error);
-			if (origin.mustBeListed && !marketplace.value.plugins.includes(origin.name)) return invalid(m.pluginMissingFromMarketplace(origin.name, marketplace.value.name));
-			plugins.push(`${origin.name}@${marketplace.value.name}`);
+			let id = plugin;
+			if (origin !== null) {
+				const marketplace = await readMarketplaceManifest(runtime.fs, origin.path, origin.label);
+				if (!marketplace.ok) return invalid(marketplace.error);
+				if (origin.mustBeListed && !marketplace.value.plugins.includes(origin.name)) return invalid(m.pluginMissingFromMarketplace(origin.name, marketplace.value.name));
+				id = `${origin.name}@${marketplace.value.name}`;
+			}
+			if (!LAUNCH_TOKEN.test(id)) return invalid(m.launchPlugin());
+			plugins.push(id);
 		}
 	}
 	const cswap = await runtime.process.isAvailable("cswap");
@@ -59,7 +64,7 @@ export const prepareLaunch = async (runtime: RuntimePorts, session: SessionRecor
 	const display = Boolean(runtime.environment.get("DISPLAY") || runtime.environment.get("WAYLAND_DISPLAY"));
 	const terminal = runtime.platform === "linux" && display && await runtime.process.isAvailable("x-terminal-emulator");
 	const tmux = runtime.platform === "linux" && !terminal && await runtime.process.isAvailable("tmux");
-	const command = buildLaunchCommand({ platform: runtime.platform, cwd: session.cwd, session: session.id, account, mode, plugins, cswap, display, terminal, tmux });
+	const command = buildLaunchCommand({ platform: runtime.platform, cwd: cwd.value, session: session.id, account, mode, plugins, cswap, display, terminal, tmux });
 	return command === null ? apiFail(LAUNCH_UNAVAILABLE, m.launchUnavailable()) : apiOk(command);
 };
 

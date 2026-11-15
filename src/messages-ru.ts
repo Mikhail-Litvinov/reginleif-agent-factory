@@ -67,6 +67,7 @@ export const ru: Messages = {
 		launchMode: (): string => "Некорректный режим разрешений",
 		launchDirectory: (): string => "Некорректный каталог запуска",
 		launchDirectoryMissing: (): string => "Каталог запуска не существует",
+		launchPlugin: (): string => "Имя плагина или маркетплейса содержит символы, которые нельзя передать в команду запуска",
 		accountNumber: (): string => "Аккаунт должен быть числом",
 		alreadyRunning: (): string => "Сессия уже запущена",
 		launchTimeout: (): string => "Сессия не запустилась вовремя",
