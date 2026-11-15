@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import { runExecCommand } from "../src/commands/exec.js";
-import { EXEC_LOG_CHUNK_BYTES, EXEC_MAX_RUNS, EXEC_STALE_MS, listExecs, runExecRunner, startExec, startRigExec, statusExec, stopExec } from "../src/exec-core.js";
+import { EXEC_LOG_CHUNK_BYTES, EXEC_MAX_RUNS, EXEC_STALE_MS, EXEC_STOP_GRACE_MS, listExecs, runExecRunner, startExec, startRigExec, statusExec, stopExec } from "../src/exec-core.js";
 import { apiOk } from "../src/output.js";
 import { err, ok } from "../src/result.js";
 import { createMemoryRuntime, streamed } from "./fakes/memory-runtime.js";
@@ -100,19 +100,21 @@ describe("exec core", () => {
 		expect(ended.ok && ended.value).toMatchObject({ state: "ended", end: { kind: "exit", code: 3 } });
 	});
 
-	test("stop verifies process identity, kills its tree, and reports stopped", async () => {
+	test("stop with a live runner only records the request: nothing is killed from outside and the run is still running", async () => {
 		const h = seed();
 		await startExec(h.runtime, "bash", "/work", "echo hi");
 		h.fs.seed(`${ROOT}/event-1/identity.json`, JSON.stringify({ pid: PID, pidCreated: "born" }));
 		const killed: number[] = [];
 		h.runtime.process.killGroup = async (pid) => { killed.push(pid); return ok(undefined); };
-		expect((await stopExec(h.runtime, "event-1")).ok).toBe(true);
-		expect(killed).toEqual([PID]);
+		h.runtime.process.killTree = async (pid) => { killed.push(pid); return ok(undefined); };
+		expect(await stopExec(h.runtime, "event-1")).toMatchObject({ ok: true, value: { id: "event-1", stopping: true } });
+		expect(killed).toEqual([]);
+		expect(h.fs.files.has(`${ROOT}/event-1/stop-request`)).toBe(true);
 		const state = await statusExec(h.runtime, "event-1", 0);
-		expect(state.ok && state.value).toMatchObject({ state: "ended", end: { kind: "stopped" } });
+		expect(state.ok && state.value).toMatchObject({ state: "running" });
 	});
 
-	test("stop on POSIX kills the runner's process group, on Windows its process tree", async () => {
+	test("a stop the runner did not act on within the grace kills the runner's process group on POSIX, its process tree on Windows, and ends stopped", async () => {
 		for (const platform of ["linux", "darwin", "windows"] as const) {
 			const h = seed(platform);
 			await startExec(h.runtime, "bash", "/work", "echo hi");
@@ -120,8 +122,17 @@ describe("exec core", () => {
 			const calls: string[] = [];
 			h.runtime.process.killTree = async (pid) => { calls.push(`tree:${pid}`); return ok(undefined); };
 			h.runtime.process.killGroup = async (pid) => { calls.push(`group:${pid}`); return ok(undefined); };
+			const start = Date.parse(NOW);
+			let at = start;
+			h.runtime.clock.now = () => new Date(at);
+			h.runtime.clock.nowText = () => new Date(at).toISOString();
+			expect((await stopExec(h.runtime, "event-1")).ok).toBe(true);
+			expect(calls).toEqual([]);
+			at = start + EXEC_STOP_GRACE_MS;
 			expect((await stopExec(h.runtime, "event-1")).ok).toBe(true);
 			expect(calls).toEqual([platform === "windows" ? `tree:${PID}` : `group:${PID}`]);
+			const state = await statusExec(h.runtime, "event-1", 0);
+			expect(state.ok && state.value).toMatchObject({ state: "ended", end: { kind: "stopped" } });
 		}
 	});
 
@@ -239,22 +250,6 @@ describe("exec core", () => {
 		expect(await statusExec(h.runtime, "event-1", 0)).toMatchObject({ ok: true, value: { state: "ended", end: { kind: "lost" } } });
 	});
 
-	test("a stop whose identity appears while the request is written is still honoured by a kill", async () => {
-		const h = seed();
-		await startExec(h.runtime, "bash", "/work", "echo hi");
-		const writeText = h.fs.writeText.bind(h.fs);
-		h.fs.writeText = async (path, value) => {
-			// The runner writes its identity right after the stop found none, then checks for the request.
-			if (path.endsWith("/stop-request")) h.fs.seed(`${ROOT}/event-1/identity.json`, JSON.stringify({ pid: PID, pidCreated: "born" }));
-			return writeText(path, value);
-		};
-		const killed: number[] = [];
-		h.runtime.process.killGroup = async (pid) => { killed.push(pid); return ok(undefined); };
-		expect(await stopExec(h.runtime, "event-1")).toMatchObject({ ok: true, value: { id: "event-1", stopping: true } });
-		expect(killed).toEqual([PID]);
-		expect(await statusExec(h.runtime, "event-1", 0)).toMatchObject({ ok: true, value: { state: "ended", end: { kind: "stopped" } } });
-	});
-
 	test("retention removes oldest ended runs, and disabled Windows shells are refused", async () => {
 		const h = seed();
 		for (let index = 0; index < EXEC_MAX_RUNS + 1; index += 1) {
@@ -363,7 +358,7 @@ describe("exec core", () => {
 		expect(complete).toBe(true);
 	});
 
-	test("runner records identity before launch and a child closing during stop ends stopped", async () => {
+	test("runner records identity before launch and a stop request makes the runner kill its members itself and end stopped", async () => {
 		const h = seed();
 		await startExec(h.runtime, "bash", "/work", "echo hi");
 		expect(h.fs.files.has(`${ROOT}/event-1/identity.json`)).toBe(false);
@@ -376,14 +371,17 @@ describe("exec core", () => {
 			await new Promise<void>((resolve) => { closeChild = resolve; });
 			return streamed(0);
 		};
+		// The members' count is what the command's exit leaves behind: the runner's own kill ends the command and empties the run.
+		let members = 1;
+		h.runtime.process.runMembers = async () => ok(members);
+		h.runtime.process.killRunMembers = async () => { members = 0; closeChild(); return ok(undefined); };
+		let outside = false;
+		h.runtime.process.killGroup = async () => { outside = true; return ok(undefined); };
 		const runner = runExecRunner(h.runtime, "event-1", async () => apiOk({ argv: ["fake"], env: {}, files: [] }));
 		await ready;
-		h.runtime.process.killGroup = async () => {
-			closeChild();
-			await runner;
-			return ok(undefined);
-		};
-		expect((await stopExec(h.runtime, "event-1"))).toMatchObject({ ok: true, value: { state: "ended" } });
+		expect((await stopExec(h.runtime, "event-1"))).toMatchObject({ ok: true, value: { stopping: true } });
+		expect(await runner).toBe(0);
+		expect(outside).toBe(false);
 		expect((await statusExec(h.runtime, "event-1", 0))).toMatchObject({ ok: true, value: { end: { kind: "stopped" } } });
 		const other = seed();
 		await startExec(other.runtime, "bash", "/work", "echo hi");
@@ -393,16 +391,15 @@ describe("exec core", () => {
 		expect((await statusExec(other.runtime, "event-1", 0))).toMatchObject({ ok: true, value: { end: { kind: "stopped" } } });
 	});
 
-	test("a failed kill removes the stop request and leaves the run running", async () => {
+	test("a failed outside kill leaves the run running with its request in place, so a later stop retries", async () => {
 		const h = seed();
 		await startExec(h.runtime, "bash", "/work", "echo hi");
 		h.fs.seed(`${ROOT}/event-1/identity.json`, JSON.stringify({ pid: PID, pidCreated: "born" }));
+		h.fs.seed(`${ROOT}/event-1/stop-request`, new Date(Date.parse(NOW) - EXEC_STOP_GRACE_MS).toISOString());
 		h.runtime.process.killGroup = async () => err("kill failed");
 		expect(await stopExec(h.runtime, "event-1")).toMatchObject({ ok: false });
-		expect(h.fs.files.has(`${ROOT}/event-1/stop-request`)).toBe(false);
+		expect(h.fs.files.has(`${ROOT}/event-1/stop-request`)).toBe(true);
 		expect(await statusExec(h.runtime, "event-1", 0)).toMatchObject({ ok: true, value: { state: "running" } });
-		await runExecRunner(h.runtime, "event-1", async () => apiOk({ argv: ["fake"], env: {}, files: [] }));
-		expect(await statusExec(h.runtime, "event-1", 0)).toMatchObject({ ok: true, value: { end: { kind: "exit" } } });
 	});
 
 	test("broken entries do not prevent listing or starting and invalid records are pruned", async () => {

@@ -17,8 +17,21 @@ const LIMIT_FLAGS_OFFSET = 16;
 const BASIC_ACCOUNTING_INFORMATION_SIZE = 48;
 const ACTIVE_PROCESSES_OFFSET = 40;
 const WIN32_FALSE = 0;
+// Win32 JobObjectBasicProcessIdList class id. The buffer is JOBOBJECT_BASIC_PROCESS_ID_LIST: two DWORDs (processes assigned,
+// ids in the list), then a ULONG_PTR array of ids (8 bytes each on x64) starting at offset 8.
+const JOB_OBJECT_BASIC_PROCESS_ID_LIST_CLASS = 3;
+const PROCESS_ID_LIST_HEADER_SIZE = 8;
+const PROCESS_ID_SIZE = 8;
+// The first query asks for this many ids; a job with more is read again with the size the first answer reports.
+const INITIAL_PROCESS_ID_CAPACITY = 64;
+// The list can grow between two queries; the retry is bounded so a job that keeps growing cannot hold the caller.
+const PROCESS_ID_QUERY_ATTEMPTS = 5;
+const ERROR_MORE_DATA = 234;
+// PROCESS_TERMINATE access right, and the exit code a terminated member gets.
+const PROCESS_TERMINATE = 0x1;
+const TERMINATED_EXIT_CODE = 1;
 
-type Job = { activeProcesses(): Result<number> };
+type Job = { activeProcesses(): Result<number>; terminateOthers(selfPid: number): Result<void> };
 
 let confined: Result<Job> | null = null;
 
@@ -43,6 +56,15 @@ export const jobMembersOtherThanSelf = (): Result<number> => {
 	return active.ok ? ok(Math.max(0, active.value - 1)) : active;
 };
 
+/**
+ * Terminates every process of the current process's job except the current process. Succeeds when none is left to
+ * terminate: a member that ended between the listing and the termination is already gone, which is the goal.
+ */
+export const terminateJobMembersOtherThanSelf = (): Result<void> => {
+	const job = confinedJob();
+	return job.ok ? job.value.terminateOthers(process.pid) : job;
+};
+
 const confinedJob = (): Result<Job> => {
 	if (confined !== null) return confined;
 	confined = create();
@@ -56,6 +78,9 @@ const create = (): Result<Job> => {
 			SetInformationJobObject: { args: [FFIType.ptr, FFIType.i32, FFIType.ptr, FFIType.u32], returns: FFIType.i32 },
 			QueryInformationJobObject: { args: [FFIType.ptr, FFIType.i32, FFIType.ptr, FFIType.u32, FFIType.ptr], returns: FFIType.i32 },
 			AssignProcessToJobObject: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.i32 },
+			OpenProcess: { args: [FFIType.u32, FFIType.i32, FFIType.u32], returns: FFIType.ptr },
+			TerminateProcess: { args: [FFIType.ptr, FFIType.u32], returns: FFIType.i32 },
+			CloseHandle: { args: [FFIType.ptr], returns: FFIType.i32 },
 			GetCurrentProcess: { args: [], returns: FFIType.ptr },
 			GetLastError: { args: [], returns: FFIType.u32 },
 		});
@@ -80,7 +105,39 @@ const create = (): Result<Job> => {
 				return err(errorText(error));
 			}
 		};
-		return ok({ activeProcesses });
+		// The ids of the job's processes, or an error. A buffer too small answers ERROR_MORE_DATA with the real count in its header.
+		const memberIds = (): Result<number[]> => {
+			let capacity = INITIAL_PROCESS_ID_CAPACITY;
+			for (let attempt = 0; attempt < PROCESS_ID_QUERY_ATTEMPTS; attempt++) {
+				const list = new Uint8Array(PROCESS_ID_LIST_HEADER_SIZE + capacity * PROCESS_ID_SIZE);
+				const view = new DataView(list.buffer);
+				const queried = kernel.symbols.QueryInformationJobObject(job, JOB_OBJECT_BASIC_PROCESS_ID_LIST_CLASS, ptr(list), list.length, null);
+				if (queried === WIN32_FALSE && kernel.symbols.GetLastError() !== ERROR_MORE_DATA) return err(`QueryInformationJobObject failed: ${kernel.symbols.GetLastError()}`);
+				const assigned = view.getUint32(0, true);
+				if (queried === WIN32_FALSE) { capacity = Math.max(assigned, capacity + 1); continue; }
+				const listed = view.getUint32(4, true);
+				return ok(Array.from({ length: listed }, (_, index) => Number(view.getBigUint64(PROCESS_ID_LIST_HEADER_SIZE + index * PROCESS_ID_SIZE, true))));
+			}
+			return err("The job's process list kept changing");
+		};
+		const terminateOthers = (selfPid: number): Result<void> => {
+			try {
+				const ids = memberIds();
+				if (!ids.ok) return ids;
+				for (const id of ids.value) {
+					if (id === selfPid) continue;
+					const handle = kernel.symbols.OpenProcess(PROCESS_TERMINATE, WIN32_FALSE, id);
+					// No handle: the member ended since the listing (or cannot be opened); the next count tells which.
+					if (handle === null) continue;
+					kernel.symbols.TerminateProcess(handle, TERMINATED_EXIT_CODE);
+					kernel.symbols.CloseHandle(handle);
+				}
+				return ok(undefined);
+			} catch (error) {
+				return err(errorText(error));
+			}
+		};
+		return ok({ activeProcesses, terminateOthers });
 	} catch (error) {
 		return err(errorText(error));
 	}

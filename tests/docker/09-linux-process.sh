@@ -37,6 +37,19 @@ if ! grep -Eq '^ [1-9][0-9]* pass$' "$bun_log"; then
 	rig_test_fail "bun test reported no passing tests"
 fi
 
+# The real POSIX member count (`ps`) and stop path: a run with a backgrounded sleep stays running until the sleep ends,
+# and stop kills a backgrounded sleep. These tests skip silently without /bin/bash, and a skip keeps the exit code 0,
+# so the file runs on its own and its summary must show all three tests passing and none skipped.
+background_log="$RIG_TEST_ROOT/exec-background-real.log"
+if ! bun test /workspace/tests/exec-background-real.test.ts > "$background_log" 2>&1; then
+	cat "$background_log" >&2
+	rig_test_fail "tests/exec-background-real.test.ts failed in the Ubuntu container"
+fi
+if ! grep -Eq '^ 3 pass$' "$background_log" || grep -Eq '^ [0-9]+ skip$' "$background_log"; then
+	cat "$background_log" >&2
+	rig_test_fail "tests/exec-background-real.test.ts did not run all three tests on Linux (skipped or missing)"
+fi
+
 codex_log="$RIG_TEST_ROOT/codex-run-tests.log"
 if ! python3 -I -B -m unittest discover -v -s /workspace/features/codex/tools/tests -p 'test_codex_run.py' > "$codex_log" 2>&1; then
 	cat "$codex_log" >&2

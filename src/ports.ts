@@ -40,6 +40,8 @@ export type ProcessPorts = {
 	// How many processes of the caller's own run, other than the caller itself, are alive: the runner's job on Windows,
 	// the runner's process group on POSIX. A process that left the run on purpose (setsid, job breakaway) is not counted.
 	runMembers(): Promise<Result<number>>;
+	// Kills every process counted by runMembers (so not the caller itself): the runner's job on Windows, the runner's process group on POSIX. Succeeds when none is left to kill.
+	killRunMembers(): Promise<Result<void>>;
 	isAvailable(command: string): Promise<boolean>;
 	createdAt(pids: readonly number[]): Promise<Result<Record<string, string | null>>>;
 	killTree(pid: number, force?: boolean): Promise<Result<void>>;
@@ -68,7 +70,8 @@ export type RuntimePorts = {
 	clock: {
 		now(): Date;
 		nowText(): string;
-		sleep(milliseconds: number): Promise<void>;
+		// With `cancel`, aborting the signal ends the sleep at once and frees its timer.
+		sleep(milliseconds: number, cancel?: AbortSignal): Promise<void>;
 		every(milliseconds: number, callback: () => void): () => void;
 	};
 	ids: { next(): string };

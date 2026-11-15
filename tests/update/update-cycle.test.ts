@@ -643,6 +643,7 @@ const realProcess = (): RuntimePorts["process"] => ({
   spawnDetached: async () => ({ ok: true, value: { exited: false, exitCode: null, stderr: "" } }),
   runStreaming: async () => ({ ok: true, value: { code: 0, finishOutput: async () => ({ ok: true, value: undefined }) } }),
   runMembers: async () => ({ ok: true, value: 0 }),
+  killRunMembers: async () => ({ ok: true, value: undefined }),
   createdAt: async () => ({ ok: true, value: {} }),
   killTree: async () => ({ ok: true, value: undefined }),
   killGroup: async () => ({ ok: true, value: undefined }),

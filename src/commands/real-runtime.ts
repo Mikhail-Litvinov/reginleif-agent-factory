@@ -21,14 +21,18 @@ import { err, errorText, ok } from "../result.js";
 import { readStoredLanguage } from "../state.js";
 import { PROCESS_SUCCESS_EXIT_CODE } from "../ports.js";
 import { runProcess, spawnDetached } from "./process-runner.js";
-import { countGroupMembers, PROCESS_TABLE_ARGUMENTS } from "./run-members.js";
-import { confineToKillOnCloseJob, jobMembersOtherThanSelf } from "./windows-job.js";
+import { countGroupMembers, groupMemberPids, PROCESS_TABLE_ARGUMENTS } from "./run-members.js";
+import { confineToKillOnCloseJob, jobMembersOtherThanSelf, terminateJobMembersOtherThanSelf } from "./windows-job.js";
 import { parseVersion, VERSION_PATHS } from "../version-manifest.js";
 
 // This keeps lock waits responsive without spinning while another command owns the lock.
 const LOCK_POLL_INTERVAL_MS = 250;
 const EXECUTABLE_FILE_MODE = 0o755;
-const sleepFor = (milliseconds: number): Promise<void> => new Promise((resolveSleep) => setTimeout(resolveSleep, milliseconds));
+// An aborted sleep clears its timer, so a caller that stopped waiting leaves no pending timer to hold the process open.
+const sleepFor = (milliseconds: number, cancel?: AbortSignal): Promise<void> => new Promise((resolveSleep) => {
+	const timer = setTimeout(resolveSleep, milliseconds);
+	cancel?.addEventListener("abort", () => { clearTimeout(timer); resolveSleep(); }, { once: true });
+});
 // Once a run holds no process but its runner, the pipes of its command close at once; only a process that escaped the run
 // (setsid, job breakaway) can still hold one open, and its output is outside the run. So the wait for the pipes is short.
 const OUTPUT_DRAIN_MS = 2_000;
@@ -305,6 +309,17 @@ const createProcessPorts = (pathEnvironment: string): ProcessPorts => {
 		if (table.value.exitCode !== PROCESS_SUCCESS_EXIT_CODE) return err(table.value.stderr || "Process table query failed");
 		// The runner leads its own process group (it is started detached), so the group id is its own pid.
 		return ok(countGroupMembers(table.value.stdout, process.pid, process.pid));
+	},
+	killRunMembers: async (): Promise<Result<void>> => {
+		if (hostPlatform() === "win32") return terminateJobMembersOtherThanSelf();
+		const table = await ports.run("ps", PROCESS_TABLE_ARGUMENTS);
+		if (!table.ok) return table;
+		if (table.value.exitCode !== PROCESS_SUCCESS_EXIT_CODE) return err(table.value.stderr || "Process table query failed");
+		const members = groupMemberPids(table.value.stdout, process.pid, process.pid);
+		if (members.length === 0) return ok(undefined);
+		// A member that ended since the listing makes `kill` report it; that is the goal, so only a failed start is an error and the next count verifies.
+		const killed = await ports.run("kill", ["-KILL", ...members.map(String)]);
+		return killed.ok ? ok(undefined) : killed;
 	},
 	killTree: async (pid, force = false): Promise<Result<void>> => {
 		if (hostPlatform() === "win32") {

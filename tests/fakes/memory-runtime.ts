@@ -318,6 +318,7 @@ export const createMemoryRuntime = (platform: RuntimePorts["platform"] = "linux"
 			spawnDetached: async (_command, _graceMs, _stderrLimit, _stderrPath, _options) => ok({ exited: false, exitCode: null, stderr: "", pid: 100 }),
 			runStreaming: async () => streamed(0),
 			runMembers: async () => ok(0),
+			killRunMembers: async () => ok(undefined),
 			createdAt: async () => ok({}),
 			killTree: async () => ok(undefined),
 			killGroup: async () => ok(undefined),

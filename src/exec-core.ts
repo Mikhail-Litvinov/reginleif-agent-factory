@@ -1,12 +1,13 @@
 import type { ApiResult, JsonValue } from "./output.js";
-import type { RuntimePorts } from "./ports.js";
+import type { RuntimePorts, StreamingRun } from "./ports.js";
+import type { Result } from "./result.js";
 
 import { ID_PATTERN } from "../plugins/agent-rig-window/mod/queue-protocol.js";
 import { cleanEnvironment } from "./clean-environment.js";
 import { atomicWrite, joinPath } from "./file-system.js";
 import { messagesFor } from "./messages.js";
 import { apiFail, apiOk, ERROR_CODE_USAGE, EXEC_BAD_ID, EXEC_INVALID, EXEC_IO, EXEC_LAUNCH, EXEC_UNAVAILABLE, EXEC_UNKNOWN } from "./output.js";
-import { errorText } from "./result.js";
+import { err, errorText } from "./result.js";
 import { readState } from "./state.js";
 
 // Hub exec-runner.ts HEARTBEAT_MS and exec.ts HEARTBEAT_STALE_MS / MAX_EXECS.
@@ -25,8 +26,12 @@ const EXEC_RUNNER_STDERR_LIMIT = 64 * 1024;
 // process is not busy: this bounds the delay of the recorded end (at most this long after the last process is gone)
 // against the cost of a check (one `ps` start per check on POSIX); one second is far below the heartbeat interval.
 export const EXEC_RUN_POLL_MS = 1_000;
-// Written by the runner (atomically) with the time at which the run held no process but the runner; `stop` reads it.
-const EXEC_RUN_EMPTY_FILE = "run-empty";
+// How long a stop request may wait for the runner to act on it before `stop` kills the run from outside (a hung runner):
+// one poll to see the request, one poll to see the killed members gone, the bounded output drain (2 s, OUTPUT_DRAIN_MS in
+// real-runtime.ts) before the end is written, and a poll of slack.
+export const EXEC_STOP_GRACE_MS = 5 * EXEC_RUN_POLL_MS;
+// The reason of an end the runner records after its checks (stop request, member count) failed for the whole stale window.
+export const EXEC_CHECK_FAILED_REASON = "run-check-failed";
 // Exit code of a failed runner, and the reason of the last-resort end recorded when the end itself cannot be written.
 const EXEC_RUNNER_FAILED_CODE = 1;
 const EXEC_END_WRITE_FAILED = "end-write-failed";
@@ -262,6 +267,25 @@ const rigResult = async (r: RuntimePorts, id: string): Promise<{ result?: JsonVa
 	} catch { return { reason: "invalid-result" }; }
 };
 
+// The time of the stop request, null when there is none or it cannot be read or parsed.
+const readRequestAt = async (r: RuntimePorts, id: string): Promise<number | null> => {
+	try {
+		const at = Date.parse(await r.fs.readText(file(r, id, "stop-request")));
+		return Number.isFinite(at) ? at : null;
+	} catch { return null; }
+};
+
+// Records the stop request unless a readable one exists: a repeated stop never moves the time, so the grace counts from the first request.
+const requestStop = async (r: RuntimePorts, id: string): Promise<ApiResult<number>> => {
+	const existing = await readRequestAt(r, id);
+	if (existing !== null) return apiOk(existing);
+	const text = r.clock.nowText();
+	try { await r.fs.writeText(file(r, id, "stop-request"), text); } catch (error) { return io(r, error); }
+	return apiOk(Date.parse(text));
+};
+
+// A stop is a request: the runner alone decides the end (see `superviseRun`) and kills its run's processes itself. Only a
+// runner that is gone, or one that has not acted within EXEC_STOP_GRACE_MS (a hung runner), is killed from outside.
 const stop = async (r: RuntimePorts, id: string): Promise<ApiResult<JsonValue>> => {
 	const record = await load(r, id);
 	if (!record.ok) return record;
@@ -275,16 +299,12 @@ const stop = async (r: RuntimePorts, id: string): Promise<ApiResult<JsonValue>> 
 		}
 		return apiOk({ id, state: "ended" });
 	}
-	const marker = file(r, id, "stop-request");
-	let identity = await readIdentity(r, id);
+	const identity = await readIdentity(r, id);
 	if (!identity.ok) return identity;
 	if (identity.value === undefined) {
 		// The runner has not written its identity yet: record the stop, which the runner checks after writing it and before launching the shell.
-		try { await r.fs.writeText(marker, r.clock.nowText()); } catch (error) { return io(r, error); }
-		// The runner may have written its identity after the first read and checked before the request existed: then kill as usual.
-		identity = await readIdentity(r, id);
-		if (!identity.ok) return identity;
-		if (identity.value === undefined) return apiOk({ id, stopping: true });
+		const early = await requestStop(r, id);
+		return early.ok ? apiOk({ id, stopping: true }) : early;
 	}
 	const parsed = identity.value;
 	if (!validIdentity(parsed)) return apiFail(EXEC_LAUNCH, messagesFor(r.language).exec.launch("Process identity unavailable"));
@@ -300,16 +320,12 @@ const stop = async (r: RuntimePorts, id: string): Promise<ApiResult<JsonValue>> 
 	const latest = await summary(r, record.value);
 	if (!latest.ok) return latest;
 	if (latest.value.state === "ended") return apiOk({ id, state: "ended" });
-	const requestAt = r.clock.nowText();
-	try { await r.fs.writeText(marker, requestAt); } catch (error) { return io(r, error); }
-	// Every process of the run had already ended before this request: the run ends by itself with its real end, which the runner is recording now; nothing is killed.
-	if (stopCameAfterEmpty(requestAt, await readRunEmpty(r, id))) return apiOk({ id, stopping: true });
-	// The run is one unit: a kill-on-close job on Windows, the runner's own process group on POSIX.
+	const requestedAt = await requestStop(r, id);
+	if (!requestedAt.ok) return requestedAt;
+	if (r.clock.now().getTime() - requestedAt.value < EXEC_STOP_GRACE_MS) return apiOk({ id, stopping: true });
+	// The runner did not act within the grace: kill the run from outside. The run is one unit: a kill-on-close job on Windows, the runner's own process group on POSIX.
 	const killed = r.platform === "windows" ? await r.process.killTree(pid, true) : await r.process.killGroup(pid);
-	if (!killed.ok) {
-		try { await r.fs.remove(marker); } catch (error) { return io(r, error); }
-		return apiFail(EXEC_IO, messagesFor(r.language).exec.io(killed.error));
-	}
+	if (!killed.ok) return apiFail(EXEC_IO, messagesFor(r.language).exec.io(killed.error));
 	const written = await r.fs.writeExclusive(file(r, id, "exit.json"), JSON.stringify({ kind: "stopped", code: null, at: r.clock.nowText() }));
 	if (!written.ok) return apiFail(EXEC_IO, messagesFor(r.language).exec.io(written.error));
 	return written.value ? apiOk({ id, stopping: true }) : apiOk({ id, state: "ended" });
@@ -341,36 +357,61 @@ const joinChunks = (chunks: Uint8Array[]): Uint8Array => {
 	return joined;
 };
 
-// A stop request ends a run as stopped unless every process of the run had already ended before the request was
-// written: then the run ended on its own and keeps its real end. Both times come from the injected clock. A tie, a
-// missing run-empty time and a time that does not parse all count as a stop (the safe side: the request was honoured).
-export const stopCameAfterEmpty = (requestAt: string, emptyAt: string | null): boolean => {
-	if (emptyAt === null) return false;
-	const request = Date.parse(requestAt);
-	const empty = Date.parse(emptyAt);
-	return Number.isFinite(request) && Number.isFinite(empty) && empty < request;
-};
+// What the runner learns about the command it started: null while it runs, then its result (an error is a failed launch).
+type CommandState = { result: Result<StreamingRun> | null };
+type Supervised = { end: End; command: StreamingRun | null };
 
-// The time at which the run was observed empty, or null while no such time is recorded (or it cannot be read).
-const readRunEmpty = async (r: RuntimePorts, id: string): Promise<string | null> => {
-	try {
-		const text = await r.fs.readText(file(r, id, EXEC_RUN_EMPTY_FILE));
-		return text.length === 0 ? null : text;
-	} catch { return null; }
-};
-
-// Waits until the run holds no process but the runner, and returns the time that was observed (also written to the
-// run-empty file for `stop`). A run that cannot be counted counts as empty: the command already exited, so waiting on a
-// count that cannot be read would hold the run forever.
-const awaitRunEmpty = async (r: RuntimePorts, id: string): Promise<string> => {
+// The runner alone decides how a run ends, from facts it observes in a fixed order each poll: the stop request, then
+// whether the command has exited, then (only once it has) how many processes of the run are left. A command that is
+// still running is itself a member, so it needs no count. The decision:
+// - the command has exited and no member is left: the run is empty; the end is `stopped` if this runner killed members
+//   because of a request, else `exit` with the command's code (a request that arrives later changes nothing: nothing
+//   was killed, and the real end is kept);
+// - a request and a member left: this runner kills its run's members (retried every poll until none is left);
+// - a check that cannot be read (the request, or the count once the command has exited) is never an answer: it is
+//   retried on the next poll, and when it keeps failing for the stale window the runner kills what is left and ends
+//   with the command's code and the reason EXEC_CHECK_FAILED_REASON.
+const superviseRun = async (r: RuntimePorts, id: string, command: CommandState, settled: Promise<void>): Promise<Supervised> => {
+	let killedForRequest = false;
+	let failingSince: number | null = null;
 	for (;;) {
-		const members = await r.process.runMembers();
-		if (!members.ok || members.value === 0) break;
-		await r.clock.sleep(EXEC_RUN_POLL_MS);
+		let requested: boolean | null = null;
+		try { requested = await r.fs.stat(file(r, id, "stop-request")) !== null; } catch { requested = null; }
+		const result = command.result;
+		if (result !== null && !result.ok) return { end: { kind: "exit", code: null, at: r.clock.nowText(), reason: result.error }, command: null };
+		const exited = result !== null && result.ok ? result.value : null;
+		let members: number | null = 1;
+		if (exited !== null) {
+			const counted = await r.process.runMembers();
+			members = counted.ok ? counted.value : null;
+		}
+		if (members === 0 && exited !== null && requested !== null) {
+			return { end: killedForRequest ? { kind: "stopped", code: null, at: r.clock.nowText() } : { kind: "exit", code: exited.code, at: r.clock.nowText() }, command: exited };
+		}
+		// A command that is still running is a member, so only a check made after its exit can fail the run.
+		if (exited !== null && (requested === null || members === null)) {
+			const now = r.clock.now().getTime();
+			failingSince ??= now;
+			// A known request is honoured even while the count fails: the members are killed whether or not they can be counted.
+			if (requested === true && (await r.process.killRunMembers()).ok) killedForRequest = true;
+			if (now - failingSince >= EXEC_STALE_MS) {
+				await r.process.killRunMembers();
+				return { end: { kind: "exit", code: exited.code, at: r.clock.nowText(), reason: EXEC_CHECK_FAILED_REASON }, command: exited };
+			}
+		} else {
+			failingSince = null;
+			if (requested === true && (members === null || members > 0)) {
+				const killed = await r.process.killRunMembers();
+				if (killed.ok) killedForRequest = true;
+			}
+		}
+		// A command that exits meanwhile ends the wait at once, so a quick command does not wait out a whole poll. The sleep
+		// is cancelled when the command wins, so no timer is left pending to hold the runner process open.
+		const wake = new AbortController();
+		const slept = r.clock.sleep(EXEC_RUN_POLL_MS, wake.signal);
+		await (command.result === null ? Promise.race([settled, slept]) : slept);
+		wake.abort();
 	}
-	const emptyAt = r.clock.nowText();
-	await atomicWrite(r.fs, file(r, id, EXEC_RUN_EMPTY_FILE), emptyAt);
-	return emptyAt;
 };
 
 export const runExecRunner = async (r: RuntimePorts, id: string, build: ShellBuilder): Promise<number> => {
@@ -378,12 +419,9 @@ export const runExecRunner = async (r: RuntimePorts, id: string, build: ShellBui
 	if (!record.ok) return 1;
 	const path = dir(r, id);
 	// Records the end and reports true when that end (or the stop recorded instead) is written. When it cannot be written, a last-resort end names the failure and this reports false; it never throws.
-	// emptyAt is the time the run was observed empty (null when the command never ran): a stop request written after it does not turn the end into a stop.
-	const finish = async (end: End, emptyAt: string | null = null): Promise<boolean> => {
+	const finish = async (end: End): Promise<boolean> => {
 		try {
-			const request = await r.fs.stat(file(r, id, "stop-request")) !== null ? await r.fs.readText(file(r, id, "stop-request")) : null;
-			const stopped = request !== null && !stopCameAfterEmpty(request, emptyAt);
-			const written = await r.fs.writeExclusive(file(r, id, "exit.json"), JSON.stringify(stopped ? { kind: "stopped", code: null, at: r.clock.nowText() } : end));
+			const written = await r.fs.writeExclusive(file(r, id, "exit.json"), JSON.stringify(end));
 			if (written.ok) return true;
 		} catch { /* The last-resort end below records the failure. */ }
 		try {
@@ -400,7 +438,7 @@ export const runExecRunner = async (r: RuntimePorts, id: string, build: ShellBui
 		if (!identity.ok) { await finish({ kind: "exit", code: null, at: r.clock.nowText(), reason: identity.error }); return 1; }
 		// A stop recorded before the identity existed is honoured here: the run ends stopped and no shell is launched.
 		if (await r.fs.stat(file(r, id, "stop-request")) !== null) { return (await finish({ kind: "stopped", code: null, at: r.clock.nowText() })) ? 0 : 1; }
-			const rig = record.value.shell === "rig" ? record.value : null;
+		const rig = record.value.shell === "rig" ? record.value : null;
 		const launch = rig !== null ? await rigLaunch(r, rig.args) : record.value.shell === "rig" ? apiFail(EXEC_INVALID, "Invalid exec record") : await build(r, record.value.shell, record.value.text, path);
 		if (!launch.ok) { await finish({ kind: "exit", code: null, at: r.clock.nowText(), reason: launch.error.message }); return 1; }
 		for (const item of launch.value.files) await r.fs.writeBytes(item.path, item.bytes);
@@ -411,15 +449,17 @@ export const runExecRunner = async (r: RuntimePorts, id: string, build: ShellBui
 		try {
 			// The result is one JSON object: its stdout is collected and written whole once the run has ended.
 			const stdout: Uint8Array[] = [];
-			const started = await r.process.runStreaming(launch.value.argv, record.value.shell === "rig" ? rigHome(r) : record.value.cwd, launch.value.env, (bytes) => r.fs.appendBytes(file(r, id, "log"), bytes), launch.value.verbatimArguments ?? false, rig === null ? undefined : async (bytes) => { stdout.push(bytes.slice()); });
-			if (!started.ok) { await finish({ kind: "exit", code: null, at: r.clock.nowText(), reason: started.error }); return 1; }
+			const command: CommandState = { result: null };
+			const settled = r.process.runStreaming(launch.value.argv, record.value.shell === "rig" ? rigHome(r) : record.value.cwd, launch.value.env, (bytes) => r.fs.appendBytes(file(r, id, "log"), bytes), launch.value.verbatimArguments ?? false, rig === null ? undefined : async (bytes) => { stdout.push(bytes.slice()); })
+				.then((value) => { command.result = value; }, (error: unknown) => { command.result = err(errorText(error)); });
 			// The run is one unit: it stays running while any process of it lives, and ends with the command's own code
-			// (remembered here, at the command's exit) once the last one is gone. Output keeps arriving meanwhile.
-			const code = started.value.code;
-			const emptyAt = await awaitRunEmpty(r, id);
-			const drained = await started.value.finishOutput();
+			// once the last one is gone. Output keeps arriving meanwhile.
+			const supervised = await superviseRun(r, id, command, settled);
+			if (supervised.command === null) { await finish(supervised.end); return 1; }
+			const drained = await supervised.command.finishOutput();
 			if (rig !== null) await r.fs.writeBytes(file(r, id, "result"), joinChunks(stdout));
-			const ended = await finish(drained.ok ? { kind: "exit", code, at: r.clock.nowText() } : { kind: "exit", code: null, at: r.clock.nowText(), reason: drained.error }, emptyAt);
+			const end: End = drained.ok || supervised.end.kind === "stopped" || supervised.end.reason !== undefined ? supervised.end : { kind: "exit", code: null, at: r.clock.nowText(), reason: drained.error };
+			const ended = await finish(end);
 			return drained.ok && ended ? 0 : 1;
 		} finally { cancel(); }
 	} catch (error) { await finish({ kind: "exit", code: null, at: r.clock.nowText(), reason: errorText(error) }); return 1; }

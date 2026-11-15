@@ -17,7 +17,11 @@ const MIN_RUN_AFTER_STARTED_MS = 2_000;
 const LONG_SLEEP_SECONDS = 61;
 
 const GIT_BASH_PATH = "C:\\Program Files\\Git\\bin\\bash.exe";
-const hasGitBash = process.platform === "win32" && existsSync(GIT_BASH_PATH);
+const POSIX_BASH_PATH = "/bin/bash";
+// Windows needs Git Bash (its commands leave Bun's job, so only the runner's own job holds them); Linux and macOS use the system bash.
+const hasBash = process.platform === "win32" ? existsSync(GIT_BASH_PATH) : existsSync(POSIX_BASH_PATH);
+// The command line that prints the background process's id as the shell's job table knows it: on Windows the real Windows pid (`kill(pid, 0)` of Bun needs that one), on POSIX the pid itself.
+const PRINT_BACKGROUND_PID = process.platform === "win32" ? "cat /proc/$!/winpid" : "echo $!";
 
 const alive = (pid: number): boolean => {
 	try { process.kill(pid, 0); return true; } catch { return false; }
@@ -49,13 +53,13 @@ const logText = (status: Record<string, unknown>): string => {
 };
 
 // A run is one unit of all its processes: a command that leaves a background process behind keeps the run running until
-// that process ends, and the end code is the command's own. Needs Windows with Git Bash (the real runner is a separate
+// that process ends, and the end code is the command's own. Needs bash: Git Bash on Windows, the system bash elsewhere (the real runner is a separate
 // process, so its kill-on-close job is the one a normal run uses).
 for (const variant of [
 	{ name: "that keeps the output pipes", text: `sleep ${BACKGROUND_SECONDS} & echo started` },
 	{ name: "with its output redirected away", text: `sleep ${BACKGROUND_SECONDS} >/dev/null 2>&1 & echo started` },
 ]) {
-	test.skipIf(!hasGitBash)(`a run stays running while its background process lives, ${variant.name}`, async () => {
+	test.skipIf(!hasBash)(`a run stays running while its background process lives, ${variant.name}`, async () => {
 		await withIsolatedHome(TEMP_HOME_PREFIX, async () => {
 			const runtime = await makeRuntime();
 			const started = await startExec(runtime, "bash", runtime.currentDirectory, variant.text);
@@ -77,10 +81,10 @@ for (const variant of [
 	}, TEST_BOUND_MS);
 }
 
-test.skipIf(!hasGitBash)("stop of a run whose command has already exited kills its background process", async () => {
+test.skipIf(!hasBash)("stop of a run whose command has already exited kills its background process", async () => {
 	await withIsolatedHome(TEMP_HOME_PREFIX, async () => {
 		const runtime = await makeRuntime();
-		const text = [`sleep ${LONG_SLEEP_SECONDS} >/dev/null 2>&1 &`, `cat /proc/$!/winpid`, `echo started`, ""].join("\n");
+		const text = [`sleep ${LONG_SLEEP_SECONDS} >/dev/null 2>&1 &`, PRINT_BACKGROUND_PID, `echo started`, ""].join("\n");
 		const started = await startExec(runtime, "bash", runtime.currentDirectory, text);
 		if (!started.ok) throw new Error(started.error.message);
 		const id = startedId(started.value);
@@ -99,6 +103,8 @@ test.skipIf(!hasGitBash)("stop of a run whose command has already exited kills i
 			const waitEnd = Date.now() + WAIT_BOUND_MS;
 			while (alive(sleepPid) && Date.now() < waitEnd) await runtime.clock.sleep(POLL_MS);
 			expect(alive(sleepPid)).toBe(false);
+			// The runner killed the member itself and records the end a poll later.
+			while ((await status(runtime, id)).state === "running" && Date.now() < waitEnd) await runtime.clock.sleep(POLL_MS);
 			expect(await status(runtime, id)).toMatchObject({ state: "ended", end: { kind: "stopped" } });
 		} finally {
 			if (sleepPid !== 0 && alive(sleepPid)) process.kill(sleepPid);
