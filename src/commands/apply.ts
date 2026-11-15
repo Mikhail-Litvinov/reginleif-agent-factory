@@ -13,6 +13,9 @@ export const applyCommand = async (runtime: RuntimePorts, writeLine: (line: stri
 		const applied = await applyRig(runtime, { state: state.value, mode: "apply" });
 		if (!applied.ok) return applied;
 		const messages = messagesFor(runtime.language);
-		writeLine(applied.value.changedFiles.length === 0 ? messages.apply.upToDate() : messages.apply.updatedFiles(applied.value.changedFiles.length));
+		const { changedFiles, pluginChanges } = applied.value;
+		if (changedFiles.length === 0 && pluginChanges === 0) writeLine(messages.apply.upToDate());
+		if (changedFiles.length > 0) writeLine(messages.apply.updatedFiles(changedFiles.length));
+		if (pluginChanges > 0) writeLine(messages.apply.updatedPlugins(pluginChanges));
 		return ok(undefined);
 	});

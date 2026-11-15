@@ -49,6 +49,7 @@ export const en = {
 		hookProgramMissing: (program: string, feature: string): string => `Cannot resolve hook program ${program} required by feature ${feature}.`,
 		upToDate: (): string => "The rig configuration is already up to date.",
 		updatedFiles: (count: number): string => `Files updated: ${count}.`,
+		updatedPlugins: (count: number): string => `Plugin and marketplace changes: ${count}.`,
 		settingsInvalid: (error: string, settingsPath: string): string =>
 			`settings.json is invalid: ${error}. Fix the file ${settingsPath}; apply wrote nothing.`,
 		blockRestored: (path: string): string => `The rig rules block was restored in ${path}.`,

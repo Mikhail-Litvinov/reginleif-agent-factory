@@ -49,6 +49,8 @@ export type ApplyRequest = {
 export type ApplyOutcome = {
 	state: RigState;
 	changedFiles: string[];
+	// Plugin installs and uninstalls and marketplace adds and removals that apply made through the claude CLI.
+	pluginChanges: number;
 };
 
 export const applyRig = async (runtime: RuntimePorts, request: ApplyRequest): Promise<Result<ApplyOutcome>> => {
@@ -241,6 +243,8 @@ export const applyRig = async (runtime: RuntimePorts, request: ApplyRequest): Pr
 	const rulesExecuted = await executeRuleFilePlan(rulePlanned.value, rulePorts);
 	if (!rulesExecuted.ok) return rulesExecuted;
 	changedFiles.unshift(...rulePlanned.value.writes.map((write) => write.path));
+	// Assets and agents written or removed are changed files too; a backup only ever accompanies a removal.
+	changedFiles.push(...operations.writes.map((write) => write.path), ...operations.removals);
 
 	// Events keep their ids and leave only after the final state is saved, so a repeated apply never sends one twice.
 	const finalState: RigState = events.length > 0
@@ -257,7 +261,9 @@ export const applyRig = async (runtime: RuntimePorts, request: ApplyRequest): Pr
 		const saved = await saveState(runtime, nextState);
 		if (!saved.ok) return saved;
 	}
-	return ok({ state: nextState, changedFiles });
+	const pluginChanges = plugins.value.installed.length + plugins.value.uninstalled.length +
+		plugins.value.marketplacesAdded.length + plugins.value.marketplacesRemoved.length;
+	return ok({ state: nextState, changedFiles, pluginChanges });
 };
 
 // Record order follows the manifest order, which does not change the meaning of a state.

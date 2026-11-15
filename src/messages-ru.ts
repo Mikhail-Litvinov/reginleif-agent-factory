@@ -36,6 +36,7 @@ export const ru: Messages = {
 		hookProgramMissing: (program: string, feature: string): string => `Не найдена программа хука ${program}, нужная для функции ${feature}.`,
 		upToDate: (): string => "Конфигурация rig уже актуальна.",
 		updatedFiles: (count: number): string => `Обновлено файлов: ${count}.`,
+		updatedPlugins: (count: number): string => `Изменений плагинов и маркетплейсов: ${count}.`,
 		settingsInvalid: (error: string, settingsPath: string): string =>
 			`settings.json недопустим: ${error}. Исправь файл ${settingsPath}; apply ничего не записал.`,
 		blockRestored: (path: string): string => `Восстановлен блок правил rig в ${path}.`,

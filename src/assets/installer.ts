@@ -115,6 +115,8 @@ export type PluginRecords = Readonly<Record<string, PluginRecord>>;
 export type PluginOutcome = {
   installed: string[];
   uninstalled: string[];
+  marketplacesAdded: string[];
+  marketplacesRemoved: string[];
   records: Record<string, PluginRecord>;
 };
 
@@ -224,7 +226,7 @@ export async function applyPlugins(
     .map(([id, record]) => ({ enabled: false, id, marketplace: record.marketplace, source: record.source }));
   const allPlans = [...plans, ...orphanPlans];
   if (allPlans.length === EMPTY_LENGTH) {
-    return { ok: true, value: { installed: [], uninstalled: [], records: { ...priorRecords } } };
+    return { ok: true, value: { installed: [], uninstalled: [], marketplacesAdded: [], marketplacesRemoved: [], records: { ...priorRecords } } };
   }
 
   // Every apply reads what is installed, so a plugin removed by hand comes back.
@@ -244,7 +246,7 @@ export async function applyPlugins(
   const localMarketplaces = availableMarketplaces.value.filter((entry) => entry.path !== null);
   const installed = new Set(installedPlugins.value);
   const records: Record<string, PluginRecord> = { ...priorRecords };
-  const outcome: PluginOutcome = { installed: [], uninstalled: [], records };
+  const outcome: PluginOutcome = { installed: [], uninstalled: [], marketplacesAdded: [], marketplacesRemoved: [], records };
 
   for (const plan of allPlans) {
     if (!plan.enabled) {
@@ -279,6 +281,7 @@ export async function applyPlugins(
       const remove = await runClaude(environment, [...CLAUDE_PLUGIN_PREFIX, "marketplace", "remove", entry.name]);
       if (!remove.ok) return remove;
       addedMarketplaces.delete(entry.name);
+      outcome.marketplacesRemoved.push(entry.name);
       localMarketplaces.splice(localMarketplaces.indexOf(entry), 1);
     }
 
@@ -291,6 +294,7 @@ export async function applyPlugins(
       ]);
       if (!add.ok) return add;
       addedMarketplaces.add(plan.marketplace);
+      outcome.marketplacesAdded.push(plan.marketplace);
     }
     if (installed.has(plan.id)) {
       records[plan.id] = pluginRecord(plan);
