@@ -371,3 +371,56 @@ describe("applyPlugins", () => {
     ]);
   });
 });
+
+describe("applyPlugins stale local marketplaces", () => {
+  const hubPlan: readonly PluginPlan[] = [
+    { enabled: true, id: "telegram-hub@telegram-hub", marketplace: "telegram-hub", source: "C:/projects/hub" },
+  ];
+  const directoryListing = (entries: readonly { name: string; path: string }[]): string =>
+    JSON.stringify(entries.map(({ name, path }) => ({ name, source: "directory", path, installLocation: path })));
+
+  test("removes a same-path marketplace registered under another name, with its plugins, before adding", async () => {
+    const runner = makeRunner({
+      [MARKETPLACE_LIST_JSON]: directoryListing([{ name: "old-hub", path: "c:\\Projects\\hub\\" }]),
+      "plugin list --json": JSON.stringify([{ id: "tg-hub@old-hub" }, { id: "other@elsewhere" }]),
+    });
+
+    const result = await applyPlugins({ runner, claudeCommand: "claude" }, hubPlan);
+
+    expect(result.ok).toBe(true);
+    expect(runner.calls).toEqual([
+      ["claude", "plugin", "marketplace", "list", "--json"],
+      ["claude", "plugin", "list", "--json"],
+      ["claude", "plugin", "uninstall", "tg-hub@old-hub", "--scope", "user", "--yes"],
+      ["claude", "plugin", "marketplace", "remove", "old-hub"],
+      ["claude", "plugin", "marketplace", "add", "C:/projects/hub"],
+      ["claude", "plugin", "install", "telegram-hub@telegram-hub", "--scope", "user", "--yes"],
+    ]);
+  });
+
+  test("removes nothing when the path is already registered under the planned name", async () => {
+    const runner = makeRunner({
+      [MARKETPLACE_LIST_JSON]: directoryListing([{ name: "telegram-hub", path: "C:/projects/hub" }]),
+      "plugin list --json": "[]",
+    });
+
+    await applyPlugins({ runner, claudeCommand: "claude" }, hubPlan);
+
+    expect(runner.calls).toEqual([
+      ["claude", "plugin", "marketplace", "list", "--json"],
+      ["claude", "plugin", "list", "--json"],
+      ["claude", "plugin", "install", "telegram-hub@telegram-hub", "--scope", "user", "--yes"],
+    ]);
+  });
+
+  test("leaves a marketplace with a different path untouched", async () => {
+    const runner = makeRunner({
+      [MARKETPLACE_LIST_JSON]: directoryListing([{ name: "other-hub", path: "C:/projects/other" }]),
+      "plugin list --json": JSON.stringify([{ id: "x@other-hub" }]),
+    });
+
+    await applyPlugins({ runner, claudeCommand: "claude" }, hubPlan);
+
+    expect(runner.calls.filter((call) => call.includes("remove") || call.includes("uninstall"))).toEqual([]);
+  });
+});

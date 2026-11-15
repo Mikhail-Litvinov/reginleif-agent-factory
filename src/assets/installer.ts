@@ -235,12 +235,13 @@ export async function applyPlugins(
   const plugins = await runClaude(environment, [...CLAUDE_PLUGIN_PREFIX, "list", "--json"]);
   if (!plugins.ok) return plugins;
 
-  const availableMarketplaces = marketplaces === null ? { ok: true as const, value: new Set<string>() } : parseMarketplaces(marketplaces.value.stdout);
+  const availableMarketplaces = marketplaces === null ? { ok: true as const, value: [] } : parseMarketplaces(marketplaces.value.stdout);
   const installedPlugins = parseInstalledPlugins(plugins.value.stdout);
   if (!availableMarketplaces.ok) return availableMarketplaces;
   if (!installedPlugins.ok) return installedPlugins;
 
-  const addedMarketplaces = new Set(availableMarketplaces.value);
+  const addedMarketplaces = new Set(availableMarketplaces.value.map((entry) => entry.name));
+  const localMarketplaces = availableMarketplaces.value.filter((entry) => entry.path !== null);
   const installed = new Set(installedPlugins.value);
   const records: Record<string, PluginRecord> = { ...priorRecords };
   const outcome: PluginOutcome = { installed: [], uninstalled: [], records };
@@ -262,6 +263,23 @@ export async function applyPlugins(
       if (seenIds.has(plan.id)) records[plan.id] = pluginRecord(plan);
       else delete records[plan.id];
       continue;
+    }
+
+    // The same folder registered under another name (the plugin was renamed) would make the install look in a
+    // marketplace that does not exist: that registration and its plugins are removed first.
+    const stale = localMarketplaces.filter((entry) => entry.name !== plan.marketplace && samePath(entry.path, plan.source));
+    for (const entry of stale) {
+      for (const id of [...installed].filter((installedId) => installedId.endsWith(`@${entry.name}`))) {
+        const uninstall = await runClaude(environment, [...CLAUDE_PLUGIN_PREFIX, "uninstall", id, ...USER_SCOPE, ...YES_OPTION]);
+        if (!uninstall.ok) return uninstall;
+        installed.delete(id);
+        outcome.uninstalled.push(id);
+        delete records[id];
+      }
+      const remove = await runClaude(environment, [...CLAUDE_PLUGIN_PREFIX, "marketplace", "remove", entry.name]);
+      if (!remove.ok) return remove;
+      addedMarketplaces.delete(entry.name);
+      localMarketplaces.splice(localMarketplaces.indexOf(entry), 1);
     }
 
     if (!addedMarketplaces.has(plan.marketplace)) {
@@ -561,7 +579,16 @@ async function runClaude(environment: PluginEnvironment, args: readonly string[]
   return result;
 }
 
-function parseMarketplaces(output: string): Result<Set<string>> {
+type MarketplaceEntry = { name: string; path: string | null };
+
+// Paths are compared as written by two tools: separators, a trailing separator and case (Windows) are ignored.
+function samePath(left: string | null, right: string): boolean {
+  if (left === null) return false;
+  const normalize = (path: string): string => trimTrailingSeparator(toSlashPath(path)).toLowerCase();
+  return normalize(left) === normalize(right);
+}
+
+function parseMarketplaces(output: string): Result<MarketplaceEntry[]> {
   let parsed: unknown;
   try {
     parsed = JSON.parse(output);
@@ -570,14 +597,14 @@ function parseMarketplaces(output: string): Result<Set<string>> {
   }
   if (!Array.isArray(parsed)) return { ok: false, error: "claude plugin marketplace list --json returned an unexpected value" };
 
-  const names = new Set<string>();
+  const entries: MarketplaceEntry[] = [];
   for (const item of parsed) {
     if (!isRecord(item) || typeof item.name !== "string") {
       return { ok: false, error: "claude plugin marketplace list --json returned a marketplace without a name" };
     }
-    names.add(item.name);
+    entries.push({ name: item.name, path: typeof item.path === "string" ? item.path : null });
   }
-  return { ok: true, value: names };
+  return { ok: true, value: entries };
 }
 
 function parseInstalledPlugins(output: string): Result<Set<string>> {
