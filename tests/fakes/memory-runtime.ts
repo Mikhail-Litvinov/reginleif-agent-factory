@@ -51,14 +51,24 @@ export class MemoryFileSystem implements FileSystem {
 
 	async stat(path: string): Promise<FileStat | null> {
 		const value = this.files.get(path);
-		return value === undefined ? null : { size: new TextEncoder().encode(value).length, mtimeMs: this.mtimes.get(path) ?? 0 };
+		return value === undefined ? null : { size: this.binaries.get(path)?.length ?? new TextEncoder().encode(value).length, mtimeMs: this.mtimes.get(path) ?? 0 };
 	}
 
 	async readRange(path: string, start: number, length: number): Promise<Uint8Array> {
 		this.rangeReads.push({ path, start, length });
 		const value = this.files.get(path);
 		if (value === undefined) throw new MissingPathError(`Missing file ${path}`);
-		return new TextEncoder().encode(value).subarray(start, start + length);
+		return (this.binaries.get(path) ?? new TextEncoder().encode(value)).subarray(start, start + length);
+	}
+
+	async appendBytes(path: string, value: Uint8Array): Promise<void> {
+		const previous = this.binaries.get(path) ?? new TextEncoder().encode(this.files.get(path) ?? "");
+		const bytes = new Uint8Array(previous.length + value.length);
+		bytes.set(previous);
+		bytes.set(value, previous.length);
+		this.ensureParentDirectories(path);
+		this.binaries.set(path, bytes);
+		this.files.set(path, new TextDecoder().decode(bytes));
 	}
 
 	async readText(path: string): Promise<string> {
@@ -72,6 +82,7 @@ export class MemoryFileSystem implements FileSystem {
 		this.record(`write:${path}`);
 		this.ensureParentDirectories(path);
 		this.files.set(path, value);
+		this.binaries.delete(path);
 	}
 
 	async appendText(path: string, value: string): Promise<void> {
@@ -87,6 +98,9 @@ export class MemoryFileSystem implements FileSystem {
 		this.ensureParentDirectories(to);
 		this.files.set(to, value);
 		this.files.delete(from);
+		const bytes = this.binaries.get(from);
+		if (bytes === undefined) this.binaries.delete(to); else this.binaries.set(to, bytes);
+		this.binaries.delete(from);
 		const mode = this.modes.get(from);
 		if (mode === undefined) this.modes.delete(to);
 		else this.modes.set(to, mode);
@@ -96,6 +110,7 @@ export class MemoryFileSystem implements FileSystem {
 	async remove(path: string): Promise<void> {
 		this.record(`remove:${path}`);
 		if (!this.files.delete(path)) throw new MissingPathError(`Missing file ${path}`);
+		this.binaries.delete(path);
 	}
 
 	async ensureDirectory(path: string): Promise<void> {
@@ -280,7 +295,9 @@ export const createMemoryRuntime = (platform: RuntimePorts["platform"] = "linux"
 		fs,
 		assetFs,
 		process: {
+			spawnDetached: async () => ok({ exited: false, exitCode: null, stderr: "" }),
 			createdAt: async () => ok({}),
+			killTree: async () => ok(undefined),
 			run: async (command, args, options) => {
 				processCalls.push({ command, args, options });
 				if (command === "claude" && args.join(" ") === "plugin marketplace list --json") {

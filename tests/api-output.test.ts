@@ -188,4 +188,28 @@ describe("API output guard", () => {
 		expect(parseCommand(["feature", "--json"]).ok).toBe(true);
 		expect(parseCommand(["language", "--json"]).ok).toBe(true);
 	});
+
+	test("session compact and rename follow the JSON API contract", async () => {
+		for (const [args, result] of [
+			[["session", "compact", SESSION_ID], { tokensBefore: 90, tokensAfter: 30 }],
+			[["session", "compact", SESSION_ID], { skip: "hook veto" }],
+			[["session", "rename", SESSION_ID, "new title"], { name: "new title" }],
+		] as const) {
+			const harness = seed("installed");
+			harness.fs.seed(`${SESSIONS}/${SESSION_ID}.json`, JSON.stringify({ session_id: SESSION_ID, cwd: null, transcript_path: null, pid: 42, pid_created: "2026-01-01T00:00:00.000000Z", started_at: "2026-01-01T00:00:00Z", ended_at: null }));
+			harness.fs.directories.add(`${SESSIONS}/${SESSION_ID}`);
+			harness.fs.seed(`${SESSIONS}/${SESSION_ID}/responses/event-1.json`, JSON.stringify({ id: "event-1", ok: true, result }));
+			harness.runtime.process.createdAt = async () => ({ ok: true, value: { "42": "2026-01-01T00:00:00.000000Z" } });
+			const output: string[] = [];
+			const code = await runCli([...args], (line) => output.push(line), harness.runtime);
+			expect(code).toBe(SUCCESS_EXIT_CODE);
+			expect(output).toHaveLength(SINGLE_LINE);
+			expect(JSON.parse(output[0])).toEqual({ session: SESSION_ID, ...result });
+		}
+		const output: string[] = [];
+		const code = await runCli(["session", "rename", SESSION_ID, "  "], (line) => output.push(line), seed("installed").runtime);
+		expect(code).toBe(1);
+		expect(output).toHaveLength(SINGLE_LINE);
+		expect(isErrorObject(output)).toBe(true);
+	});
 });

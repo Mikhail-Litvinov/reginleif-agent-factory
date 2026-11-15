@@ -19,7 +19,7 @@ import { modeOf, resolveTarget, writeDurable, writeExclusiveAtomic } from "../no
 import { err, errorText, ok } from "../result.js";
 import { readStoredLanguage } from "../state.js";
 import { PROCESS_SUCCESS_EXIT_CODE } from "../ports.js";
-import { runProcess } from "./process-runner.js";
+import { runProcess, spawnDetached } from "./process-runner.js";
 import { parseVersion, VERSION_PATHS } from "../version-manifest.js";
 
 // This keeps lock waits responsive without spinning while another command owns the lock.
@@ -217,6 +217,7 @@ export const createFileSystem = (hostKind: HostPlatform = hostPlatform() === "wi
 		}
 	},
 	writeText: (path, value) => fs.writeFile(path, value, "utf8"),
+	appendBytes: (path, value) => fs.appendFile(path, value),
 	appendText: (path, value) => fs.appendFile(path, value, "utf8"),
 	rename: (from, to) => fs.rename(from, to),
 	remove: (path) => fs.unlink(path),
@@ -235,6 +236,29 @@ export const createFileSystem = (hostKind: HostPlatform = hostPlatform() === "wi
 const createProcessPorts = (pathEnvironment: string): ProcessPorts => {
 	const ports: ProcessPorts = {
 	run: (command: string, args: readonly string[], options?: ProcessOptions) => runProcess(pathEnvironment, command, args, options),
+	spawnDetached,
+	killTree: async (pid): Promise<Result<void>> => {
+		if (hostPlatform() === "win32") {
+			const result = await ports.run("taskkill", ["/T", "/F", "/PID", String(pid)]);
+			return processSuccess(result, "taskkill");
+		}
+		const table = await ports.run("ps", ["-eo", "pid=,ppid="]);
+		if (!table.ok) return table;
+		if (table.value.exitCode !== PROCESS_SUCCESS_EXIT_CODE) return err(table.value.stderr || "Process table query failed");
+		const children = new Map<number, number[]>();
+		for (const line of table.value.stdout.split("\n")) {
+			const match = /^\s*(\d+)\s+(\d+)\s*$/.exec(line);
+			if (match) { const parent = Number(match[2]); children.set(parent, [...(children.get(parent) ?? []), Number(match[1])]); }
+		}
+		const tree = [pid];
+		for (let index = 0; index < tree.length; index++) tree.push(...(children.get(tree[index]) ?? []));
+		for (const child of tree.reverse()) {
+			const result = await ports.run("kill", ["-TERM", String(child)]);
+			if (!result.ok) return result;
+			if (result.value.exitCode !== PROCESS_SUCCESS_EXIT_CODE && child === pid) return err(result.value.stderr || "Could not stop process");
+		}
+		return ok(undefined);
+	},
 	createdAt: async (pids: readonly number[]): Promise<Result<Record<string, string | null>>> => {
 		if (pids.length === 0) return ok({});
 		const python = hostPlatform() === "win32" ? "python" : "python3";

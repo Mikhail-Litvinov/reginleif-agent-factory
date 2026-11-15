@@ -41,6 +41,25 @@ export const sessionLive = async (r: RuntimePorts, session: SessionRecord): Prom
 	return created.ok ? apiOk(created.value[String(session.pid)] === session.pidCreated) : apiFail(SESSION_IO, messagesFor(r.language).session.io(created.error));
 };
 
+export const lookupSessionForCommand = async (r: RuntimePorts, id: string, requireLive: boolean): Promise<ApiResult<SessionRecord>> => {
+	const session = await lookupSession(r, id);
+	if (!session.ok || !requireLive) return session;
+	const live = await sessionLive(r, session.value);
+	if (!live.ok) return live;
+	return live.value ? session : apiFail(SESSION_ENDED, messagesFor(r.language).session.ended());
+};
+
+export type CompactOutcome = { tokensBefore: number; tokensAfter: number } | { skip: string };
+
+export const compactSessionCore = async (r: RuntimePorts, session: SessionRecord, instructions: string | undefined, progress: (event: ProgressEvent) => void): Promise<ApiResult<CompactOutcome>> => {
+	const result = await requestSession(r, session, "compact", instructions === undefined ? {} : { instructions }, SESSION_TIMEOUTS.compact, progress);
+	if (!result.ok) return result;
+	const value = result.value;
+	if (object(value) && typeof value.skip === "string") return apiOk({ skip: value.skip });
+	if (object(value) && typeof value.tokensBefore === "number" && Number.isFinite(value.tokensBefore) && typeof value.tokensAfter === "number" && Number.isFinite(value.tokensAfter)) return apiOk({ tokensBefore: value.tokensBefore, tokensAfter: value.tokensAfter });
+	return apiFail(SESSION_BAD_RESPONSE, messagesFor(r.language).session.badResponse());
+};
+
 export const sessionModule = async (r: RuntimePorts, session: SessionRecord): Promise<ApiResult<boolean>> => {
 	try { await r.fs.listDirectory(folder(r, session.id)); return apiOk(true); }
 	catch (e) { return missing(e) ? apiOk(false) : apiFail(SESSION_IO, messagesFor(r.language).session.io(errorText(e))); }

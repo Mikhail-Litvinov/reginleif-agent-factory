@@ -11,6 +11,7 @@ import { ok } from "../src/result.js";
 const TEST_EVENT_FILE_THRESHOLD_BYTES = 1024 * 1024;
 
 class MemoryFileSystem implements FileSystem {
+	async appendBytes(path: string, value: Uint8Array): Promise<void> { await this.appendText(path, new TextDecoder().decode(value)); }
 	readonly files = new Map<string, string>();
 	readonly directories = new Set<string>();
 	readonly unreadablePaths = new Set<string>();

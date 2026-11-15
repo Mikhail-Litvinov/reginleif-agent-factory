@@ -355,6 +355,12 @@ error, in event texts and in the generated agent rules.
 | `rig help` | `{"usage":[...]}` | nothing | JSON |
 | `rig info --session <id>` | `InfoData` object (`src/info-data.ts`) | nothing yet | JSON |
 | `rig session list` | `{sessions: [{id, cwd, transcriptPath, pid, startedAt, live, module}]}` | nothing yet | JSON |
+| `rig session compact <id> [--instructions <text>]` | `{session, tokensBefore, tokensAfter}` or `{session, skip}`; failure codes `usage` and common session errors; progress `session-waiting` | compact result | JSON |
+| `rig session rename <id> <name...>` | `{session, name}`; failure codes `usage` and common session errors; progress `session-waiting` | rename result | JSON |
+| `rig session stop <id>` | `{session, stopped, compacted}` or `{session, stopped: false, reason}` | session waiting | JSON |
+| `rig session cleanup <id>` | `{session, compacted, backup, skillsRemoved}` | session waiting | JSON |
+| `rig session run <id> [--mode <mode>] [--account <n>]` | `{session, pid, mode, account}`; failures `usage`, common session errors, `state-unreadable`, `launch-not-configured`, `launch-invalid`, `launch-failed`, `launch-timeout`, `session-running`; no progress | nothing yet | JSON |
+| `rig session mode <id> <mode>` | `{session, mode, pid}` or `{session, mode, changed: false}`; run and stop failures; progress `session-waiting` | nothing yet | JSON |
 | `rig status` | the `StatusView` object (`schemaVersion: 1`, `mode`, `versions`, `releases`, `features`, `lastUpdate`, `pendingHubRestart`, `errors`; times as recorded in `events.jsonl`); failures `state-unreadable`, `features-unreadable` | `status --json`, strict schema (unchanged fields) | JSON |
 | `rig feature` | `{"features":[{"name","description","enabled","platformAllowed"}]}` (`description` in rig's language); failure code `feature-failed` | `feature --json`, strict schema (expects a bare array, must unwrap `features`) | JSON |
 | `rig language [en\|ru]` | `{"language"}`; setting: `{"language","changed"}`; failure codes `not-installed`, `language-failed`; progress `lock-waiting` | `language --json`, strict schema (unchanged); `language <x>` as text for Telegram | JSON |

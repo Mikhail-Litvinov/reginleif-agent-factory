@@ -43,6 +43,12 @@ const USAGE: string[] = [
 	"rig language [en|ru] [--json]",
 	"rig info --session <id>",
 	"rig session list",
+	"rig session compact <id> [--instructions <text>]",
+	"rig session rename <id> <name...>",
+	"rig session stop <id>",
+	"rig session cleanup <id>",
+	"rig session run <id> [--mode <mode>] [--account <n>]",
+	"rig session mode <id> <mode>",
 ];
 const HELP: JsonValue = { usage: USAGE };
 
@@ -57,7 +63,7 @@ export type Command =
 	| { name: "check" }
 	| { name: "language"; value: Language | null; json: boolean }
 	| { name: "info"; session: string }
-	| { name: "session"; subcommand: string }
+	| { name: "session"; subcommand: string; args: string[] }
 	| { name: "update-step"; step: UpdateStep; owner: LockOwner };
 // A parse error is a function of the catalog: the language is known only after the runtime is built, and parsing stays pure.
 export type ParsedCommand = { ok: true; command: Command } | { ok: false; error: (messages: Messages) => string };
@@ -80,8 +86,8 @@ export const parseCommand = (args: string[]): ParsedCommand => {
 	if (head === "info") return rest.length === 2 && rest[0] === "--session"
 		? { ok: true, command: { name: "info", session: rest[1] } }
 		: { ok: false, error: (messages) => messages.info.usage() };
-	if (head === "session") return rest.length === 1 && isSessionCommand(rest[0])
-		? { ok: true, command: { name: "session", subcommand: rest[0] } }
+	if (head === "session") return rest.length >= 1 && isSessionCommand(rest[0])
+		? { ok: true, command: { name: "session", subcommand: rest[0], args: rest.slice(1) } }
 		: { ok: false, error: (messages) => messages.session.usage() };
 	if (head === "update-step") return parseUpdateStep(rest) ?? { ok: false, error: (messages) => messages.cli.usageUpdateStep() };
 	return { ok: false, error: (messages) => messages.cli.unknownCommand(args.join(" ")) };
@@ -232,7 +238,7 @@ const execute = async (command: Command, context: CommandContext): Promise<Comma
 		case "info":
 			return { kind: "json", result: await infoCommand(runtime, command.session) };
 		case "session":
-			return { kind: "json", result: await runSessionCommand(runtime, command.subcommand) };
+			return { kind: "json", result: await runSessionCommand(runtime, command.subcommand, command.args, context.writeProgress) };
 		case "update-step":
 			return { kind: "internal", exitCode: await runUpdateStep(runtime, command.step, command.owner, writeLine) };
 		case "check":

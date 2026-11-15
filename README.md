@@ -7,6 +7,12 @@ The repository is for anyone who works with Claude Code and Codex on several mac
 `rig` does not keep a background process. It is a command on Bun and TypeScript with no runtime dependencies (`package.json` has only dev packages for type checking). All paths and settings live in `~/.agent-rig/`.
 
 `rig session list` lists recorded Claude Code sessions with their liveness and module availability.
+`rig session compact <id> [--instructions <text>]` compacts a live session and returns raw token counts or a hook skip.
+`rig session rename <id> <name...>` renames a live session and returns the name reported by its window.
+`rig session stop <id>` compacts a large context if needed and stops the session.
+`rig session cleanup <id>` compacts, stops, and clears remembered skills from the transcript.
+`rig session run <id> [--mode <mode>] [--account <n>]` resumes a stopped session using `~/.agent-rig/launch.json`.
+`rig session mode <id> <mode>` changes a session's permission mode, restarting it when needed.
 
 Installing on a server is described in [INSTALL.md](INSTALL.md). Agent, you were asked to deploy this here: read `INSTALL.md` and follow its section "What the agent does".
 

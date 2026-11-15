@@ -2,9 +2,9 @@ import type { Result } from "../result.js";
 import type { ProcessOptions, ProcessOutput } from "../ports.js";
 
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
-import { platform as hostPlatform } from "node:os";
-import { win32 } from "node:path";
+import { closeSync, existsSync, mkdtempSync, openSync, readFileSync, rmSync } from "node:fs";
+import { platform as hostPlatform, tmpdir } from "node:os";
+import { join, win32 } from "node:path";
 
 import { err, errorText, ok } from "../result.js";
 import { PROCESS_FAILURE_EXIT_CODE } from "../ports.js";
@@ -20,6 +20,38 @@ const WINDOWS_SCRIPT_EXTENSIONS = [".cmd", ".bat"] as const;
 const WINDOWS_PATH_SEPARATOR = ";";
 // cmd.exe expands %VAR% even inside double quotes and cannot escape a double quote there.
 const CMD_UNSAFE_ARGUMENT = /["%\r\n]/;
+
+export const spawnDetached = async (command: readonly string[], graceMs: number, stderrLimit: number): Promise<Result<{ exited: boolean; exitCode: number | null; stderr: string }>> => {
+	const [executable, ...args] = command;
+	if (!executable) return err("Empty launch command");
+	let directory: string;
+	try { directory = mkdtempSync(join(tmpdir(), "rig-launch-")); } catch (error) { return err(errorText(error)); }
+	const path = join(directory, "stderr");
+	const cleanup = (): void => { try { rmSync(directory, { recursive: true, force: true }); } catch { /* Windows can retain the child handle. */ } };
+	try {
+		const fd = openSync(path, "w");
+		let child;
+		try { child = spawn(executable, args, { detached: true, stdio: ["ignore", "ignore", fd] }); } finally { closeSync(fd); }
+		return await new Promise((resolve) => {
+			let settled = false;
+			const finish = (result: Result<{ exited: boolean; exitCode: number | null; stderr: string }>): void => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timer);
+				child.unref();
+				resolve(result);
+			};
+			const timer = setTimeout(() => finish(ok({ exited: false, exitCode: null, stderr: "" })), graceMs);
+			child.once("error", (error) => { cleanup(); finish(err(error.message)); });
+			child.once("exit", (code) => {
+				let stderr = "";
+				if (!settled && code !== 0) { try { stderr = readFileSync(path, "utf8").trim().slice(0, stderrLimit); } catch { /* No stderr available. */ } }
+				cleanup();
+				finish(ok({ exited: true, exitCode: code, stderr }));
+			});
+		});
+	} catch (error) { cleanup(); return err(errorText(error)); }
+};
 
 export type RunnerKind = "windows" | "posix";
 // start() arms a one-shot timer and returns a function that disarms it.

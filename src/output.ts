@@ -26,6 +26,13 @@ export const SESSION_NO_MODULE = "session-no-module";
 export const SESSION_TIMEOUT = "session-timeout";
 export const SESSION_MODULE_ERROR = "session-module-error";
 export const SESSION_BAD_RESPONSE = "session-bad-response";
+export const SESSION_STOP_TIMEOUT = "session-stop-timeout";
+export const SESSION_CLEANUP_NOT_COMPACTED = "session-cleanup-not-compacted";
+export const LAUNCH_INVALID = "launch-invalid";
+export const LAUNCH_NOT_CONFIGURED = "launch-not-configured";
+export const LAUNCH_FAILED = "launch-failed";
+export const LAUNCH_TIMEOUT = "launch-timeout";
+export const SESSION_RUNNING = "session-running";
 export const PROGRESS_CODE_SESSION_WAITING = "session-waiting";
 
 export const SUCCESS_EXIT_CODE = 0;

@@ -12,6 +12,7 @@ export type FileSystem = {
 	// At most `length` bytes starting at byte `start`; fewer at the end of the file. For files that grow without bound
 	// (Codex rollouts), where reading the whole file is not an option.
 	readRange(path: string, start: number, length: number): Promise<Uint8Array>;
+	appendBytes(path: string, value: Uint8Array): Promise<void>;
 	writeText(path: string, value: string): Promise<void>;
 	appendText(path: string, value: string): Promise<void>;
 	rename(from: string, to: string): Promise<void>;

@@ -113,7 +113,7 @@ const runAllowlistTool = async (runtime: RuntimePorts, state: RigState, args: re
 	return isRecord(parsed) ? parsed : null;
 };
 
-const accountOf = async (runtime: RuntimePorts, state: RigState, configDir: string): Promise<number | null> => {
+export const accountOf = async (runtime: RuntimePorts, state: RigState, configDir: string): Promise<number | null> => {
 	const answer = await runAllowlistTool(runtime, state, ["account", "--config-dir", configDir]);
 	const account = answer?.account;
 	return typeof account === "number" ? account : null;
