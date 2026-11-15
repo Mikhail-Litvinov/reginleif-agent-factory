@@ -33,9 +33,10 @@ const OWN_DIRECTORY = "/cfg/1-own";
 const SAME_ACCOUNT_DIRECTORY = "/cfg/1-twin";
 const OTHER_ACCOUNT_DIRECTORY = "/cfg/2-other";
 const SINGLE_OUTPUT_LINE = 1;
+const HELPER_MESSAGE = "boom";
 
 type Harness = ReturnType<typeof createMemoryRuntime>;
-type Tool = { accounts: Record<string, number | null>; allowed: Record<string, boolean>; volunteers: (options?: ProcessOptions) => Result<ProcessOutput>; failure?: Result<ProcessOutput> };
+type Tool = { accounts: Record<string, number | null>; allowed: Record<string, boolean>; volunteers: (options?: ProcessOptions) => Result<ProcessOutput>; failure?: Result<ProcessOutput>; rawAccounts?: Record<string, unknown>; rawCategories?: Record<string, unknown> };
 
 const iso = (ms: number): string => new Date(ms).toISOString();
 
@@ -78,7 +79,7 @@ const withTool = (harness: Harness, tool: Tool, language: RuntimePorts["language
 					if (args[index] === "--config-dir") accounts[name] = { present: true, account: tool.accounts[name] ?? null };
 					if (args[index] === "--category") categories[name] = { allowed: tool.allowed[name] === true, reason: "" };
 				}
-				return stdout({ accounts, categories });
+				return stdout({ accounts: { ...accounts, ...tool.rawAccounts }, categories: { ...categories, ...tool.rawCategories } });
 			}
 			if (script.endsWith("account-allowlist.py") && subcommand === "check") {
 				return stdout({ allowed: tool.allowed[third] === true, reason: "" });
@@ -230,6 +231,46 @@ describe("rig info", () => {
 			for (const name of ["claude", "codex", "volunteers"]) expect(text).toContain(`"${name}":{"error"`);
 			expect(text).toContain(message);
 		}
+	});
+
+	const seedThreeSessions = (harness: Harness): void => {
+		for (const [id, directory, at] of [[OWN_ID, OWN_DIRECTORY, NOW - 20 * MINUTE], [SAME_ACCOUNT_ID, SAME_ACCOUNT_DIRECTORY, NOW - 10 * MINUTE], [OTHER_ACCOUNT_ID, OTHER_ACCOUNT_DIRECTORY, NOW]] as const) {
+			seedSession(harness, id, directory, claudeUsage(at, 1, 2, NOW + HOUR, NOW + DAY));
+		}
+	};
+
+	test("one malformed account entry of another session is that session's error; the rest of the claude block is normal", async () => {
+		const malformed: Array<Record<string, unknown>> = [{ [OTHER_ACCOUNT_DIRECTORY]: { present: "yes", account: 2 } }, { [OTHER_ACCOUNT_DIRECTORY]: { error: "ValueError: boom" } }];
+		for (const rawAccounts of malformed) {
+			const harness = baseHarness({ codex: true, volunteers: true });
+			seedThreeSessions(harness);
+			const body = await infoOf(withTool(harness, tool({ rawAccounts })));
+			expect(body).toMatchObject({
+				account: 1,
+				claude: { sessionId: SAME_ACCOUNT_ID, skipped: [{ sessionId: OTHER_ACCOUNT_ID, error: { code: "script-failed" } }] },
+			});
+		}
+	});
+
+	test("an account that raised in the helper fails only the claude block when it is the session's own", async () => {
+		const harness = baseHarness({ codex: true, volunteers: true });
+		seedThreeSessions(harness);
+		const body = await infoOf(withTool(harness, tool({ rawAccounts: { [OWN_DIRECTORY]: { error: "ValueError: boom" } } })));
+		const text = JSON.stringify(body);
+		expect(text).toContain("\"claude\":{\"error\":{\"code\":\"script-failed\"");
+		expect(text).toContain("boom");
+		expect(body).toMatchObject({ account: null });
+		expect(text.split(HELPER_MESSAGE)).toHaveLength(2);
+	});
+
+	test("a category that raised in the helper fails only its own block", async () => {
+		const harness = baseHarness({ codex: true, volunteers: true });
+		seedThreeSessions(harness);
+		const body = await infoOf(withTool(harness, tool({ rawCategories: { codex: { error: "OSError: boom" } } })));
+		const text = JSON.stringify(body);
+		expect(text).toContain("\"codex\":{\"error\":{\"code\":\"script-failed\"");
+		expect(text.split(HELPER_MESSAGE)).toHaveLength(2);
+		expect(body).toMatchObject({ account: 1, claude: { sessionId: SAME_ACCOUNT_ID } });
 	});
 
 	test("one allowlist process covers all session directories and categories", async () => {

@@ -5,7 +5,8 @@ import type { ApiError } from "./output.js";
 // to the client.
 
 export type ClaudeLimit = { kind: string; percentUsed: number; resetsAt: string | null };
-export type ClaudeReading = { at: string | null; sessionId: string; limits: ClaudeLimit[] };
+// `skipped`: other sessions whose account could not be read, each with its own error; present only when there are any.
+export type ClaudeReading = { at: string | null; sessionId: string; limits: ClaudeLimit[]; skipped?: Array<{ sessionId: string } & BlockError> };
 export type CodexLimit = { windowMinutes: number; usedPercent: number; resetsAt: string | null };
 export type CodexReading = { at: string; limits: CodexLimit[] };
 export type VolunteerProvider = { used: number; cap: number | null };

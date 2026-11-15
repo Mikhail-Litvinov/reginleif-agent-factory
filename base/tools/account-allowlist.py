@@ -141,7 +141,8 @@ def build_parser():
 def main(argv=None):
     """`check <category> --config-dir <dir>`: one line of JSON {"allowed", "reason"}, exit 0 in both cases.
     `batch --config-dir <dir>... [--category <name>...]`: one line of JSON {"accounts", "categories"}; accounts maps
-    each dir to {"present", "account"} (account is null when unknown).
+    each dir to {"present", "account"} (account is null when unknown) and categories maps each category to
+    {"allowed", "reason"}. An item whose check raised is {"error": text} instead; the other items are unaffected.
 
     The process's own CLAUDE_CONFIG_DIR is ignored: --config-dir alone names the session's config dir.
     """
@@ -150,13 +151,19 @@ def main(argv=None):
         accounts = {}
         for directory in args.config_dir:
             env = {"CLAUDE_CONFIG_DIR": directory} if directory else {}
-            present, number = current_account(env)
-            accounts[directory] = {"present": present, "account": number}
+            try:
+                present, number = current_account(env)
+                accounts[directory] = {"present": present, "account": number}
+            except Exception as e:  # one bad directory must not fail the others
+                accounts[directory] = {"error": f"{e.__class__.__name__}: {e}"}
         env = {"CLAUDE_CONFIG_DIR": args.config_dir[0]} if args.config_dir[0] else {}
         categories = {}
         for category in args.category:
-            allowed, reason = check(category, env)
-            categories[category] = {"allowed": allowed, "reason": reason}
+            try:
+                allowed, reason = check(category, env)
+                categories[category] = {"allowed": allowed, "reason": reason}
+            except Exception as e:  # one failing category must not fail the others
+                categories[category] = {"error": f"{e.__class__.__name__}: {e}"}
         print(json.dumps({"accounts": accounts, "categories": categories}, ensure_ascii=True))
         return 0
     env = {"CLAUDE_CONFIG_DIR": args.config_dir} if args.config_dir else {}

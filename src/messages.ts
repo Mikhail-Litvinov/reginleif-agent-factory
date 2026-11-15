@@ -44,6 +44,7 @@ export const en = {
 		allowlistBadJson: (): string => "Account allowlist helper returned invalid JSON output",
 		allowlistBadAccount: (): string => "Account allowlist helper returned an invalid account answer",
 		allowlistBadCategory: (category: string): string => `Account allowlist helper returned an invalid ${category} answer`,
+		allowlistItemFailed: (detail: string): string => `Account allowlist helper could not check one item: ${detail}`,
 	},
 	exec: {
 		usage: (): string => "Usage: rig exec start <pwsh|cmd|bash> --cwd <dir> | start rig -- <rig arguments> | status <id> [--from <offset>] | stop <id> | list",

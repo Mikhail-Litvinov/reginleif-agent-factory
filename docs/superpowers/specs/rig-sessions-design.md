@@ -124,6 +124,12 @@ Key order is `session`, `account`, `claude`, `codex`, `volunteers`, `context`.
   `{accounts: {dir: {present, account}}, categories: {name: {allowed, reason}}}`. A helper that fails (spawn error,
   timeout, non-zero exit, bad JSON) makes `claude`, `codex` and `volunteers` (the last two only when their feature is on)
   `script-failed` block errors naming the reason; never an absent block. `allowed: false` still omits the block.
+- Errors are isolated per item. The helper answers `{error: text}` in place of one directory's `{present, account}` or
+  one category's `{allowed, reason}` when that check raised; the other items keep their answers. A directory that failed
+  or whose entry is malformed: for the session's own directory, `claude` is a `script-failed` error and `account` is
+  `null`; for another session, that session is left out of the `claude` candidates and listed in `claude.skipped` as
+  `{sessionId, error:{code,message}}` (the key is present only when there are any). A failed category makes only its own
+  block (`codex` or `volunteers`) a `script-failed` error.
 - A block that cannot be read is `{"error":{"code","message"}}` in the place of its data; a failing source never fails
   the command. Block codes: `no-data` (nothing recorded yet), `no-rollout` (no Codex rollout with a rate-limit event),
   `script-missing`, `script-failed`, `bad-output` (volunteer script), `no-source`. `message` is written in the rig

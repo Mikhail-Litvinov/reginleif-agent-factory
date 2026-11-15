@@ -117,7 +117,13 @@ const runAllowlistTool = async (runtime: RuntimePorts, state: RigState, messages
 	return isRecord(parsed) ? ok(parsed) : err(messages.info.allowlistBadJson());
 };
 
+// The helper answers `{error: text}` for an item whose check raised; the item fails alone.
+const itemError = (answer: unknown, messages: Messages): string | null =>
+	isRecord(answer) && typeof answer.error === "string" ? messages.info.allowlistItemFailed(answer.error) : null;
+
 const parseAccount = (answer: unknown, messages: Messages): Result<number | null> => {
+	const failed = itemError(answer, messages);
+	if (failed !== null) return err(failed);
 	if (!isRecord(answer) || typeof answer.present !== "boolean" || !(answer.account === null || (typeof answer.account === "number" && Number.isSafeInteger(answer.account)))) return err(messages.info.allowlistBadAccount());
 	return ok(answer.account);
 };
@@ -140,6 +146,8 @@ const categoryShown = (state: RigState, category: "codex" | "volunteers", answer
 	if (!answer.ok) return answer;
 	const categories = answer.value.categories;
 	const entry = isRecord(categories) ? categories[category] : undefined;
+	const failed = itemError(entry, messages);
+	if (failed !== null) return err(failed);
 	return isRecord(entry) && typeof entry.allowed === "boolean" ? ok(entry.allowed) : err(messages.info.allowlistBadCategory(category));
 };
 
@@ -170,11 +178,12 @@ const freshestClaudeLimits = (
 	messages: Messages,
 ): Result<ClaudeReading | null> => {
 	const candidates: Array<{ sessionId: string; usage: Usage }> = own === null ? [] : [{ sessionId, usage: own }];
+	const skipped: Array<{ sessionId: string } & BlockError> = [];
 	if (account !== null) {
 		for (const other of others) {
 			const otherAccount = parseAccount(accounts[other.directory], messages);
-			if (!otherAccount.ok) return otherAccount;
-			if (otherAccount.value === account) candidates.push(other);
+			if (!otherAccount.ok) skipped.push({ sessionId: other.sessionId, ...blockError(BLOCK_SCRIPT_FAILED, otherAccount.error) });
+			else if (otherAccount.value === account) candidates.push(other);
 		}
 	}
 	let best: { sessionId: string; usage: Usage } | null = null;
@@ -182,7 +191,8 @@ const freshestClaudeLimits = (
 		if (candidate.usage.limits.length === 0) continue;
 		if (best === null || readingTime(candidate.usage) > readingTime(best.usage)) best = candidate;
 	}
-	return ok(best === null ? null : { at: best.usage.at, sessionId: best.sessionId, limits: best.usage.limits });
+	if (best === null) return ok(null);
+	return ok({ at: best.usage.at, sessionId: best.sessionId, limits: best.usage.limits, ...(skipped.length === 0 ? {} : { skipped }) });
 };
 
 const codexBlock = async (runtime: RuntimePorts, messages: Messages): Promise<CodexReading | BlockError> => {

@@ -336,5 +336,40 @@ class BatchCliTest(CliRunner):
         self.assertEqual(json.loads(proc.stdout)["accounts"][side], {"present": True, "account": None})
 
 
+class BatchIsolationTest(unittest.TestCase):
+    """One directory or category that raises is reported as {"error": text}; the others keep their answers."""
+
+    def run_batch(self, argv, **patches):
+        out = io.StringIO()
+        with contextlib.ExitStack() as stack:
+            for name, value in patches.items():
+                stack.enter_context(mock.patch.object(al, name, value))
+            stack.enter_context(contextlib.redirect_stdout(out))
+            self.assertEqual(al.main(argv), 0)
+        return json.loads(out.getvalue())
+
+    def test_a_raising_directory_does_not_fail_the_others(self):
+        def account(env=None, home=None):
+            directory = (env or {}).get("CLAUDE_CONFIG_DIR", "")
+            if directory == "bad":
+                raise ValueError("embedded null byte")
+            return True, 7
+        result = self.run_batch(["batch", "--config-dir", "good", "--config-dir", "bad", "--config-dir", "fine"],
+                                current_account=account)
+        self.assertEqual(result["accounts"]["good"], {"present": True, "account": 7})
+        self.assertEqual(result["accounts"]["fine"], {"present": True, "account": 7})
+        self.assertIn("embedded null byte", result["accounts"]["bad"]["error"])
+
+    def test_a_raising_category_does_not_fail_the_others(self):
+        def check(category, env=None, home=None):
+            if category == "codex":
+                raise OSError("unreadable")
+            return True, ""
+        result = self.run_batch(["batch", "--config-dir", "good", "--category", "codex", "--category", "volunteers"],
+                                check=check)
+        self.assertEqual(result["categories"]["volunteers"], {"allowed": True, "reason": ""})
+        self.assertIn("unreadable", result["categories"]["codex"]["error"])
+
+
 if __name__ == "__main__":
     unittest.main()
