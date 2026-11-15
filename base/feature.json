@@ -402,6 +402,28 @@
       "timeout": 60
     },
     {
+      "event": "SessionStart",
+      "matcher": "",
+      "command": "{{PYTHON}}",
+      "args": [
+        "-I",
+        "{{CLONE}}/base/hooks/session_record.py",
+        "start"
+      ],
+      "timeout": 30
+    },
+    {
+      "event": "SessionEnd",
+      "matcher": "",
+      "command": "{{PYTHON}}",
+      "args": [
+        "-I",
+        "{{CLONE}}/base/hooks/session_record.py",
+        "end"
+      ],
+      "timeout": 30
+    },
+    {
       "event": "PreToolUse",
       "matcher": "Bash",
       "command": "{{PYTHON}}",
@@ -439,6 +461,7 @@
     "hooks/compact_history.py",
     "hooks/no_ampersand.py",
     "hooks/system-temp-guard.py",
+    "hooks/session_record.py",
     "hooks/project-tmp.sh",
     "hooks/project-tmp-settings.ps1",
     "tools/patchlib.py",

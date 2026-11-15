@@ -53,6 +53,7 @@ from Telegram, and the developer of `rig` works from a working copy of the same 
 | Generated rules | Claude rules, the file belongs to `rig` | `~/.agent-rig/generated/CLAUDE.md` |
 | Events | A file for the hub, format below | `~/.agent-rig/events.jsonl` |
 | Log | Output of cron runs | `~/.agent-rig/update.log` |
+| Sessions | One record per Claude Code session, written by the `SessionStart` and `SessionEnd` hooks | `~/.agent-rig/sessions/<session_id>.json` |
 
 Every path `rig` stores or compares has one form: forward slashes, also on Windows (`C:/Users/me/.claude/skills/x/SKILL.md`).
 The file-system adapters, `joinPath`, the runtime (`home`, `resolvePath`), the clone and hub paths in `state.json` and the
@@ -72,6 +73,34 @@ Linux, `python` on Windows. `rig check` verifies that the interpreter starts.
 
 Hooks run straight from the clone. Claude Code looks for agents and skills in `~/.claude`, so `rig` copies them there,
 substituting paths and the interpreter in place of `C:/Users/...`.
+
+## Session record
+
+`base/hooks/session_record.py` keeps one JSON file per Claude Code session in `~/.agent-rig/sessions/<session_id>.json`.
+The `SessionStart` hook runs it with `start`, the `SessionEnd` hook with `end`; both receive the hook's JSON on stdin.
+It is Python 3 with the standard library only, run as `python -I`.
+
+Fields: `session_id`, `cwd`, `transcript_path`, `config_dir` (the `CLAUDE_CONFIG_DIR` value, empty for the default
+login), `pid` and `pid_created` (the Claude Code process and its creation time in UTC with microseconds, so a reused pid
+is recognised), `pid_error` (null, or why the pid is unknown), `source` (`startup`, `resume`, `clear`, `compact`),
+`started_at` and `ended_at` (UTC, whole seconds).
+
+Write rules:
+- `start` writes the record. A later `start` of the same session (resume or compact) replaces `pid`, `pid_created`,
+  `pid_error` and `source`, keeps `started_at` and clears `ended_at`.
+- `end` only sets `ended_at`; without a record it writes nothing.
+- A session id outside `[A-Za-z0-9_-]{1,128}` and unreadable input are ignored before any lookup.
+- The file is written atomically: a temp file in the same folder, then `os.replace`.
+- The hook never breaks a session: it prints nothing and exits 0; errors go to stderr.
+
+PID rule: the walk starts at the hook's parent process and goes up the process tree. `CLAUDE_PID` is used only if it names
+a `claude.exe` (or `claude`) that is an ancestor of the hook; otherwise the nearest Claude ancestor is taken. Wrappers
+(`cswap`, `cmd`, `bash`) are never chosen. The process table comes from PowerShell `Get-CimInstance Win32_Process` on
+Windows (10 seconds, stdin closed) and from `/proc` on Linux. Elsewhere the record holds `pid` null and a `pid_error`.
+Evidence: `docs/research/claude-pid-from-hook.md`.
+
+Known limits: macOS is not covered; a Claude Code installed through npm (a `node` process) is not matched; the account
+is not a field and is derived from `config_dir`.
 
 ## Base and features
 

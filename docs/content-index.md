@@ -95,6 +95,8 @@
 | Rule | `features/subagent-tasks-guard/rules/claude-subagent-tasks-guard.md` | subagent-tasks-guard | — | claude | all | `subagent-tasks-guard` on | — | — | — | — | — | — |
 | Hook | `SessionStart` | base | — | all | always | `compact` | `{{PYTHON}}` | `{{CLONE}}/base/hooks/compact_history.py` | 30 | `Saving pre-compaction history` | — |
 | Hook | `SessionStart` | base | — | all | always | — | `{{BASH}}` | `{{CLONE}}/base/hooks/project-tmp.sh` | 60 | — | — |
+| Hook | `SessionStart` | base | — | all | always | — | `{{PYTHON}}` | `-I {{CLONE}}/base/hooks/session_record.py start` | 30 | — | — |
+| Hook | `SessionEnd` | base | — | all | always | — | `{{PYTHON}}` | `-I {{CLONE}}/base/hooks/session_record.py end` | 30 | — | — |
 | Hook | `SessionStart` | codex | — | all | `codex` on | — | `{{PYTHON}}` | `-I {{CLONE}}/features/codex/tools/codex-run.py session-hint` | 10 | — | — |
 | Hook | `SessionStart` | volunteers | — | Windows | `volunteers` on | — | `{{PYTHON}}` | `-I {{CLONE}}/features/volunteers/tools/volunteer-run.py session-hint` | 10 | — | — |
 | Hook | `PreToolUse` | base | — | all | always | `Bash` | `{{PYTHON}}` | `{{CLONE}}/base/hooks/no_ampersand.py` | — | — | — |
