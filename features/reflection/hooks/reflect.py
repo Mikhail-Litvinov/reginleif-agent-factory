@@ -2,7 +2,7 @@
 
 Haiku gets the user's rules, the last few user messages and what the assistant did since (short
 tool inputs and results, with times and how long each call took), and may read the whole turn from a
-file. It answers ok, problem or unsure; on unsure Sonnet decides. Catch-up mode (asyncRewake): the
+file. It answers ok, problem or unsure; Sonnet decides on problem or unsure. Catch-up mode (asyncRewake): the
 answer has already gone out; a serious problem exits 2 with the reason on stderr and wakes the
 assistant for a short follow-up. The woken turn is never reviewed (WAKE_MARKER in its start, and a
 one-shot stamp file for WAKE_GUARD_SECONDS).
@@ -51,7 +51,10 @@ FIRST_MODEL = "haiku"
 SECOND_MODEL = "sonnet"
 USER_MESSAGES = 3
 CONVERSATION_BUDGET = 40_000
-RULES_LIMIT = 14_000
+RULES_LIMIT = 64_000  # The expanded global rules are about 45,170 characters on this machine.
+IMPORT_DEPTH = 5  # https://code.claude.com/docs/en/memory: recursive imports, at most five hops.
+PRIOR_LIMIT = 20_000  # Bound history independently of the conversation window.
+BRANCH_TIMEOUT = 2  # Seconds; state must not hold the Stop hook indefinitely.
 TEXT_LIMIT = 3_000
 OLD_TEXT_LIMIT = 800
 EVENT_LIMIT = 400
@@ -67,7 +70,6 @@ CALL_TIMEOUT = 120
 DEADLINE = 300
 TURN_FILE_DAYS = 3
 TAIL_CHUNK = 4 * 1024 * 1024
-REPLAY_KEEP = 64 * 1024 * 1024
 MAX_PROBLEMS = 3
 WAKE_EXIT = 2
 WAKE_GUARD_SECONDS = 600
@@ -87,6 +89,8 @@ USER_KINDS = ("user", "answer")
 POLL_TOOL = "AskUserQuestion"
 # Attachment lines line_events reads itself: queued user messages and session notes.
 SESSION_MARKS = ('"queued_command"', '"instructions"', '"deferred_tools_delta"')
+IMPORT_LINE = re.compile(r"^\s*@([^\s]+)\s*$")
+REFLECTION_REPLY = re.compile(r"(?:^|\n)\s*(?:Reflection|\u0420\u0435\u0444\u043b\u0435\u043a\u0441\u0438\u044f)\s*:", re.IGNORECASE)
 
 
 def schema(verdicts: list[str]) -> str:
@@ -286,14 +290,94 @@ def conversation(events: list[dict]) -> str:
             out.append(f"[... {cut} events cut here; they are in the FULL TURN file]")
             cut = 0
         out.append(line["text"])
-    return "\n".join(out)
+    return clip("\n".join(out), CONVERSATION_BUDGET)
+
+
+def expanded_rules(path: Path, depth: int = 0, parents: frozenset = frozenset()) -> str:
+    path = path.expanduser().resolve()
+    if path in parents:
+        return f"[Import cycle: {path}]"
+    if depth > IMPORT_DEPTH:
+        return f"[Import depth limit: {path}]"
+    try:
+        source = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return f"[Import unavailable: {path}]"
+    output = []
+    size = 0
+    for line in source.splitlines():
+        match = IMPORT_LINE.match(line)
+        if match:
+            target = Path(match.group(1)).expanduser()
+            if not target.is_absolute():
+                target = path.parent / target
+            output.append(expanded_rules(target, depth + 1, parents | {path}))
+        else:
+            output.append(line)
+        size += len(output[-1]) + 1
+        if size > RULES_LIMIT:
+            break
+    return "\n".join(output)
 
 
 def rules(payload: dict, transcript: Path) -> str:
     cwd = Path(payload.get("cwd") or ".")
     files = [HOME_CLAUDE / "CLAUDE.md", cwd / "CLAUDE.md", cwd / ".claude" / "CLAUDE.md", transcript.parent / "memory" / "MEMORY.md"]
-    parts = [f"--- {f}\n{clip(f.read_text(encoding='utf-8'), RULES_LIMIT)}" for f in files if f.is_file()]
+    parts = [f"--- {f}\n{clip(expanded_rules(f), RULES_LIMIT)}" for f in files if f.is_file()]
     return "\n\n".join(parts) or "(none)"
+
+
+def prior_reflections(transcript: Path) -> str:
+    """Stream the whole transcript and retain the newest bounded wake/reply/user history."""
+    history = deque()
+    size = 0
+    active = False
+    answered = False
+    with transcript.open(encoding="utf-8", errors="replace") as source:
+        for raw in source:
+            parsed = events_of([raw])
+            if WAKE_MARKER in raw and not any(WAKE_MARKER in e.get("text", "") for e in parsed):
+                try:
+                    record = json.loads(raw)
+                    message = record.get("message") or {}
+                    if record.get("type") == "user":
+                        parsed.append({"kind": "user", "text": block_text(message.get("content"))})
+                except (ValueError, AttributeError, TypeError):
+                    pass
+            for event in parsed:
+                kind, text = event["kind"], event.get("text", "")
+                if kind != "assistant" and WAKE_MARKER in text:
+                    active, answered = True, False
+                    # The hook's instructions follow the items; retain only the wake and items.
+                    text = text.split("\n\n", 1)[0]
+                    entry = f"WAKE: {clip(text, TEXT_LIMIT)}"
+                elif active and kind == "assistant" and REFLECTION_REPLY.search(text):
+                    answered = True
+                    entry = f"REPLY: {clip(text, TEXT_LIMIT)}"
+                elif active and answered and kind in USER_KINDS:
+                    entry = f"USER: {clip(text, TEXT_LIMIT)}"
+                else:
+                    continue
+                history.append(entry)
+                size += len(entry) + 1
+                while size > PRIOR_LIMIT and history:
+                    size -= len(history.popleft()) + 1
+    return "\n".join(history) or "(none)"
+
+
+def session_state(cwd: str) -> str:
+    try:
+        result = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=cwd,
+                                capture_output=True, text=True, encoding="utf-8", timeout=BRANCH_TIMEOUT)
+    except (OSError, subprocess.TimeoutExpired):
+        return "(none)"
+    if result.returncode != 0:
+        try:
+            result = subprocess.run(["git", "symbolic-ref", "--quiet", "--short", "HEAD"], cwd=cwd,
+                                    capture_output=True, text=True, encoding="utf-8", timeout=BRANCH_TIMEOUT)
+        except (OSError, subprocess.TimeoutExpired):
+            return "(none)"
+    return f"git branch: {clip(result.stdout.strip(), TEXT_LIMIT)}" if result.returncode == 0 and result.stdout.strip() else "(none)"
 
 
 def feature_enabled(name: str) -> bool:
@@ -372,12 +456,17 @@ def review(payload: dict) -> tuple[str, dict | None]:
     prune_turns()
     full_file = TURNS_DIR / f"{session}.md"
     shown = window(events)
+    shown_turn = current_turn(shown)
+    earlier = shown[:-len(shown_turn)] if shown_turn else shown
     full_file.write_text("\n\n".join(line_of(e, FULL_CALL_LIMIT, FULL_RESULT_LIMIT, 10**9) for e in shown), encoding="utf-8")
 
     text = (
         f"RULES\n{rules(payload, transcript)}\n\n"
-        f"CONVERSATION\n{conversation(shown)}\n\n"
-        f"FINAL MESSAGE\n{final}\n\n"
+        f"PRIOR REFLECTIONS\n{prior_reflections(transcript)}\n\n"
+        f"STATE\n{session_state(payload.get('cwd') or str(Path.cwd()))}\n\n"
+        f"CONVERSATION\nEARLIER (context only)\n{conversation(earlier)}\n\n"
+        f"THIS TURN (review only this)\n{conversation(shown_turn)}\n\n"
+        f"FINAL MESSAGE\n{clip(final, CONVERSATION_BUDGET)}\n\n"
         f"{analysis_section(payload)}"
         f"FULL TURN\n{full_file}\n"
     )
@@ -389,20 +478,25 @@ def review(payload: dict) -> tuple[str, dict | None]:
     cwd = payload.get("cwd") or str(Path.cwd())
 
     answer, cost, error = ask(FIRST_MODEL, ["ok", "problem", "unsure"], text, cwd, dirs, started)
+    first_verdict = answer["verdict"] if answer else "failed"
+    first = {"model": FIRST_MODEL, "verdict": first_verdict, "problems": answer["problems"] if answer else []}
+    second_verdict = None
     judge = FIRST_MODEL
-    if answer and answer["verdict"] == "unsure":
-        doubts = json.dumps(answer["problems"], ensure_ascii=False)
-        second_text = f"{text}\nFIRST REVIEWER WAS UNSURE ABOUT\n{doubts}\n\nDecide `ok` or `problem`; `unsure` is not open to you.\n"
+    if answer and answer["verdict"] in ("problem", "unsure"):
+        first_answer = json.dumps(answer, ensure_ascii=False)
+        second_text = f"{text}\nFIRST REVIEWER ANSWER\n{first_answer}\n\nDecide `ok` or `problem`; `unsure` is not open to you.\n"
         second, second_cost, error = ask(SECOND_MODEL, ["ok", "problem"], second_text, cwd, dirs, started)
         cost += second_cost
         judge = f"{FIRST_MODEL}+{SECOND_MODEL}"
         answer = second
+        second_verdict = second["verdict"] if second else "failed"
     seconds = round(time.monotonic() - started, 1)
     verdict = answer["verdict"] if answer else "failed"
-    log({"session": session, "cwd": cwd, "judge": judge, "verdict": verdict, "cost": round(cost, 4), "seconds": seconds, "error": error or None, "problems": answer["problems"] if answer else []})
+    log({"session": session, "cwd": cwd, "judge": judge, "verdict": verdict, "first_verdict": first_verdict, "second_verdict": second_verdict, "first": first, "cost": round(cost, 4), "seconds": seconds, "error": error or None, "problems": answer["problems"] if answer else []})
     if verdict == "problem":
         answer = {**answer, "problems": [p for p in answer["problems"] if p.get("kind") in SERIOUS_KINDS]}
-    return f"{judge}: {verdict}, ${cost:.4f}, {seconds}s{', ' + error if error else ''}", answer if verdict == "problem" and answer["problems"] else None
+    first_summary = json.dumps(first, ensure_ascii=False)
+    return f"{judge}: {verdict}, ${cost:.4f}, {seconds}s; first={first_summary}{', ' + error if error else ''}", answer if verdict == "problem" and answer["problems"] else None
 
 
 def reason(answer: dict) -> str:
@@ -464,26 +558,19 @@ def skipped(payload: dict) -> bool:
 
 def replay(transcript: Path, line: int) -> None:
     """Review the turn that ends before `line` (1-based) of a transcript; print, never block."""
-    head: deque[str] = deque()
-    kept = 0
-    with transcript.open(encoding="utf-8") as f:
-        for _, raw in zip(range(line - 1), f):
-            head.append(raw)
-            kept += len(raw)
-            while kept > REPLAY_KEEP:
-                kept -= len(head.popleft())
     last = ""
-    for raw in head:
-        try:
-            entry = json.loads(raw)
-        except json.JSONDecodeError:
-            continue
-        if entry.get("type") == "assistant" and not entry.get("isSidechain"):
-            texts = [b.get("text", "") for b in (entry.get("message") or {}).get("content") or [] if isinstance(b, dict) and b.get("type") == "text"]
-            last = "\n".join(t for t in texts if t.strip()) or last
     with tempfile.TemporaryDirectory() as tmp:
         cut = Path(tmp) / transcript.name
-        cut.write_text("".join(head), encoding="utf-8")
+        with transcript.open(encoding="utf-8") as source, cut.open("w", encoding="utf-8") as dest:
+            for _, raw in zip(range(line - 1), source):
+                dest.write(raw)
+                try:
+                    entry = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if entry.get("type") == "assistant" and not entry.get("isSidechain"):
+                    texts = [b.get("text", "") for b in (entry.get("message") or {}).get("content") or [] if isinstance(b, dict) and b.get("type") == "text"]
+                    last = "\n".join(t for t in texts if t.strip()) or last
         (Path(tmp) / "memory").mkdir()
         memory = transcript.parent / "memory" / "MEMORY.md"
         if memory.is_file():
