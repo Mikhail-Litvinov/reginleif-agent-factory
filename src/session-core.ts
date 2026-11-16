@@ -18,14 +18,42 @@ export const RENAME_TIMEOUT_MS = COMPACT_TIMEOUT_MS;
 export const AUTOCOMPACT_TIMEOUT_MS = COMPACT_TIMEOUT_MS;
 export const SESSION_TIMEOUTS: Record<Op, number> = { compact: COMPACT_TIMEOUT_MS, rename: RENAME_TIMEOUT_MS, autocompact: AUTOCOMPACT_TIMEOUT_MS, usage: READ_TIMEOUT_MS, mode: READ_TIMEOUT_MS };
 
-export type SessionRecord = { id: string; cwd: string | null; transcriptPath: string | null; pid: number | null; pidCreated: string | null; startedAt: string; endedAt: string | null };
-export type SessionSummary = { id: string; cwd: string | null; transcriptPath: string | null; pid: number | null; startedAt: string; live: boolean; module: boolean };
+// One Claude process of a session, from its file ~/.agent-rig/sessions/<id>/processes/<pid>.json (or a legacy record).
+// A process with no recorded creation time cannot be told from a reused pid, so it never counts as live.
+export type SessionProcess = { pid: number; pidCreated: string | null; startedAt: string };
+export type SessionRecord = { id: string; cwd: string | null; transcriptPath: string | null; startedAt: string; processes: SessionProcess[] };
+export type LiveProcess = { pid: number; startedAt: string };
+export type SessionSummary = { id: string; cwd: string | null; transcriptPath: string | null; pid: number | null; processes: LiveProcess[]; startedAt: string; live: boolean; module: boolean };
 export type SessionListEntry = SessionSummary | { id: string; error: { code: string; message: string } };
 const object = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const nullableString = (v: unknown): v is string | null => v === null || typeof v === "string";
 const missing = (e: unknown): boolean => object(e) && (e.code === "ENOENT" || e.code === "ENOTDIR");
 const root = (r: RuntimePorts): string => joinPath(r.home, ".agent-rig", "sessions");
 const folder = (r: RuntimePorts, id: string): string => joinPath(root(r), id);
+const PROCESSES_DIR = "processes";
+const USAGE_FILE = "usage.json";
+const positivePid = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v > 0;
+export const processKey = (process: SessionProcess): string => `${process.pid}:${process.pidCreated ?? ""}`;
+
+// The processes the files of a session name. A process file the hook deletes between the listing and the read is skipped.
+const readProcesses = async (r: RuntimePorts, id: string, legacy: SessionProcess | null): Promise<ApiResult<SessionProcess[]>> => {
+	const m = messagesFor(r.language).session;
+	const directory = joinPath(folder(r, id), PROCESSES_DIR);
+	let entries;
+	try { entries = await r.fs.listDirectory(directory); }
+	catch (e) { return missing(e) ? apiOk(legacy === null ? [] : [legacy]) : apiFail(SESSION_IO, m.io(errorText(e))); }
+	const processes: SessionProcess[] = [];
+	for (const entry of entries) {
+		if (entry.directory || !entry.name.endsWith(REQUEST_SUFFIX)) continue;
+		let value: unknown;
+		try { value = JSON.parse(await r.fs.readText(joinPath(directory, entry.name))); }
+		catch (e) { if (missing(e)) continue; return e instanceof SyntaxError ? apiFail(SESSION_INVALID, m.invalid(id)) : apiFail(SESSION_IO, m.io(errorText(e))); }
+		if (!object(value) || !positivePid(value.pid) || !nullableString(value.pid_created) || typeof value.started_at !== "string") return apiFail(SESSION_INVALID, m.invalid(id));
+		processes.push({ pid: value.pid, pidCreated: value.pid_created, startedAt: value.started_at });
+	}
+	if (legacy !== null && !processes.some((process) => processKey(process) === processKey(legacy))) processes.push(legacy);
+	return apiOk(processes);
+};
 
 export const lookupSession = async (r: RuntimePorts, id: string): Promise<ApiResult<SessionRecord>> => {
 	const m = messagesFor(r.language).session;
@@ -33,14 +61,33 @@ export const lookupSession = async (r: RuntimePorts, id: string): Promise<ApiRes
 	let value: unknown;
 	try { value = JSON.parse(await r.fs.readText(joinPath(root(r), `${id}.json`))); }
 	catch (e) { return missing(e) ? apiFail(SESSION_UNKNOWN, m.unknown(id)) : e instanceof SyntaxError ? apiFail(SESSION_INVALID, m.invalid(id)) : apiFail(SESSION_IO, m.io(errorText(e))); }
-	if (!object(value) || value.session_id !== id || !nullableString(value.cwd) || !nullableString(value.transcript_path) || !(value.pid === null || (typeof value.pid === "number" && Number.isSafeInteger(value.pid) && value.pid > 0)) || !nullableString(value.pid_created) || typeof value.started_at !== "string" || !nullableString(value.ended_at)) return apiFail(SESSION_INVALID, m.invalid(id));
-	return apiOk({ id, cwd: value.cwd, transcriptPath: value.transcript_path, pid: value.pid, pidCreated: value.pid_created, startedAt: value.started_at, endedAt: value.ended_at });
+	// A record written before per-process files holds one pid, pid_created and ended_at itself; absent fields mean null.
+	const pid = value !== null && object(value) ? value.pid ?? null : null;
+	const pidCreated = value !== null && object(value) ? value.pid_created ?? null : null;
+	const endedAt = value !== null && object(value) ? value.ended_at ?? null : null;
+	if (!object(value) || value.session_id !== id || !nullableString(value.cwd) || !nullableString(value.transcript_path) || !(pid === null || positivePid(pid)) || !nullableString(pidCreated) || typeof value.started_at !== "string" || !nullableString(endedAt)) return apiFail(SESSION_INVALID, m.invalid(id));
+	const legacy: SessionProcess | null = pid !== null && endedAt === null ? { pid, pidCreated, startedAt: value.started_at } : null;
+	const processes = await readProcesses(r, id, legacy);
+	if (!processes.ok) return processes;
+	return apiOk({ id, cwd: value.cwd, transcriptPath: value.transcript_path, startedAt: value.started_at, processes: processes.value });
+};
+
+// The processes among `candidates` whose creation time matches the recorded one, earliest started first.
+const liveAmong = (candidates: readonly SessionProcess[], created: Record<string, string | null>): SessionProcess[] =>
+	candidates.filter((process) => process.pidCreated !== null && created[String(process.pid)] === process.pidCreated).sort((a, b) => (a.pidCreated ?? "").localeCompare(b.pidCreated ?? ""));
+const checkable = (processes: readonly SessionProcess[]): number[] => [...new Set(processes.filter((process) => process.pidCreated !== null).map((process) => process.pid))];
+
+// Every live process of the session; one creation-time query covers all of them.
+export const liveProcesses = async (r: RuntimePorts, session: SessionRecord): Promise<ApiResult<SessionProcess[]>> => {
+	const pids = checkable(session.processes);
+	if (pids.length === 0) return apiOk([]);
+	const created = await r.process.createdAt(pids);
+	return created.ok ? apiOk(liveAmong(session.processes, created.value)) : apiFail(SESSION_IO, messagesFor(r.language).session.io(created.error));
 };
 
 export const sessionLive = async (r: RuntimePorts, session: SessionRecord): Promise<ApiResult<boolean>> => {
-	if (session.endedAt !== null || session.pid === null || session.pidCreated === null) return apiOk(false);
-	const created = await r.process.createdAt([session.pid]);
-	return created.ok ? apiOk(created.value[String(session.pid)] === session.pidCreated) : apiFail(SESSION_IO, messagesFor(r.language).session.io(created.error));
+	const live = await liveProcesses(r, session);
+	return live.ok ? apiOk(live.value.length > 0) : live;
 };
 
 export const lookupSessionForCommand = async (r: RuntimePorts, id: string, requireLive: boolean): Promise<ApiResult<SessionRecord>> => {
@@ -63,7 +110,8 @@ export const compactSessionCore = async (r: RuntimePorts, session: SessionRecord
 };
 
 export const sessionModule = async (r: RuntimePorts, session: SessionRecord): Promise<ApiResult<boolean>> => {
-	try { await r.fs.listDirectory(folder(r, session.id)); return apiOk(true); }
+	// The session folder also holds the hooks' process files, so only the window module's usage snapshot marks it as present.
+	try { await r.fs.readText(joinPath(folder(r, session.id), USAGE_FILE)); return apiOk(true); }
 	catch (e) { return missing(e) ? apiOk(false) : apiFail(SESSION_IO, messagesFor(r.language).session.io(errorText(e))); }
 };
 
@@ -80,18 +128,19 @@ export const listSessions = async (r: RuntimePorts): Promise<ApiResult<{ session
 		if (!record.ok) { sessions.push({ id, error: record.error }); continue; }
 		records.push(record.value);
 	}
-	const pids = [...new Set(records.filter((record) => record.endedAt === null && record.pidCreated !== null && record.pid !== null).map((record) => record.pid).filter((pid): pid is number => pid !== null))];
+	// One creation-time query for the processes of all sessions.
+	const pids = [...new Set(records.flatMap((record) => checkable(record.processes)))];
 	const created = pids.length === 0 ? null : await r.process.createdAt(pids);
 	for (const record of records) {
-		const { id, cwd, transcriptPath, pid, startedAt } = record;
-		if (record.endedAt === null && pid !== null && record.pidCreated !== null && created !== null && !created.ok) {
+		const { id, cwd, transcriptPath, startedAt } = record;
+		if (created !== null && !created.ok && checkable(record.processes).length > 0) {
 			sessions.push({ id, error: { code: SESSION_IO, message: messagesFor(r.language).session.io(created.error) } });
 			continue;
 		}
 		const module = await sessionModule(r, record);
 		if (!module.ok) { sessions.push({ id, error: module.error }); continue; }
-		const live = record.endedAt === null && pid !== null && record.pidCreated !== null && created !== null && created.ok && created.value[String(pid)] === record.pidCreated;
-		sessions.push({ id, cwd, transcriptPath, pid, startedAt, live, module: module.value });
+		const live = created !== null && created.ok ? liveAmong(record.processes, created.value) : [];
+		sessions.push({ id, cwd, transcriptPath, pid: live[0]?.pid ?? null, processes: live.map((process) => ({ pid: process.pid, startedAt: process.startedAt })), startedAt, live: live.length > 0, module: module.value });
 	}
 	sessions.sort((a, b) => ("startedAt" in b ? b.startedAt : "").localeCompare("startedAt" in a ? a.startedAt : ""));
 	return apiOk({ sessions });
@@ -141,7 +190,7 @@ export const requestSession = async (r: RuntimePorts, session: SessionRecord, op
 			}
 			const current = await lookupSession(r, session.id);
 			if (!current.ok) return current;
-			if (current.value.endedAt !== null) return apiFail(SESSION_ENDED, m.ended());
+			if (current.value.processes.length === 0) return apiFail(SESSION_ENDED, m.ended());
 			const remaining = deadline - r.clock.now().getTime();
 			if (remaining <= 0) {
 				const live = await sessionLive(r, current.value);

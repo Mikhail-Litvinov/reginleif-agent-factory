@@ -13,12 +13,14 @@ import { createMemoryRuntime } from "./fakes/memory-runtime.js";
 
 const ROOT = "/home/test/.agent-rig/sessions";
 const CREATED = "creation";
-const SESSION: SessionRecord = { id: "abc", cwd: null, transcriptPath: null, pid: 42, pidCreated: CREATED, startedAt: "start", endedAt: null };
-const RAW = { session_id: "abc", cwd: null, transcript_path: null, pid: 42, pid_created: CREATED, started_at: "start", ended_at: null };
+const SESSION: SessionRecord = { id: "abc", cwd: null, transcriptPath: null, startedAt: "start", processes: [{ pid: 42, pidCreated: CREATED, startedAt: "start" }] };
+const RAW = { session_id: "abc", cwd: null, transcript_path: null, started_at: "start" };
+const PROCESS_FILE = { pid: 42, pid_created: CREATED, started_at: "start", source: "startup", config_dir: "" };
 const setup = () => {
 	const h = createMemoryRuntime();
 	h.fs.seed(`${ROOT}/abc.json`, JSON.stringify(RAW));
-	h.fs.directories.add(`${ROOT}/abc`);
+	h.fs.seed(`${ROOT}/abc/usage.json`, "{}");
+	h.fs.seed(`${ROOT}/abc/processes/42.json`, JSON.stringify(PROCESS_FILE));
 	let now = 0;
 	h.runtime.clock.now = () => new Date(now);
 	h.runtime.clock.sleep = async (ms) => { now += ms; };

@@ -13,13 +13,15 @@ import { createMemoryRuntime } from "./fakes/memory-runtime.js";
 
 const ROOT = "/home/test/.agent-rig/sessions";
 const CREATED = "2026-01-01T00:00:00.000000Z";
-const record: SessionRecord = { id: "abc", cwd: "/work", transcriptPath: "/transcript", pid: 42, pidCreated: CREATED, startedAt: "2026-01-01T00:00:00Z", endedAt: null };
-const raw = { session_id: record.id, cwd: record.cwd, transcript_path: record.transcriptPath, pid: record.pid, pid_created: record.pidCreated, started_at: record.startedAt, ended_at: null };
+const record: SessionRecord = { id: "abc", cwd: "/work", transcriptPath: "/transcript", startedAt: "2026-01-01T00:00:00Z", processes: [{ pid: 42, pidCreated: CREATED, startedAt: "2026-01-01T00:00:00Z" }] };
+const raw = { session_id: record.id, cwd: record.cwd, transcript_path: record.transcriptPath, started_at: record.startedAt };
+const processFile = { pid: 42, pid_created: CREATED, started_at: record.startedAt, source: "startup", config_dir: "" };
 
 const setup = (response: unknown) => {
 	const harness = createMemoryRuntime();
 	harness.fs.seed(`${ROOT}/abc.json`, JSON.stringify(raw));
-	harness.fs.directories.add(`${ROOT}/abc`);
+	harness.fs.seed(`${ROOT}/abc/usage.json`, "{}");
+	harness.fs.seed(`${ROOT}/abc/processes/42.json`, JSON.stringify(processFile));
 	harness.fs.seed(`${ROOT}/abc/responses/event-1.json`, JSON.stringify({ id: "event-1", ok: true, result: response }));
 	harness.runtime.process.createdAt = async (pids) => ok(Object.fromEntries(pids.map((pid) => [String(pid), CREATED])));
 	return harness;
@@ -81,7 +83,7 @@ describe("session compact and rename", () => {
 			(runtime: ReturnType<typeof setup>["runtime"]) => renameSession(runtime, ["abc", "new name"], () => {}),
 		]) {
 			const harness = setup(null);
-			harness.fs.directories.delete(`${ROOT}/abc`);
+			harness.fs.files.delete(`${ROOT}/abc/usage.json`);
 			expect(errorCode(await run(harness.runtime))).toBe(SESSION_NO_MODULE);
 		}
 	});
@@ -144,7 +146,7 @@ describe("session compact and rename", () => {
 		ended.runtime.process.createdAt = async () => ok({ "42": "different" });
 		expect(errorCode(await autocompactSession(ended.runtime, ["abc", "auto"], () => {}))).toBe(SESSION_ENDED);
 		const none = setup(null);
-		none.fs.directories.delete(`${ROOT}/abc`);
+		none.fs.files.delete(`${ROOT}/abc/usage.json`);
 		expect(errorCode(await autocompactSession(none.runtime, ["abc", "auto"], () => {}))).toBe(SESSION_NO_MODULE);
 	});
 

@@ -11,7 +11,7 @@ import { launchPath, LAUNCH_TOKEN } from "../launch-safety.js";
 import { messagesFor } from "../messages.js";
 import { apiFail, apiOk, ERROR_CODE_USAGE, LAUNCH_FAILED, LAUNCH_ACCOUNT_LOOKUP, LAUNCH_INVALID, LAUNCH_UNAVAILABLE, LAUNCH_TIMEOUT, SESSION_RUNNING } from "../output.js";
 import { errorText } from "../result.js";
-import { lookupSession, lookupSessionForCommand, sessionLive, SESSION_POLL_MS } from "../session-core.js";
+import { liveProcesses, lookupSession, lookupSessionForCommand, processKey, sessionLive, SESSION_POLL_MS } from "../session-core.js";
 import { accountOf, INFO_ERROR_STATE_UNREADABLE } from "./info.js";
 import { readRigState } from "./shared.js";
 import { stopSession } from "./session-stop.js";
@@ -170,10 +170,14 @@ export const runSession = async (runtime: RuntimePorts, session: SessionRecord, 
 	for (;;) {
 		const current = await lookupSession(runtime, session.id);
 		if (!current.ok) return current;
-		if (current.value.pid !== null && (current.value.pid !== session.pid || current.value.pidCreated !== session.pidCreated)) {
-			const currentLive = await sessionLive(runtime, current.value);
+		// The launched process is one the record did not name before the launch.
+		const earlier = new Set(session.processes.map(processKey));
+		const started = current.value.processes.filter((process) => !earlier.has(processKey(process)));
+		if (started.length > 0) {
+			const currentLive = await liveProcesses(runtime, { ...current.value, processes: started });
 			if (!currentLive.ok) return currentLive;
-			if (currentLive.value) return apiOk({ session: session.id, pid: current.value.pid, mode, account: accountText === "" ? null : Number(accountText) });
+			const [first] = currentLive.value;
+			if (first !== undefined) return apiOk({ session: session.id, pid: first.pid, mode, account: accountText === "" ? null : Number(accountText) });
 		}
 		const remaining = deadline - runtime.clock.now().getTime();
 		if (remaining <= 0) return apiFail(LAUNCH_TIMEOUT, messagesFor(runtime.language).session.launchTimeout());

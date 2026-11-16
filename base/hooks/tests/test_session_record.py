@@ -216,18 +216,31 @@ class SessionIdTests(unittest.TestCase):
                 self.assertFalse(RECORD.session_id_valid(value))
 
 
+def multi_table(claudes, hook_under):
+    # Several live claude processes side by side; the hook's parent runs under hook_under.
+    rows = [(1, 0, "wininit.exe")] + [(pid, 1, "claude.exe") for pid in claudes] + [(HOOK_PARENT, hook_under, "bash.exe")]
+    return table(*rows)
+
+
 class SessionRecordTests(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.home = Path(temp.name)
         self.sessions = self.home / ".agent-rig" / "sessions"
+        self.processes = self.sessions / SESSION / "processes"
         self.loads = 0
 
     def loader(self, claude_pid=CLAUDE_INNER):
         def load():
             self.loads += 1
             return session_table(claude_pid), None
+        return load
+
+    def table_loader(self, processes):
+        def load():
+            self.loads += 1
+            return processes, None
         return load
 
     def run_hook(self, event, data, load=None, now=NOW, env=None):
@@ -240,72 +253,120 @@ class SessionRecordTests(unittest.TestCase):
     def read(self):
         return json.loads((self.sessions / f"{SESSION}.json").read_text(encoding="utf-8"))
 
-    def test_start_writes_every_field(self):
+    def process_pids(self):
+        return sorted(int(path.stem) for path in self.processes.glob("*.json")) if self.processes.exists() else []
+
+    def read_process(self, pid):
+        return json.loads((self.processes / f"{pid}.json").read_text(encoding="utf-8"))
+
+    def test_start_writes_the_session_record_without_process_fields(self):
         self.run_hook("start", self.start_data())
         record = self.read()
-        self.assertEqual(set(record), {"session_id", "cwd", "transcript_path", "config_dir", "pid", "pid_created", "pid_error", "source", "started_at", "ended_at"})
+        self.assertEqual(set(record), {"session_id", "cwd", "transcript_path", "config_dir", "pid_error", "started_at"})
         self.assertEqual(record["session_id"], SESSION)
         self.assertEqual(record["cwd"], "C:/work/project")
         self.assertEqual(record["transcript_path"], "C:/t/probe.jsonl")
         self.assertEqual(record["config_dir"], "C:/cfg/2")
-        self.assertEqual(record["pid"], CLAUDE_INNER)
-        self.assertEqual(record["pid_created"], "2023-11-14T22:18:20.000000Z")
         self.assertIsNone(record["pid_error"])
-        self.assertEqual(record["source"], "startup")
         self.assertEqual(record["started_at"], "2026-11-15T10:00:00Z")
-        self.assertIsNone(record["ended_at"])
+
+    def test_start_writes_its_own_process_file(self):
+        self.run_hook("start", self.start_data())
+        self.assertEqual(self.process_pids(), [CLAUDE_INNER])
+        self.assertEqual(self.read_process(CLAUDE_INNER), {"pid": CLAUDE_INNER, "pid_created": "2023-11-14T22:18:20.000000Z", "started_at": "2026-11-15T10:00:00Z", "source": "startup", "config_dir": "C:/cfg/2"})
 
     def test_config_dir_is_empty_for_the_main_login(self):
         self.run_hook("start", self.start_data(), env={})
         self.assertEqual(self.read()["config_dir"], "")
+        self.assertEqual(self.read_process(CLAUDE_INNER)["config_dir"], "")
 
-    def test_resume_and_compact_update_pid_and_keep_started_at(self):
+    def test_a_restart_in_another_process_keeps_started_at_and_drops_the_dead_process_file(self):
         self.run_hook("start", self.start_data())
         for source in ("resume", "compact"):
             with self.subTest(source=source):
                 self.run_hook("start", self.start_data(source=source), load=self.loader(claude_pid=555), now=LATER)
-                record = self.read()
-                self.assertEqual(record["pid"], 555)
-                self.assertEqual(record["source"], source)
-                self.assertEqual(record["started_at"], "2026-11-15T10:00:00Z")
-                self.assertIsNone(record["ended_at"])
+                self.assertEqual(self.read()["started_at"], "2026-11-15T10:00:00Z")
+                self.assertEqual(self.read_process(555)["source"], source)
+                self.assertEqual(self.read_process(555)["started_at"], "2026-11-15T11:30:00Z")
+                self.assertEqual(self.process_pids(), [555])
 
-    def test_end_sets_ended_at_and_keeps_the_rest(self):
+    def test_a_second_live_process_keeps_the_first_process_file(self):
+        both = multi_table([CLAUDE_INNER, 555], 555)
+        self.run_hook("start", self.start_data(), load=self.table_loader(multi_table([CLAUDE_INNER, 555], CLAUDE_INNER)))
+        self.run_hook("start", self.start_data(source="resume"), load=self.table_loader(both), now=LATER)
+        self.assertEqual(self.process_pids(), [CLAUDE_INNER, 555])
+        self.assertEqual(self.read()["started_at"], "2026-11-15T10:00:00Z")
+
+    def test_the_live_case_a_second_process_ending_leaves_the_first_process_file(self):
+        window = multi_table([CLAUDE_INNER, 555], CLAUDE_INNER)
+        sdk = multi_table([CLAUDE_INNER, 555], 555)
+        self.run_hook("start", self.start_data(), load=self.table_loader(window))
+        self.run_hook("start", self.start_data(source="resume"), load=self.table_loader(sdk), now=LATER)
+        self.run_hook("end", {"session_id": SESSION, "hook_event_name": "SessionEnd"}, load=self.table_loader(sdk), now=LATER)
+        self.assertEqual(self.process_pids(), [CLAUDE_INNER])
+        self.assertNotIn("ended_at", self.read())
+
+    def test_end_removes_only_its_own_process_file_and_never_writes_the_record(self):
         self.run_hook("start", self.start_data())
         before = self.read()
         self.run_hook("end", {"session_id": SESSION, "hook_event_name": "SessionEnd"}, now=LATER)
-        after = self.read()
-        self.assertEqual(after["ended_at"], "2026-11-15T11:30:00Z")
-        self.assertEqual({**after, "ended_at": None}, before)
+        self.assertEqual(self.process_pids(), [])
+        self.assertEqual(self.read(), before)
 
-    def test_start_after_end_clears_ended_at(self):
-        self.run_hook("start", self.start_data())
-        self.run_hook("end", {"session_id": SESSION}, now=LATER)
-        self.run_hook("start", self.start_data(source="resume"))
-        self.assertIsNone(self.read()["ended_at"])
-
-    def test_end_without_a_record_writes_nothing(self):
+    def test_end_without_any_files_writes_nothing(self):
         self.run_hook("end", {"session_id": SESSION}, now=LATER)
         self.assertFalse(self.sessions.exists())
 
-    def test_missing_pid_is_recorded_with_an_error_and_the_record_still_written(self):
+    def test_end_with_an_unavailable_process_table_keeps_the_files(self):
+        self.run_hook("start", self.start_data())
+        self.run_hook("end", {"session_id": SESSION}, load=lambda: (None, "process table: boom"), now=LATER)
+        self.assertEqual(self.process_pids(), [CLAUDE_INNER])
+
+    def test_start_deletes_dead_and_unreadable_process_files_but_keeps_live_ones(self):
+        self.processes.mkdir(parents=True)
+        live = multi_table([CLAUDE_INNER, 777], CLAUDE_INNER)
+        (self.processes / "777.json").write_text(json.dumps({"pid": 777, "pid_created": "2023-11-14T22:26:17.000000Z", "started_at": "x", "source": None, "config_dir": ""}), encoding="utf-8")
+        (self.processes / "888.json").write_text(json.dumps({"pid": 888, "pid_created": "2023-11-14T22:30:00.000000Z", "started_at": "x", "source": None, "config_dir": ""}), encoding="utf-8")
+        (self.processes / "999.json").write_text("{", encoding="utf-8")
+        self.run_hook("start", self.start_data(), load=self.table_loader(live))
+        self.assertEqual(self.process_pids(), [CLAUDE_INNER, 777])
+
+    def test_start_migrates_a_live_legacy_pid_into_its_process_file(self):
+        self.sessions.mkdir(parents=True)
+        legacy = {"session_id": SESSION, "cwd": "C:/old", "transcript_path": None, "config_dir": "C:/cfg/1", "pid": 555, "pid_created": "2023-11-14T22:22:35.000000Z", "pid_error": None, "source": "startup", "started_at": "2026-11-15T09:00:00Z", "ended_at": None}
+        (self.sessions / f"{SESSION}.json").write_text(json.dumps(legacy), encoding="utf-8")
+        self.run_hook("start", self.start_data(source="resume"), load=self.table_loader(multi_table([CLAUDE_INNER, 555], CLAUDE_INNER)))
+        self.assertEqual(self.process_pids(), [CLAUDE_INNER, 555])
+        self.assertEqual(self.read_process(555), {"pid": 555, "pid_created": "2023-11-14T22:22:35.000000Z", "started_at": "2026-11-15T09:00:00Z", "source": "startup", "config_dir": "C:/cfg/1"})
+        record = self.read()
+        self.assertEqual(record["started_at"], "2026-11-15T09:00:00Z")
+        self.assertNotIn("pid", record)
+        self.assertNotIn("ended_at", record)
+
+    def test_start_does_not_migrate_a_dead_or_ended_legacy_pid(self):
+        self.sessions.mkdir(parents=True)
+        base = {"session_id": SESSION, "cwd": None, "transcript_path": None, "config_dir": "", "pid": 555, "pid_created": "2023-11-14T22:22:35.000000Z", "pid_error": None, "source": "startup", "started_at": "2026-11-15T09:00:00Z"}
+        for extra, processes in (({"ended_at": None}, session_table(CLAUDE_INNER)), ({"ended_at": "2026-11-15T09:30:00Z"}, multi_table([CLAUDE_INNER, 555], CLAUDE_INNER))):
+            with self.subTest(extra=extra):
+                (self.sessions / f"{SESSION}.json").write_text(json.dumps({**base, **extra}), encoding="utf-8")
+                self.run_hook("start", self.start_data(), load=self.table_loader(processes))
+                self.assertEqual(self.process_pids(), [CLAUDE_INNER])
+
+    def test_missing_pid_is_recorded_with_an_error_and_no_process_file(self):
         def no_table():
             self.loads += 1
             return None, "process table: powershell timed out"
         self.run_hook("start", self.start_data(), load=no_table)
-        record = self.read()
-        self.assertIsNone(record["pid"])
-        self.assertIsNone(record["pid_created"])
-        self.assertEqual(record["pid_error"], "process table: powershell timed out")
+        self.assertEqual(self.read()["pid_error"], "process table: powershell timed out")
+        self.assertEqual(self.process_pids(), [])
 
-    def test_no_claude_ancestor_is_recorded_with_an_error(self):
+    def test_no_claude_ancestor_is_recorded_with_an_error_and_no_process_file(self):
         def only_bash():
             self.loads += 1
             return table((1, 0, "wininit.exe"), (HOOK_PARENT, 1, "bash.exe")), None
         self.run_hook("start", self.start_data(), load=only_bash)
-        record = self.read()
-        self.assertIsNone(record["pid"])
-        self.assertIn("claude", record["pid_error"])
+        self.assertIn("claude", self.read()["pid_error"])
+        self.assertEqual(self.process_pids(), [])
 
     def test_bad_session_id_is_ignored_before_any_lookup(self):
         bad = ["", "..", "../escape", "a/b", "a b", "x.y", None, 7]
@@ -329,14 +390,15 @@ class SessionRecordTests(unittest.TestCase):
         self.run_hook("bogus", self.start_data())
         self.assertFalse(self.sessions.exists())
 
-    def test_write_leaves_only_the_record_and_removes_its_temp_file_on_failure(self):
+    def test_writes_leave_no_temp_files_and_a_failed_write_removes_its_temp_file(self):
         self.run_hook("start", self.start_data())
-        self.assertEqual(sorted(path.name for path in self.sessions.iterdir()), [f"{SESSION}.json"])
+        self.assertEqual(sorted(path.name for path in self.sessions.iterdir()), [SESSION, f"{SESSION}.json"])
+        self.assertEqual(sorted(path.name for path in self.processes.iterdir()), [f"{CLAUDE_INNER}.json"])
         with mock.patch.object(RECORD.os, "replace", side_effect=OSError("locked")):
             with self.assertRaises(OSError):
-                self.run_hook("end", {"session_id": SESSION}, now=LATER)
-        self.assertEqual(sorted(path.name for path in self.sessions.iterdir()), [f"{SESSION}.json"])
-        self.assertIsNone(self.read()["ended_at"])
+                self.run_hook("start", self.start_data(source="resume"), load=self.loader(claude_pid=555), now=LATER)
+        self.assertEqual(sorted(path.name for path in self.sessions.iterdir()), [SESSION, f"{SESSION}.json"])
+        self.assertEqual([path.name for path in self.processes.iterdir() if path.suffix == ".tmp"], [])
 
 
 class CommandLineTests(unittest.TestCase):
@@ -352,12 +414,9 @@ class CommandLineTests(unittest.TestCase):
         return subprocess.run([sys.executable, "-I", str(SCRIPT), event], input=text.encode("utf-8"), capture_output=True, env=env, check=False)
 
     def test_end_from_the_command_line_exits_zero_with_empty_stdout(self):
-        self.sessions.mkdir(parents=True)
-        (self.sessions / f"{SESSION}.json").write_text(json.dumps({"session_id": SESSION, "ended_at": None}), encoding="utf-8")
         result = self.run_script("end", json.dumps({"session_id": SESSION, "hook_event_name": "SessionEnd"}))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, b"")
-        self.assertIsNotNone(json.loads((self.sessions / f"{SESSION}.json").read_text(encoding="utf-8"))["ended_at"])
 
     def test_bad_start_input_from_the_command_line_exits_zero_and_writes_nothing(self):
         result = self.run_script("start", "{broken")

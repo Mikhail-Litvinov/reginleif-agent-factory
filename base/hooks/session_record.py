@@ -1,8 +1,11 @@
-"""Records one Claude Code session in ~/.agent-rig/sessions/<session_id>.json.
+"""Records one Claude Code session in ~/.agent-rig/sessions/<session_id>.json and its processes in
+~/.agent-rig/sessions/<session_id>/processes/<pid>.json (one file per Claude process, so hooks never rewrite each other's facts).
 
 Run by the SessionStart and SessionEnd hooks as `python -I session_record.py start|end`, with the hook's JSON on stdin.
-`start` writes the record and finds the Claude process: the CLAUDE_PID value when it is a claude ancestor of the hook,
-otherwise the nearest claude ancestor. `end` only sets ended_at. The hook prints nothing and always exits 0.
+`start` writes the session record (no process fields) and its own process file; the process is the CLAUDE_PID value when it
+is a claude ancestor of the hook, otherwise the nearest claude ancestor. It also deletes process files whose process is
+gone and turns a still-running legacy pid of the record into a process file. `end` deletes only its own process file.
+The hook prints nothing and always exits 0.
 Process table: PowerShell Get-CimInstance on Windows, /proc on Linux. Other systems get pid null and a pid_error.
 """
 import contextlib
@@ -25,6 +28,7 @@ SECOND_US = 1000000
 CLAUDE_NAMES = ("claude.exe", "claude")
 EVENTS = ("start", "end")
 SESSIONS_DIR_PARTS = (".agent-rig", "sessions")
+PROCESSES_DIR_NAME = "processes"
 PROC_STAT_STARTTIME_INDEX = 19
 PROC_STAT_PPID_INDEX = 1
 WINDOWS_TABLE_COMMAND = (
@@ -202,43 +206,86 @@ def string_or_null(data, key):
     return value if isinstance(value, str) else None
 
 
+def identity_live(table, pid, pid_created):
+    process = table.get(pid) if isinstance(pid, int) else None
+    return process is not None and process.created_us is not None and isinstance(pid_created, str) and iso_micro_from_us(process.created_us) == pid_created
+
+
+def delete_dead_process_files(processes_dir, table):
+    if not processes_dir.is_dir():
+        return
+    for entry in processes_dir.glob("*.json"):
+        entry_record = read_record(entry)
+        if entry_record is None or not identity_live(table, entry_record.get("pid"), entry_record.get("pid_created")):
+            with contextlib.suppress(OSError):
+                entry.unlink()
+
+
+def migrate_legacy_process(previous, processes_dir, table):
+    # Before per-process files, the record itself held one pid; keep a still-running one as a process entry.
+    if previous is None or previous.get("ended_at") is not None:
+        return
+    pid = previous.get("pid")
+    pid_created = previous.get("pid_created")
+    if not identity_live(table, pid, pid_created):
+        return
+    target = processes_dir / f"{pid}.json"
+    if target.exists():
+        return
+    write_json_atomic(target, {
+        "pid": pid,
+        "pid_created": pid_created,
+        "started_at": string_or_null(previous, "started_at"),
+        "source": string_or_null(previous, "source"),
+        "config_dir": previous.get("config_dir") if isinstance(previous.get("config_dir"), str) else "",
+    })
+
+
 def run_event(event, stdin_text, home, env, start_pid, load_table, now):
     if event not in EVENTS:
         return
     data = parse_hook_input(stdin_text)
     if data is None or not session_id_valid(data.get("session_id")):
         return
-    path = home.joinpath(*SESSIONS_DIR_PARTS, f"{data['session_id']}.json")
+    sessions_dir = home.joinpath(*SESSIONS_DIR_PARTS)
+    path = sessions_dir / f"{data['session_id']}.json"
+    processes_dir = sessions_dir / data["session_id"] / PROCESSES_DIR_NAME
     if event == "end":
-        record = read_record(path)
-        if record is None:
+        # Only this process's own file goes: another process of the same session may still run.
+        if not processes_dir.is_dir():
             return
-        record["ended_at"] = iso_seconds(now)
-        write_json_atomic(path, record)
+        table, _ = load_table()
+        if table is None:
+            return
+        process, _ = resolve_claude(table, start_pid, env)
+        if process is not None:
+            with contextlib.suppress(OSError):
+                (processes_dir / f"{process.pid}.json").unlink()
         return
 
     previous = read_record(path)
     started_at = previous.get("started_at") if previous and isinstance(previous.get("started_at"), str) else iso_seconds(now)
     table, pid_error = load_table()
-    pid = None
-    pid_created = None
+    process = None
     if table is not None:
         process, pid_error = resolve_claude(table, start_pid, env)
-        if process is not None:
-            pid = process.pid
-            if process.created_us is not None:
-                pid_created = iso_micro_from_us(process.created_us)
+        migrate_legacy_process(previous, processes_dir, table)
+        delete_dead_process_files(processes_dir, table)
+    if process is not None:
+        write_json_atomic(processes_dir / f"{process.pid}.json", {
+            "pid": process.pid,
+            "pid_created": iso_micro_from_us(process.created_us) if process.created_us is not None else None,
+            "started_at": iso_seconds(now),
+            "source": string_or_null(data, "source"),
+            "config_dir": env.get("CLAUDE_CONFIG_DIR", ""),
+        })
     record = {
         "session_id": data["session_id"],
         "cwd": string_or_null(data, "cwd"),
         "transcript_path": string_or_null(data, "transcript_path"),
         "config_dir": env.get("CLAUDE_CONFIG_DIR", ""),
-        "pid": pid,
-        "pid_created": pid_created,
         "pid_error": pid_error,
-        "source": string_or_null(data, "source"),
         "started_at": started_at,
-        "ended_at": None,
     }
     write_json_atomic(path, record)
 

@@ -4,7 +4,7 @@ import type { SessionRecord } from "../session-core.js";
 
 import { apiFail, apiOk, SESSION_IO, SESSION_STOP_TIMEOUT } from "../output.js";
 import { messagesFor } from "../messages.js";
-import { compactSessionCore, requestSession, sessionLive, SESSION_POLL_MS, SESSION_TIMEOUTS } from "../session-core.js";
+import { compactSessionCore, liveProcesses, requestSession, sessionLive, SESSION_POLL_MS, SESSION_TIMEOUTS } from "../session-core.js";
 
 // A stop compacts the session first only when it holds more tokens than this. The threshold is rig's own; its origin is not recorded in this repo.
 const STOP_COMPACT_TOKENS = 120_000;
@@ -16,16 +16,19 @@ type StopResult = { session: string; stopped: false; reason: "not-running" } | {
 const object = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 
 export const endSession = async (runtime: RuntimePorts, session: SessionRecord): Promise<ApiResult<boolean>> => {
-	const live = await sessionLive(runtime, session);
-	if (!live.ok || !live.value) return live;
-	if (session.pid === null) return apiOk(false);
-	const killed = await runtime.process.killTree(session.pid);
-	if (!killed.ok) return apiFail(SESSION_IO, messagesFor(runtime.language).session.io(killed.error));
+	// Every live process of the session is stopped, each only while its creation time still matches the record.
+	const live = await liveProcesses(runtime, session);
+	if (!live.ok) return live;
+	if (live.value.length === 0) return apiOk(false);
+	for (const process of live.value) {
+		const killed = await runtime.process.killTree(process.pid);
+		if (!killed.ok) return apiFail(SESSION_IO, messagesFor(runtime.language).session.io(killed.error));
+	}
 	const deadline = runtime.clock.now().getTime() + STOP_TIMEOUT_MS;
 	for (;;) {
-		const current = await sessionLive(runtime, session);
+		const current = await liveProcesses(runtime, session);
 		if (!current.ok) return current;
-		if (!current.value) return apiOk(true);
+		if (current.value.length === 0) return apiOk(true);
 		const remaining = deadline - runtime.clock.now().getTime();
 		if (remaining <= 0) return apiFail(SESSION_STOP_TIMEOUT, messagesFor(runtime.language).session.stopTimeout());
 		await runtime.clock.sleep(Math.min(SESSION_POLL_MS, remaining));

@@ -80,15 +80,21 @@ substituting paths and the interpreter in place of `C:/Users/...`.
 The `SessionStart` hook runs it with `start`, the `SessionEnd` hook with `end`; both receive the hook's JSON on stdin.
 It is Python 3 with the standard library only, run as `python -I`.
 
-Fields: `session_id`, `cwd`, `transcript_path`, `config_dir` (the `CLAUDE_CONFIG_DIR` value, empty for the default
-login), `pid` and `pid_created` (the Claude Code process and its creation time in UTC with microseconds, so a reused pid
-is recognised), `pid_error` (null, or why the pid is unknown), `source` (`startup`, `resume`, `clear`, `compact`),
-`started_at` and `ended_at` (UTC, whole seconds).
+Record fields: `session_id`, `cwd`, `transcript_path`, `config_dir` (the `CLAUDE_CONFIG_DIR` value, empty for the default
+login), `pid_error` (null, or why the pid is unknown), `started_at` (UTC, whole seconds). The record holds no process
+fields: one session id can have several Claude Code processes at once (a window and a `claude -p --resume` of the same
+id), so each process has its own file `~/.agent-rig/sessions/<session_id>/processes/<pid>.json` with `pid`,
+`pid_created` (the process creation time in UTC with microseconds, so a reused pid is recognised), `started_at`,
+`source` (`startup`, `resume`, `clear`, `compact`) and `config_dir`. A session is live while any process file names a
+running process with that creation time.
 
 Write rules:
-- `start` writes the record. A later `start` of the same session (resume or compact) replaces `pid`, `pid_created`,
-  `pid_error` and `source`, keeps `started_at` and clears `ended_at`.
-- `end` only sets `ended_at`; without a record it writes nothing.
+- `start` writes its own process file and the record. A later `start` of the same session (resume or compact) keeps
+  `started_at` of the record. It also deletes process files whose process is gone, and migrates a legacy record
+  (one with `pid`, `pid_created` and no `ended_at`) whose process is still live into a process file, removing those
+  fields from the record.
+- `end` deletes only its own process file (found by its pid); other processes of the session are untouched. Without
+  a record or a process file it writes nothing. A legacy record is read as one process: `end` sets its `ended_at`.
 - A session id outside `[A-Za-z0-9_-]{1,128}` and unreadable input are ignored before any lookup.
 - The file is written atomically: a temp file in the same folder, then `os.replace`.
 - The hook never breaks a session: it prints nothing and exits 0; errors go to stderr.

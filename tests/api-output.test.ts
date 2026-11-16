@@ -201,7 +201,7 @@ describe("API output guard", () => {
 		] as const) {
 			const harness = seed("installed");
 			harness.fs.seed(`${SESSIONS}/${SESSION_ID}.json`, JSON.stringify({ session_id: SESSION_ID, cwd: null, transcript_path: null, pid: 42, pid_created: "2026-01-01T00:00:00.000000Z", started_at: "2026-01-01T00:00:00Z", ended_at: null }));
-			harness.fs.directories.add(`${SESSIONS}/${SESSION_ID}`);
+			harness.fs.seed(`${SESSIONS}/${SESSION_ID}/usage.json`, "{}");
 			harness.fs.seed(`${SESSIONS}/${SESSION_ID}/responses/event-1.json`, JSON.stringify({ id: "event-1", ok: true, result }));
 			harness.runtime.process.createdAt = async () => ({ ok: true, value: { "42": "2026-01-01T00:00:00.000000Z" } });
 			const output: string[] = [];

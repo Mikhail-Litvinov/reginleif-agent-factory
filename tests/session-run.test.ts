@@ -16,8 +16,8 @@ const ROOT = "/home/test/.agent-rig";
 const CREATED = "2026-01-01";
 // The two-second failure-detection grace documented for session launches.
 const LAUNCH_GRACE_MS = 2000;
-const session: SessionRecord = { id: ID, cwd: "/work", transcriptPath: "/transcript", pid: 42, pidCreated: CREATED, startedAt: CREATED, endedAt: CREATED };
-const raw = { session_id: ID, cwd: session.cwd, transcript_path: session.transcriptPath, pid: session.pid, pid_created: session.pidCreated, started_at: CREATED, ended_at: CREATED, config_dir: "/cfg/1-test" };
+const session: SessionRecord = { id: ID, cwd: "/work", transcriptPath: "/transcript", startedAt: CREATED, processes: [] };
+const raw = { session_id: ID, cwd: session.cwd, transcript_path: session.transcriptPath, pid: 42, pid_created: CREATED, started_at: CREATED, ended_at: CREATED, config_dir: "/cfg/1-test" };
 const code = (result: { ok: true } | { ok: false; error: { code: string } }): string => result.ok ? "ok" : result.error.code;
 // Control characters, then every character that some launch-line parser reads as syntax or that is not in the identifier alphabet.
 const CONTROL = ["\t", "\n", "\r", "\x03", "\x15"];
@@ -273,7 +273,7 @@ describe("session run and mode", () => {
 		const h = setup();
 		seedLaunchers(h);
 		h.runtime.process.createdAt = async () => ok({ "42": CREATED, "43": CREATED });
-		expect(code(await runSession(h.runtime, { ...session, endedAt: null }, "plan", "1"))).toBe("session-running");
+		expect(code(await runSession(h.runtime, { ...session, processes: [{ pid: 42, pidCreated: CREATED, startedAt: CREATED }] }, "plan", "1"))).toBe("session-running");
 		const answer = await runSession(h.runtime, session, "plan", "1", async () => { h.fs.seed(`${ROOT}/sessions/${ID}.json`, JSON.stringify({ ...raw, pid: 43, ended_at: null })); return apiOk(null); });
 		expect(answer).toEqual(apiOk({ session: ID, pid: 43, mode: "plan", account: 1 }));
 	});

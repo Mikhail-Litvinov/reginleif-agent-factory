@@ -10,13 +10,15 @@ import { createMemoryRuntime } from "./fakes/memory-runtime.js";
 
 const ROOT = "/home/test/.agent-rig/sessions";
 const CREATED = "2026-01-01T00:00:00.000000Z";
-const record: SessionRecord = { id: "abc", cwd: "/work", transcriptPath: "/transcript", pid: 42, pidCreated: CREATED, startedAt: "2026-01-01T00:00:00Z", endedAt: null };
-const raw = { session_id: record.id, cwd: record.cwd, transcript_path: record.transcriptPath, pid: record.pid, pid_created: record.pidCreated, started_at: record.startedAt, ended_at: null };
+const record: SessionRecord = { id: "abc", cwd: "/work", transcriptPath: "/transcript", startedAt: "2026-01-01T00:00:00Z", processes: [{ pid: 42, pidCreated: CREATED, startedAt: "2026-01-01T00:00:00Z" }] };
+const raw = { session_id: record.id, cwd: record.cwd, transcript_path: record.transcriptPath, started_at: record.startedAt };
+const processFile = { pid: 42, pid_created: CREATED, started_at: record.startedAt, source: "startup", config_dir: "" };
 
 const setup = () => {
 	const h = createMemoryRuntime();
 	h.fs.seed(`${ROOT}/abc.json`, JSON.stringify(raw));
-	h.fs.directories.add(`${ROOT}/abc`);
+	h.fs.seed(`${ROOT}/abc/usage.json`, "{}");
+	h.fs.seed(`${ROOT}/abc/processes/42.json`, JSON.stringify(processFile));
 	h.runtime.process.createdAt = async (pids) => ok(Object.fromEntries(pids.map((pid) => [String(pid), CREATED])));
 	let now = 0;
 	h.runtime.clock.now = () => new Date(now);
@@ -37,13 +39,13 @@ describe("session core", () => {
 	});
 	test("ended and reused processes are not live", async () => {
 		const h = setup();
-		expect(await sessionLive(h.runtime, { ...record, endedAt: record.startedAt })).toEqual(apiOk(false));
+		expect(await sessionLive(h.runtime, { ...record, processes: [] })).toEqual(apiOk(false));
 		h.runtime.process.createdAt = async () => ok({ "42": "different" });
 		expect(await sessionLive(h.runtime, record)).toEqual(apiOk(false));
 	});
 	test("requires the module directory", async () => {
 		const h = setup();
-		h.fs.directories.delete(`${ROOT}/abc`);
+		h.fs.files.delete(`${ROOT}/abc/usage.json`);
 		const answer = await requestSession(h.runtime, record, "usage", {}, SESSION_POLL_MS);
 		expect(answer.ok ? "ok" : answer.error.code).toBe("session-no-module");
 	});
@@ -82,18 +84,19 @@ describe("session core", () => {
 			if (!exits) expect(events).toEqual(["session-waiting"]);
 		}
 	});
-	test("a recorded end stops waiting without another process query", async () => {
+	test("removed process files stop waiting without another process query", async () => {
 		const h = setup();
 		let calls = 0;
 		h.runtime.process.createdAt = async () => { calls++; return ok({ "42": CREATED }); };
-		h.runtime.clock.sleep = async () => { h.fs.seed(`${ROOT}/abc.json`, JSON.stringify({ ...raw, ended_at: record.startedAt })); };
+		h.runtime.clock.sleep = async () => { h.fs.files.delete(`${ROOT}/abc/processes/42.json`); };
 		const answer = await requestSession(h.runtime, record, "usage", {}, SESSION_POLL_MS * 3);
 		expect(answer.ok ? "ok" : answer.error.code).toBe("session-ended");
 		expect(calls).toBe(1);
 	});
 	test("list batches distinct live pids and isolates invalid records", async () => {
 		const h = setup();
-		h.fs.seed(`${ROOT}/second.json`, JSON.stringify({ ...raw, session_id: "second", pid: 43 }));
+		h.fs.seed(`${ROOT}/second.json`, JSON.stringify({ ...raw, session_id: "second" }));
+		h.fs.seed(`${ROOT}/second/processes/43.json`, JSON.stringify({ ...processFile, pid: 43 }));
 		h.fs.seed(`${ROOT}/broken.json`, "{");
 		const calls: number[][] = [];
 		h.runtime.process.createdAt = async (pids) => { calls.push([...pids]); return ok({ "42": CREATED, "43": CREATED }); };
@@ -109,9 +112,9 @@ describe("session core", () => {
 	});
 	test("list returns raw fields in newest order and CLI emits one object", async () => {
 		const h = setup();
-		h.fs.seed(`${ROOT}/older.json`, JSON.stringify({ ...raw, session_id: "older", started_at: "2025-01-01T00:00:00Z", ended_at: "2025-01-02T00:00:00Z" }));
+		h.fs.seed(`${ROOT}/older.json`, JSON.stringify({ ...raw, session_id: "older", started_at: "2025-01-01T00:00:00Z" }));
 		const result = await listSessions(h.runtime);
-		expect(result).toEqual(apiOk({ sessions: [{ id: "abc", cwd: "/work", transcriptPath: "/transcript", pid: 42, startedAt: record.startedAt, live: true, module: true }, { id: "older", cwd: "/work", transcriptPath: "/transcript", pid: 42, startedAt: "2025-01-01T00:00:00Z", live: false, module: false }] }));
+		expect(result).toEqual(apiOk({ sessions: [{ id: "abc", cwd: "/work", transcriptPath: "/transcript", pid: 42, processes: [{ pid: 42, startedAt: record.startedAt }], startedAt: record.startedAt, live: true, module: true }, { id: "older", cwd: "/work", transcriptPath: "/transcript", pid: null, processes: [], startedAt: "2025-01-01T00:00:00Z", live: false, module: false }] }));
 		const output: string[] = [];
 		expect(await runCli(["session", "list"], (line) => output.push(line), h.runtime)).toBe(0);
 		expect(output).toHaveLength(1);
