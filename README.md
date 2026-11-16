@@ -90,6 +90,7 @@ If the clone is in `.worktrees/`, the project root is the directory above `.work
 
 - `scripts/prepare-server.sh` does the only install step that needs root: packages, `cron`, linger, the channel permission.
 - `scripts/test-docker.sh` builds the Ubuntu 24.04 image `agent-rig-ubuntu-24.04-tests` and runs the scenarios from `tests/docker/` in it. One scenario runs by a prefix of its file name: `scripts/test-docker.sh 04`.
+- `scripts/plugin-fingerprint.ts` records the content fingerprint of each plugin under `plugins/` (`.claude-plugin/content-hash`). Claude Code caches a plugin by its version, so `tests/plugin-version-guard.test.ts` fails when shipped content changed without a version bump; bump `version` in `plugin.json` by hand, then run `bun scripts/plugin-fingerprint.ts`.
 
 ## License
 
