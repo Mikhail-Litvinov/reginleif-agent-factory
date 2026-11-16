@@ -28,6 +28,21 @@ export function removeCommand(isWindows: boolean, path: string): string[] {
   return isWindows ? ["cmd", "/c", "del", "/F", "/Q", toWindows(path)] : ["rm", "-f", path];
 }
 
+// Creates the directory and its parents; succeeds when it exists (Windows: the exit code is ignored by the caller).
+export function ensureDirCommand(isWindows: boolean, path: string): string[] {
+	return isWindows ? ["cmd", "/c", "mkdir", toWindows(path)] : ["mkdir", "-p", path];
+}
+
+// Creates one directory and fails when it exists: the atomic step a request claim rests on (mkdir is atomic on
+// POSIX and on NTFS; cmd's mkdir answers exit code 1 for an existing directory).
+export function claimCommand(isWindows: boolean, path: string): string[] {
+	return isWindows ? ["cmd", "/c", "mkdir", toWindows(path)] : ["mkdir", path];
+}
+
+export function removeTreeCommand(isWindows: boolean, path: string): string[] {
+	return isWindows ? ["cmd", "/c", "rmdir", "/S", "/Q", toWindows(path)] : ["rm", "-rf", path];
+}
+
 function toWindows(path: string): string {
   return path.replaceAll("/", "\\");
 }

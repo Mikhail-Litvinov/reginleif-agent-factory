@@ -17,6 +17,7 @@ const norm = (path: string): string => path.replace(/^[A-Za-z]:/, "").replaceAll
 
 type World = {
   files: Map<string, string>;
+  dirs: Set<string>;
   compactions: (string | undefined)[];
   renames: string[];
   autocompacts: string[];
@@ -27,7 +28,7 @@ type World = {
 
 // Every `$` call the module makes, answered by the test; `session.start` is the engine's own echo.
 function world(on: On): World {
-  const w: World = { files: new Map(), compactions: [], renames: [], autocompacts: [], compactResult: {}, clock: mock.clock(on) };
+  const w: World = { files: new Map(), dirs: new Set(), compactions: [], renames: [], autocompacts: [], compactResult: {}, clock: mock.clock(on) };
   on("session.start", (_, e) => ({ cwd: e.cwd }));
   on("env.get", (_, e) => ({ value: e.name === "HOME" ? HOME : undefined }));
   on("session.id", () => ({ value: SESSION }));
@@ -58,6 +59,13 @@ function world(on: On): World {
       }
     } else if (command === "rm") {
       for (const path of args.slice(1)) w.files.delete(norm(path));
+    } else if (command === "mkdir") {
+      // Plain mkdir fails on an existing directory (the claim); -p never does.
+      const path = norm(args[args.length - 1] ?? "");
+      if (args[0] !== "-p") {
+        if (w.dirs.has(path)) return { value: { exitCode: 1, stdout: "", stderr: "exists" } };
+        w.dirs.add(path);
+      }
     }
     return { value: OK };
   });
@@ -129,6 +137,20 @@ test("compact and rename run when no turn runs", async ($, on) => {
   expect(response(w, "c1")?.ok).toBe(true);
   expect(response(w, "r1")?.result).toEqual({ name: "new name" });
   expect(w.files.has(`${DIR}/requests/c1.json`)).toBe(false);
+});
+
+test("a request whose claim directory another process made is neither run nor answered here", async ($, on) => {
+  const w = world(on);
+  await start($);
+  w.dirs.add(`${DIR}/claims/c1`);
+  request(w, "c1", { id: "c1", op: "compact" });
+  request(w, "c2", { id: "c2", op: "compact" });
+  await w.clock.advance(POLL_MS * 2);
+  expect(w.compactions.length).toBe(1);
+  expect(response(w, "c1")).toBeUndefined();
+  expect(w.files.has(`${DIR}/requests/c1.json`)).toBe(true);
+  expect(response(w, "c2")?.ok).toBe(true);
+  expect(w.files.get(`${DIR}/claims/c2/beat`)).toBeDefined();
 });
 
 test("autocompact runs the session's own command and answers the window, with the command text when there is one", async ($, on) => {

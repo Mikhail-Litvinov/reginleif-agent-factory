@@ -69,6 +69,7 @@ export const en = {
 		ended: (): string => "The session process has ended.",
 		noModule: (): string => "The session has no rig module; restart the session.",
 		timeout: (): string => "The session did not respond in time.",
+		claimLost: (): string => "The session process that took the request stopped answering.",
 		badResponse: (): string => "The session returned an invalid response.",
 		usageStop: (): string => "Usage: rig session stop <id>",
 		usageCleanup: (): string => "Usage: rig session cleanup <id>",

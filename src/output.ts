@@ -24,6 +24,7 @@ export const SESSION_IO = "session-io";
 export const SESSION_ENDED = "session-ended";
 export const SESSION_NO_MODULE = "session-no-module";
 export const SESSION_TIMEOUT = "session-timeout";
+export const SESSION_CLAIM_LOST = "session-claim-lost";
 export const SESSION_MODULE_ERROR = "session-module-error";
 export const SESSION_BAD_RESPONSE = "session-bad-response";
 export const SESSION_STOP_TIMEOUT = "session-stop-timeout";

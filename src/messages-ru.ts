@@ -54,6 +54,7 @@ export const ru: Messages = {
 		ended: (): string => "Процесс сессии завершился.",
 		noModule: (): string => "В сессии нет модуля rig; перезапусти сессию.",
 		timeout: (): string => "Сессия не ответила вовремя.",
+		claimLost: (): string => "Процесс сессии, взявший запрос, перестал отвечать.",
 		badResponse: (): string => "Сессия вернула некорректный ответ.",
 		usageStop: (): string => "Использование: rig session stop <id>",
 		usageCleanup: (): string => "Использование: rig session cleanup <id>",

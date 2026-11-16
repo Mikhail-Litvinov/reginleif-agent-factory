@@ -4,7 +4,8 @@ import { describe, expect, test } from "bun:test";
 
 import { runCli } from "../src/cli.js";
 import { apiOk } from "../src/output.js";
-import { lookupSession, listSessions, requestSession, sessionLive, SESSION_POLL_MS } from "../src/session-core.js";
+import { CLAIM_STALE_MS } from "../plugins/agent-rig-window/mod/queue-protocol.js";
+import { COMPACT_TIMEOUT_MS, lookupSession, listSessions, requestSession, sessionLive, SESSION_POLL_MS } from "../src/session-core.js";
 import { ok } from "../src/result.js";
 import { createMemoryRuntime } from "./fakes/memory-runtime.js";
 
@@ -83,6 +84,34 @@ describe("session core", () => {
 			expect(h.fs.files.has(`${ROOT}/abc/requests/event-1.json`)).toBe(false);
 			if (!exits) expect(events).toEqual(["session-waiting"]);
 		}
+	});
+	test("a claimant that stops beating fails the wait, and a beating one does not; the claim is removed", async () => {
+		for (const beating of [false, true]) {
+			const h = setup();
+			let now = 0;
+			h.runtime.clock.now = () => new Date(now);
+			const claim = `${ROOT}/abc/claims/event-1`;
+			h.runtime.clock.sleep = async (ms) => {
+				now += ms;
+				h.fs.directories.add(claim);
+				if (now === SESSION_POLL_MS || beating) h.fs.seed(`${claim}/beat`, String(now));
+				if (beating && now >= CLAIM_STALE_MS * 3) h.fs.seed(`${ROOT}/abc/responses/event-1.json`, JSON.stringify({ id: "event-1", ok: true, result: 1 }));
+			};
+			const answer = await requestSession(h.runtime, record, "compact", {}, COMPACT_TIMEOUT_MS);
+			expect(answer.ok ? "ok" : answer.error.code).toBe(beating ? "ok" : "session-claim-lost");
+			if (!beating) expect(now).toBeLessThanOrEqual(CLAIM_STALE_MS + 2 * SESSION_POLL_MS);
+			expect(h.fs.files.has(`${ROOT}/abc/requests/event-1.json`)).toBe(false);
+			expect(h.fs.directories.has(claim)).toBe(false);
+		}
+	});
+	test("a claim directory with no beat yet counts from when it was first seen", async () => {
+		const h = setup();
+		let now = 0;
+		h.runtime.clock.now = () => new Date(now);
+		h.runtime.clock.sleep = async (ms) => { now += ms; h.fs.directories.add(`${ROOT}/abc/claims/event-1`); };
+		const answer = await requestSession(h.runtime, record, "compact", {}, COMPACT_TIMEOUT_MS);
+		expect(answer.ok ? "ok" : answer.error.code).toBe("session-claim-lost");
+		expect(now).toBeLessThanOrEqual(CLAIM_STALE_MS + 2 * SESSION_POLL_MS);
 	});
 	test("removed process files stop waiting without another process query", async () => {
 		const h = setup();

@@ -2,7 +2,7 @@
 // ~/.agent-rig/sessions/<session id>/. The logic is in window.ts; here are only the engine's `$` calls.
 import type { Register } from "claude-code";
 
-import { ID_PATTERN, moveCommand, removeCommand } from "./protocol";
+import { claimCommand, ensureDirCommand, ID_PATTERN, moveCommand, removeCommand, removeTreeCommand } from "./protocol";
 import { Window } from "./window";
 
 const POLL_MS = 1000;
@@ -58,6 +58,14 @@ export const register: Register = on => {
       },
       remove: async path => {
         if (!(await run(removeCommand(isWindows, path)))) throw new Error(`could not remove ${path}`);
+      },
+      claim: async dir => {
+        const parent = dir.slice(0, dir.lastIndexOf("/"));
+        await run(ensureDirCommand(isWindows, parent)).catch(() => false);
+        return run(claimCommand(isWindows, dir));
+      },
+      removeTree: async dir => {
+        await run(removeTreeCommand(isWindows, dir));
       },
       usage: () => $.session.usage({ breakdown: "summary" }),
       compact: async instructions => {

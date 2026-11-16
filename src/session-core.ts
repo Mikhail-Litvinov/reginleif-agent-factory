@@ -2,10 +2,10 @@ import type { Args, Op, Request, Response } from "../plugins/agent-rig-window/mo
 import type { ApiResult, ProgressEvent } from "./output.js";
 import type { RuntimePorts } from "./ports.js";
 
-import { ID_PATTERN, REQUEST_SUFFIX } from "../plugins/agent-rig-window/mod/queue-protocol.js";
+import { CLAIM_BEAT_FILE, CLAIM_STALE_MS, CLAIMS_DIR, ID_PATTERN, REQUEST_SUFFIX } from "../plugins/agent-rig-window/mod/queue-protocol.js";
 import { joinPath } from "./file-system.js";
 import { messagesFor } from "./messages.js";
-import { apiFail, apiOk, PROGRESS_CODE_SESSION_WAITING, SESSION_BAD_ID, SESSION_BAD_RESPONSE, SESSION_ENDED, SESSION_INVALID, SESSION_IO, SESSION_MODULE_ERROR, SESSION_NO_MODULE, SESSION_TIMEOUT, SESSION_UNKNOWN } from "./output.js";
+import { apiFail, apiOk, PROGRESS_CODE_SESSION_WAITING, SESSION_BAD_ID, SESSION_BAD_RESPONSE, SESSION_CLAIM_LOST, SESSION_ENDED, SESSION_INVALID, SESSION_IO, SESSION_MODULE_ERROR, SESSION_NO_MODULE, SESSION_TIMEOUT, SESSION_UNKNOWN } from "./output.js";
 import { errorText } from "./result.js";
 
 // The window polls once per second; allow three polls for read-only operations.
@@ -163,6 +163,9 @@ export const requestSession = async (r: RuntimePorts, session: SessionRecord, op
 	const temp = joinPath(requests, `${id}.tmp`);
 	const responsePath = joinPath(responses, `${id}${REQUEST_SUFFIX}`);
 	const body: Request = { id, op, args };
+	const claimDir = joinPath(folder(r, session.id), CLAIMS_DIR, id);
+	// When rig first saw the claim directory with no beat in it: the claimant's first beat is due right after.
+	let claimSeen: number | null = null;
 	let published = false;
 	try {
 		await r.fs.ensureDirectory(requests);
@@ -188,6 +191,14 @@ export const requestSession = async (r: RuntimePorts, session: SessionRecord, op
 				if (malformed) return apiFail(SESSION_BAD_RESPONSE, m.badResponse());
 				malformed = true;
 			}
+			// The window that claimed the request beats while it works; a claimant gone silent is a failure, not a wait.
+			let beat: number | null = null;
+			try { const text = (await r.fs.readText(joinPath(claimDir, CLAIM_BEAT_FILE))).trim(); beat = text === "" ? null : Number(text); } catch (e) { if (!missing(e)) throw e; }
+			if (beat === null || !Number.isFinite(beat)) {
+				beat = null;
+				try { await r.fs.listDirectory(claimDir); claimSeen ??= r.clock.now().getTime(); beat = claimSeen; } catch (e) { if (!missing(e)) throw e; }
+			}
+			if (beat !== null && r.clock.now().getTime() - beat > CLAIM_STALE_MS) return apiFail(SESSION_CLAIM_LOST, m.claimLost());
 			const current = await lookupSession(r, session.id);
 			if (!current.ok) return current;
 			if (current.value.processes.length === 0) return apiFail(SESSION_ENDED, m.ended());
@@ -204,5 +215,7 @@ export const requestSession = async (r: RuntimePorts, session: SessionRecord, op
 		for (const candidate of published ? [path] : [temp]) {
 			try { await r.fs.remove(candidate); } catch (e) { if (!missing(e)) throw e; }
 		}
+		// After the request: a window that listed it earlier then finds it gone once it has claimed it, and does not run it.
+		if (published) { try { await r.fs.removeDirectoryTree(claimDir); } catch (e) { if (!missing(e)) throw e; } }
 	}
 };

@@ -14,7 +14,7 @@ Rig validates session ids against the shared queue identifier pattern before usi
 
 The queue client checks process liveness before publishing a request and atomically publishes it. It polls for its matching response and rereads the session's process files using the runtime clock; no process file left ends the wait. At the deadline it checks process liveness once more, returning `session-ended` if the process is gone and `session-timeout` otherwise. It tolerates one malformed response read, removes a consumed response and removes its request when finished, including on timeout or process exit. A missing module folder requires restarting the session. After one poll it emits `session-waiting` once. Read-only operations wait three seconds (three module polls); compact, rename and autocompact wait ten minutes (`COMPACT_TIMEOUT_MS` in `src/session-core.ts`) and allowing the current turn to finish.
 
-Failures use `session-bad-id`, `session-unknown`, `session-invalid`, `session-io`, `session-ended`, `session-no-module`, `session-timeout`, `session-module-error` and `session-bad-response`. Module errors carry the module's text.
+Failures use `session-bad-id`, `session-unknown`, `session-invalid`, `session-io`, `session-ended`, `session-no-module`, `session-timeout`, `session-claim-lost`, `session-module-error` and `session-bad-response`. Module errors carry the module's text.
 
 `rig session list` returns `{ "sessions": [{ "id", "cwd", "transcriptPath", "pid", "processes", "startedAt", "live", "module" } | { "id", "error": { "code", "message" } }] }`. Valid entries are sorted by start time newest first; entries with errors follow them. A failed record or session lookup has its own error entry and does not prevent the other sessions from being listed. `processes` lists the live processes as `[{pid, startedAt}]`, earliest started first, and `pid` is the first of them or null. The other fields are raw record data, with `module` indicating that the window module's `<id>/usage.json` is readable (the hooks also create `<id>/processes/`, so the folder alone is not the marker). Creation times are queried in one batch. An absent records directory yields an empty list.
 
@@ -40,6 +40,7 @@ Failures use `session-bad-id`, `session-unknown`, `session-invalid`, `session-io
   usage.json            latest usage snapshot, replaced whole
   requests/<req>.json   one request, written by rig
   responses/<req>.json  the answer, written by the module
+  claims/<req>/beat     the claim on a request (a directory) and its heartbeat, written by the claiming module
 ```
 
 ## Snapshot: `usage.json`
@@ -67,6 +68,23 @@ because the module reads each file once it appears. The module lists the folder 
 For every request the module writes `responses/<req>.json`, either `{ "id", "ok": true, "result": ... }` or
 `{ "id", "ok": false, "error": "..." }`, and then removes the request. A response stays until rig removes it. An id is
 handled once; a request whose response or removal failed is not run again by the same session.
+
+One request is run by one process. Several Claude processes can carry the same session id (a window plus a
+`claude -p --resume <id>`, two windows), each with its own module polling this folder, so a module first claims a
+request: it makes the directory `claims/<req>` with the one atomic step the engine offers, `mkdir` through
+`$.process.run` (`mkdir <dir>`, or `cmd /c mkdir <dir>` on a drive-letter home), which fails when the directory exists
+on POSIX and on NTFS. The engine's `$.fs` has no exclusive create, no mkdir and no rename, so nothing else in it is
+atomic. The module that made the directory reads the request (after the claim, so a request already answered and
+removed is dropped and its claim removed), runs it and answers; a module whose `mkdir` fails skips the request and
+forgets its id once the file is gone. A claim is never taken over.
+
+The claimant rewrites `claims/<req>/beat` (epoch milliseconds) at the claim and on every poll while the request is
+unanswered. The module has no way to learn its own pid, so a claim records a beat, not a process identity. Rig's wait
+reads the beat on every poll: a beat older than `CLAIM_STALE_MS` (one minute, sixty module polls), or a claim directory
+with no beat that rig has watched for that long, ends the wait with `session-claim-lost` (the claiming process died or
+hung mid-request; the request is not run by another process and the caller may send it again). When the wait ends for
+any reason rig removes the request and then the claim directory, in that order: a module that listed the request
+earlier and claims late then finds the request gone.
 
 | Op | Args | Result |
 | --- | --- | --- |
