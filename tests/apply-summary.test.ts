@@ -20,7 +20,7 @@ const RIG_PLUGIN_PATH = `${REPO}/plugins/window-demo`;
 const MARKETPLACE = "demo-market";
 const STALE_MARKETPLACE = "old-market";
 const PROCESS_SUCCESS_EXIT_CODE = 0;
-const NO_PLUGIN_CHANGES: PluginChanges = { installed: [], uninstalled: [], marketplacesAdded: [], marketplacesRemoved: [] };
+const NO_PLUGIN_CHANGES: PluginChanges = { installed: [], updated: [], uninstalled: [], marketplacesAdded: [], marketplacesRemoved: [] };
 const UP_TO_DATE: ApplyData = { changedFiles: [], pluginChanges: NO_PLUGIN_CHANGES };
 
 type Scenario = {

@@ -105,6 +105,8 @@ export type PluginEnvironment = {
   runner: ProcessRunner;
   claudeCommand: string;
   messages: Messages;
+  // True when the path exists (a file or a directory): an installed plugin whose copy is gone is not up to date.
+  pathExists(path: string): Promise<boolean>;
 };
 
 export type PluginRecord = {
@@ -117,6 +119,8 @@ export type PluginRecords = Readonly<Record<string, PluginRecord>>;
 
 export type PluginOutcome = {
   installed: string[];
+  // Plugins that were installed but differed from their source (another version, or the copy gone) and were refreshed.
+  updated: string[];
   uninstalled: string[];
   marketplacesAdded: string[];
   marketplacesRemoved: string[];
@@ -229,7 +233,7 @@ export async function applyPlugins(
     .map(([id, record]) => ({ enabled: false, id, marketplace: record.marketplace, source: record.source }));
   const allPlans = [...plans, ...orphanPlans];
   if (allPlans.length === EMPTY_LENGTH) {
-    return { ok: true, value: { installed: [], uninstalled: [], marketplacesAdded: [], marketplacesRemoved: [], records: { ...priorRecords } } };
+    return { ok: true, value: { installed: [], updated: [], uninstalled: [], marketplacesAdded: [], marketplacesRemoved: [], records: { ...priorRecords } } };
   }
 
   // Every apply reads what is installed, so a plugin removed by hand comes back.
@@ -247,9 +251,10 @@ export async function applyPlugins(
 
   const addedMarketplaces = new Set(availableMarketplaces.value.map((entry) => entry.name));
   const localMarketplaces = availableMarketplaces.value.filter((entry) => entry.path !== null);
-  const installed = new Set(installedPlugins.value);
+  const installedFacts = installedPlugins.value;
+  const installed = new Set(installedFacts.keys());
   const records: Record<string, PluginRecord> = { ...priorRecords };
-  const outcome: PluginOutcome = { installed: [], uninstalled: [], marketplacesAdded: [], marketplacesRemoved: [], records };
+  const outcome: PluginOutcome = { installed: [], updated: [], uninstalled: [], marketplacesAdded: [], marketplacesRemoved: [], records };
 
   for (const plan of allPlans) {
     if (!plan.enabled) {
@@ -300,6 +305,10 @@ export async function applyPlugins(
       outcome.marketplacesAdded.push(plan.marketplace);
     }
     if (installed.has(plan.id)) {
+      // Up to date is decided from the installed copy's facts, never from the id alone.
+      const refresh = await refreshInstalledPlugin(environment, plan.id, installedFacts.get(plan.id));
+      if (!refresh.ok) return refresh;
+      if (refresh.value) outcome.updated.push(plan.id);
       records[plan.id] = pluginRecord(plan);
       continue;
     }
@@ -318,6 +327,36 @@ export async function applyPlugins(
   }
 
   return { ok: true, value: outcome };
+}
+
+// What `claude plugin list --json` says about an installed plugin (probed with claude 2.1.325): `version` is the
+// installed copy's, `installPath` its folder in the plugin cache, `folderVersion` the version the source folder has now
+// (present for a plugin read from a local folder, absent for a remote one).
+type InstalledPlugin = { version: string | null; installPath: string | null; folderVersion: string | null };
+
+// Probed in a temporary config dir with a directory-source plugin:
+//   source version bumped  -> `claude plugin update <id> --scope user` copies the new version into the cache and
+//                             records it (no `marketplace update` needed);
+//   cache folder deleted   -> `update` reports "nothing to update" and changes nothing, `install <id> --scope user
+//                             --yes` copies the plugin again.
+// Returns true when something was refreshed.
+async function refreshInstalledPlugin(
+  environment: PluginEnvironment,
+  id: string,
+  facts: InstalledPlugin | undefined,
+): Promise<Result<boolean>> {
+  if (facts === undefined) return { ok: true, value: false };
+  if (facts.installPath !== null && !(await environment.pathExists(facts.installPath))) {
+    const reinstall = await runClaude(environment, [...CLAUDE_PLUGIN_PREFIX, "install", id, ...USER_SCOPE, ...YES_OPTION]);
+    if (!reinstall.ok) return reinstall;
+    return { ok: true, value: true };
+  }
+  if (facts.version !== null && facts.folderVersion !== null && facts.version !== facts.folderVersion) {
+    const update = await runClaude(environment, [...CLAUDE_PLUGIN_PREFIX, "update", id, ...USER_SCOPE]);
+    if (!update.ok) return update;
+    return { ok: true, value: true };
+  }
+  return { ok: true, value: false };
 }
 
 function pluginRecord(plan: PluginPlan): PluginRecord {
@@ -616,7 +655,7 @@ function parseMarketplaces(output: string, messages: Messages): Result<Marketpla
   return { ok: true, value: entries };
 }
 
-function parseInstalledPlugins(output: string, messages: Messages): Result<Set<string>> {
+function parseInstalledPlugins(output: string, messages: Messages): Result<Map<string, InstalledPlugin>> {
   let parsed: unknown;
   try {
     parsed = JSON.parse(output);
@@ -625,14 +664,18 @@ function parseInstalledPlugins(output: string, messages: Messages): Result<Set<s
   }
   if (!Array.isArray(parsed)) return { ok: false, error: messages.failure.claudePluginsUnexpected() };
 
-  const ids = new Set<string>();
+  const plugins = new Map<string, InstalledPlugin>();
   for (const item of parsed) {
     if (!isRecord(item) || typeof item.id !== "string") {
       return { ok: false, error: messages.failure.claudePluginNoId() };
     }
-    ids.add(item.id);
+    plugins.set(item.id, {
+      version: typeof item.version === "string" ? item.version : null,
+      installPath: typeof item.installPath === "string" ? item.installPath : null,
+      folderVersion: typeof item.folderVersion === "string" ? item.folderVersion : null,
+    });
   }
-  return { ok: true, value: ids };
+  return { ok: true, value: plugins };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

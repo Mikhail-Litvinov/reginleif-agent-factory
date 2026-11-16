@@ -55,6 +55,7 @@ export type ApplyOutcome = {
 
 export type PluginChanges = {
 	installed: string[];
+	updated: string[];
 	uninstalled: string[];
 	marketplacesAdded: string[];
 	marketplacesRemoved: string[];
@@ -181,6 +182,7 @@ export const applyRig = async (runtime: RuntimePorts, request: ApplyRequest): Pr
 		runner: { run: (command, args) => runtime.process.run(command, args) },
 		claudeCommand: "claude",
 		messages,
+		pathExists: async (path) => (await runtime.fs.modifiedAt(path)) !== null,
 	}, keepKnownDisabledPlugins(pluginPlansResult.value, pluginRecords), pluginRecords);
 	if (!plugins.ok) return plugins;
 	const settingsCurrent = await readOptional(runtime, settingsPath, messages);
@@ -272,8 +274,8 @@ export const applyRig = async (runtime: RuntimePorts, request: ApplyRequest): Pr
 		const saved = await saveState(runtime, nextState);
 		if (!saved.ok) return saved;
 	}
-	const { installed, uninstalled, marketplacesAdded, marketplacesRemoved } = plugins.value;
-	const pluginChanges: PluginChanges = { installed, uninstalled, marketplacesAdded, marketplacesRemoved };
+	const { installed, updated, uninstalled, marketplacesAdded, marketplacesRemoved } = plugins.value;
+	const pluginChanges: PluginChanges = { installed, updated, uninstalled, marketplacesAdded, marketplacesRemoved };
 	return ok({ state: nextState, changedFiles, pluginChanges });
 };
 

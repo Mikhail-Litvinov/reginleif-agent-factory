@@ -268,7 +268,12 @@ foreign and does not repeat events.
    do not go into the generated file and are not duplicated. The person's text comes after the imports and outweighs them.
 4. **`~/.claude/settings.json`.** Merged by the ownership rules below.
 5. **Agents, skills, plugins.** Installed for enabled parts, removed for disabled ones. Plugins are installed through
-   `claude plugin`.
+   `claude plugin`. An installed plugin is up to date only by the facts of its installed copy, never by its id: apply reads
+   `plugin list --json` and, for a plugin whose `version` differs from the `folderVersion` of its source folder, runs
+   `claude plugin update <id> --scope user` (probed on Claude Code 2.1.325: it copies the new version into the plugin cache
+   without `marketplace update`); for a plugin whose `installPath` no longer exists it runs `plugin install <id> --scope user
+   --yes` again (`update` does nothing then). Refreshed ids are listed in `pluginChanges.updated`; a failing step fails the
+   apply. A remote plugin has no `folderVersion`: only the missing `installPath` triggers a refresh.
 
 Ownership rules: `state.json` stores every `rig` entry with the written value or the file hash.
 
@@ -378,8 +383,8 @@ error, in event texts and in the generated agent rules.
 | `rig language [en\|ru]` | `{"language"}`; setting: `{"language","changed"}`; failure codes `not-installed`, `language-failed`; progress `lock-waiting` | `language --json`, strict schema (unchanged); `language <x>` as text for Telegram | JSON |
 | `rig feature <name> enable\|disable` | `{"feature","enabled"}`; failure codes `base-cannot-toggle`, `unknown-feature`, `feature-change-refused`, `service-not-started`, `feature-failed`; progress `lock-waiting`, `program-install` (`data: {name, command}`), `service-stopping` | text, shown to the user in Telegram | JSON |
 | `rig update [--pending]` | `{"mode":"update"\|"pending","outcome":"complete"\|"checked"\|"deferred"}` (`complete`: a full update ran to its end, what changed is in `events.jsonl`; `checked`: the pending check ran, and it is now printed too, one line per cron run; `deferred`: the check found the lock taken); failure code `update-failed`; progress `lock-waiting` and `update-step-output` (`data: {step, line}`, one text line of the child `update-step`) | text, shown to the user in Telegram | JSON |
-| `rig install [--dev]` | `{"mode","paths":{"repo","hub"},"enabledFeatures":[...],"missingPrograms":[{"name","command"}],"changedFiles":[...],"pluginChanges":{"installed","uninstalled","marketplacesAdded","marketplacesRemoved"},"cron"}` (`cron` is `skipped` on dev, else `unchanged` or `updated`); failure code `install-failed`; progress `lock-waiting` | nothing | JSON |
-| `rig apply` | `{"changedFiles":[...],"pluginChanges":{"installed","uninstalled","marketplacesAdded","marketplacesRemoved"}}` (all lists empty: nothing changed); failure code `apply-failed`; progress `lock-waiting` | nothing | JSON |
+| `rig install [--dev]` | `{"mode","paths":{"repo","hub"},"enabledFeatures":[...],"missingPrograms":[{"name","command"}],"changedFiles":[...],"pluginChanges":{"installed","updated","uninstalled","marketplacesAdded","marketplacesRemoved"},"cron"}` (`cron` is `skipped` on dev, else `unchanged` or `updated`); failure code `install-failed`; progress `lock-waiting` | nothing | JSON |
+| `rig apply` | `{"changedFiles":[...],"pluginChanges":{"installed","updated","uninstalled","marketplacesAdded","marketplacesRemoved"}}` (all lists empty: nothing changed); failure code `apply-failed`; progress `lock-waiting` | nothing | JSON |
 | `rig check` | `{"checked":true}`; a defect is a failure `check-failed` (every problem in `message`, one per line), `check-environment` (only the environment could not be asked), `check-unreadable` (state or features unreadable) | nothing | JSON |
 | `rig update-step` | text | parsed as text by the parent `rig update` | internal |
 
@@ -479,7 +484,7 @@ The hub and `rig` are different applications. The hub requires `rig` and does no
 is common to both: `rig` and the hub can be built by different agents.
 
 **The `telegram-hub` plugin.** Claude Code reads the plugin straight from the hub clone (in `plugin list --json` it has
-`readFromFolder`; verified on Claude Code 2.1.314, `plugin update` answers "nothing to update. Edits there take effect at
+`readFromFolder`; verified on Claude Code 2.1.314, `plugin update` at an unchanged version answers "nothing to update. Edits there take effect at
 the next session start or /reload-plugins"). A new hub commit reaches new Claude sessions without a command; an already
 open window holds the loaded code until it restarts or runs `/reload-plugins`. Rollback works the same way. The hub version
 is stored in `plugin/package.json` and read from the commit under check; the rig version is stored in the root

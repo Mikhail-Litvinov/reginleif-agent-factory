@@ -40,7 +40,7 @@ describe("rig install and rig apply print one JSON object", () => {
 			paths: { repo: REPO },
 			enabledFeatures: ["base", "server-tools"],
 			missingPrograms: [{ name: "tmux", command: "sudo apt-get install tmux" }],
-			pluginChanges: { installed: [], uninstalled: [], marketplacesAdded: [], marketplacesRemoved: [] },
+			pluginChanges: { installed: [], updated: [], uninstalled: [], marketplacesAdded: [], marketplacesRemoved: [] },
 			cron: "skipped",
 		});
 		const changed = typeof result.value === "object" && result.value !== null && "changedFiles" in result.value ? result.value.changedFiles : null;
@@ -81,7 +81,7 @@ describe("rig install and rig apply print one JSON object", () => {
 		expect(result.lines).toBe(SINGLE_LINE);
 		expect(result.value).toEqual({
 			changedFiles: [],
-			pluginChanges: { installed: [], uninstalled: [], marketplacesAdded: [], marketplacesRemoved: [] },
+			pluginChanges: { installed: [], updated: [], uninstalled: [], marketplacesAdded: [], marketplacesRemoved: [] },
 		});
 	});
 });
