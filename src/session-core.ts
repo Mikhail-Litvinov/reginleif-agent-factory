@@ -2,12 +2,14 @@ import type { Args, Op, Request, Response } from "../plugins/agent-rig-window/mo
 import type { ApiResult, ProgressEvent } from "./output.js";
 import type { RuntimePorts } from "./ports.js";
 
-import { CLAIM_BEAT_FILE, CLAIM_STALE_MS, CLAIMS_DIR, ID_PATTERN, REQUEST_SUFFIX } from "../plugins/agent-rig-window/mod/queue-protocol.js";
+import { CLAIM_PID_FILE, CLAIMS_DIR, ID_PATTERN, REQUEST_SUFFIX } from "../plugins/agent-rig-window/mod/queue-protocol.js";
 import { joinPath } from "./file-system.js";
 import { messagesFor } from "./messages.js";
 import { apiFail, apiOk, PROGRESS_CODE_SESSION_WAITING, SESSION_BAD_ID, SESSION_BAD_RESPONSE, SESSION_CLAIM_LOST, SESSION_ENDED, SESSION_INVALID, SESSION_IO, SESSION_MODULE_ERROR, SESSION_NO_MODULE, SESSION_TIMEOUT, SESSION_UNKNOWN } from "./output.js";
 import { errorText } from "./result.js";
 
+// A pid file holds a positive decimal integer (the module validates the same shape before writing it).
+const PID_PATTERN = /^[1-9][0-9]*$/;
 // The window polls once per second; allow three polls for read-only operations.
 export const SESSION_POLL_MS = 1000;
 export const READ_TIMEOUT_MS = 3 * SESSION_POLL_MS;
@@ -164,8 +166,8 @@ export const requestSession = async (r: RuntimePorts, session: SessionRecord, op
 	const responsePath = joinPath(responses, `${id}${REQUEST_SUFFIX}`);
 	const body: Request = { id, op, args };
 	const claimDir = joinPath(folder(r, session.id), CLAIMS_DIR, id);
-	// When rig first saw the claim directory with no beat in it: the claimant's first beat is due right after.
-	let claimSeen: number | null = null;
+	// The claiming module's Claude pid once its pid file is read, and that pid's creation time once first looked up.
+	let claimant: { pid: number; created: string | null } | null = null;
 	let published = false;
 	try {
 		await r.fs.ensureDirectory(requests);
@@ -191,14 +193,20 @@ export const requestSession = async (r: RuntimePorts, session: SessionRecord, op
 				if (malformed) return apiFail(SESSION_BAD_RESPONSE, m.badResponse());
 				malformed = true;
 			}
-			// The window that claimed the request beats while it works; a claimant gone silent is a failure, not a wait.
-			let beat: number | null = null;
-			try { const text = (await r.fs.readText(joinPath(claimDir, CLAIM_BEAT_FILE))).trim(); beat = text === "" ? null : Number(text); } catch (e) { if (!missing(e)) throw e; }
-			if (beat === null || !Number.isFinite(beat)) {
-				beat = null;
-				try { await r.fs.listDirectory(claimDir); claimSeen ??= r.clock.now().getTime(); beat = claimSeen; } catch (e) { if (!missing(e)) throw e; }
+			// The claiming module is gone when its process identity is: the pid no longer exists or has another creation time.
+			// Elapsed time never decides it (a claimant may run a long step). A claim with no valid pid file is waited on.
+			if (claimant === null) {
+				let pidText: string | null = null;
+				try { pidText = (await r.fs.readText(joinPath(claimDir, CLAIM_PID_FILE))).trim(); } catch (e) { if (!missing(e)) throw e; }
+				if (pidText !== null && PID_PATTERN.test(pidText) && Number.isSafeInteger(Number(pidText))) claimant = { pid: Number(pidText), created: null };
 			}
-			if (beat !== null && r.clock.now().getTime() - beat > CLAIM_STALE_MS) return apiFail(SESSION_CLAIM_LOST, m.claimLost());
+			if (claimant !== null) {
+				const created = await r.process.createdAt([claimant.pid]);
+				if (!created.ok) return apiFail(SESSION_IO, m.io(created.error));
+				const now = created.value[String(claimant.pid)] ?? null;
+				claimant.created ??= now;
+				if (now === null || now !== claimant.created) return apiFail(SESSION_CLAIM_LOST, m.claimLost());
+			}
 			const current = await lookupSession(r, session.id);
 			if (!current.ok) return current;
 			if (current.value.processes.length === 0) return apiFail(SESSION_ENDED, m.ended());

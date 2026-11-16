@@ -9,6 +9,7 @@ const POLL_MS = 1000;
 const ROOT_DIR = ".agent-rig/sessions";
 const TEMP_SUFFIX = ".tmp";
 const DRIVE_PATTERN = /^[A-Za-z]:/;
+const PID_PATTERN = /^[1-9][0-9]*$/;
 
 let cancelPoll: (() => void) | undefined;
 let window: Window | undefined;
@@ -27,6 +28,10 @@ export const register: Register = on => {
     }
     const base = home.replaceAll("\\", "/").replace(/\/$/, "");
     const isWindows = DRIVE_PATTERN.test(base);
+    // Claude Code sets CLAUDE_PID in the environment of its children, so a child prints it (the engine's env.get is not known to expose it); anything but a positive integer means no pid.
+    const printed = await $.process.run(isWindows ? ["cmd", "/c", "echo", "%CLAUDE_PID%"] : ["sh", "-c", "printf %s \"$CLAUDE_PID\""]).catch(() => undefined);
+    const rawPid = (printed?.exitCode === 0 ? printed.stdout : "").trim();
+    const pid = PID_PATTERN.test(rawPid) && Number.isSafeInteger(Number(rawPid)) ? Number(rawPid) : undefined;
     const run = async (argv: string[]): Promise<boolean> => (await $.process.run(argv)).exitCode === 0;
     const w = new Window(`${base}/${ROOT_DIR}/${id}`, {
       list: async dir => {
@@ -82,6 +87,7 @@ export const register: Register = on => {
         return result.text;
       },
       now: () => Date.now(),
+      pid,
     });
     window = w;
     await w.measured();

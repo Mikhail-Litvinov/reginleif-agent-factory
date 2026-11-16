@@ -2,7 +2,7 @@
 // Claude Code with no Node, so everything outside comes in as Deps (the engine's `$` calls, wired in register.ts).
 import type { Request, Response, Usage, UsageSnapshot } from "./protocol";
 
-import { CLAIM_BEAT_FILE, CLAIMS_DIR, errorText, idOfFile, parseRequest, responseText } from "./protocol";
+import { CLAIM_PID_FILE, CLAIMS_DIR, errorText, idOfFile, parseRequest, responseText } from "./protocol";
 
 const REQUESTS_DIR = "requests";
 const RESPONSES_DIR = "responses";
@@ -36,6 +36,8 @@ export type Deps = {
   // Runs the session's own /autocompact with the window (a number or "auto"); resolves to the command's text, if any.
   autocompact(window: number | "auto"): Promise<string | undefined>;
   now(): number;
+  // This process's Claude pid, when it is known.
+  readonly pid: number | undefined;
 };
 
 type Pending = { request: Request; failed: number };
@@ -43,7 +45,7 @@ type Pending = { request: Request; failed: number };
 export class Window {
   // Ids picked up and not yet answered and removed: a request is handled once.
   private seen = new Set<string>();
-  // Ids this window claimed and has not answered: their beat is rewritten on every poll.
+  // Ids this window claimed and has not answered: they are not forgotten while the request file stays.
   private claimed = new Set<string>();
   private pending: Pending[] = [];
   private polling = false;
@@ -78,7 +80,6 @@ export class Window {
     if (this.polling) return;
     this.polling = true;
     try {
-      await Promise.all([...this.claimed].map(id => this.beat(id)));
       const names = await this.deps.list(`${this.dir}/${REQUESTS_DIR}`);
       const listed = new Set<string>();
       for (const name of [...names].sort()) {
@@ -109,11 +110,15 @@ export class Window {
     return snapshot;
   }
 
-  private async beat(id: string): Promise<void> {
+  // Records which process holds the claim: rig tells a dead claimant from the identity of this pid. Without a known
+  // pid nothing is written, and rig waits for the request's own timeout.
+  private async recordPid(id: string): Promise<void> {
+    const pid = this.deps.pid;
+    if (pid === undefined) return;
     try {
-      await this.deps.writeAtomic(`${this.dir}/${CLAIMS_DIR}/${id}/${CLAIM_BEAT_FILE}`, String(this.deps.now()));
+      await this.deps.writeAtomic(`${this.dir}/${CLAIMS_DIR}/${id}/${CLAIM_PID_FILE}`, String(pid));
     } catch {
-      // The next poll writes it again.
+      // The claim stays without a pid: rig waits for the request's own timeout.
     }
   }
 
@@ -128,6 +133,7 @@ export class Window {
       this.seen.delete(id);
       return;
     }
+    await this.recordPid(id);
     // Read after the claim: a request already answered and removed (rig then removes its claim) is not run again.
     const text = await this.deps.read(`${this.dir}/${REQUESTS_DIR}/${id}.json`);
     if (text === undefined) {
@@ -136,7 +142,6 @@ export class Window {
       return;
     }
     this.claimed.add(id);
-    await this.beat(id);
     const parsed = parseRequest(id, text);
     if (!parsed.ok) return this.answer({ id, ok: false, error: parsed.error });
     const request = parsed.value;

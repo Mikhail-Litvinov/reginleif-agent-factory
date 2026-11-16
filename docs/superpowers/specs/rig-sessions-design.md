@@ -40,7 +40,7 @@ Failures use `session-bad-id`, `session-unknown`, `session-invalid`, `session-io
   usage.json            latest usage snapshot, replaced whole
   requests/<req>.json   one request, written by rig
   responses/<req>.json  the answer, written by the module
-  claims/<req>/beat     the claim on a request (a directory) and its heartbeat, written by the claiming module
+  claims/<req>/pid      the claim on a request (a directory) and the claiming Claude pid, written by the claiming module
 ```
 
 ## Snapshot: `usage.json`
@@ -78,13 +78,18 @@ atomic. The module that made the directory reads the request (after the claim, s
 removed is dropped and its claim removed), runs it and answers; a module whose `mkdir` fails skips the request and
 forgets its id once the file is gone. A claim is never taken over.
 
-The claimant rewrites `claims/<req>/beat` (epoch milliseconds) at the claim and on every poll while the request is
-unanswered. The module has no way to learn its own pid, so a claim records a beat, not a process identity. Rig's wait
-reads the beat on every poll: a beat older than `CLAIM_STALE_MS` (one minute, sixty module polls), or a claim directory
-with no beat that rig has watched for that long, ends the wait with `session-claim-lost` (the claiming process died or
-hung mid-request; the request is not run by another process and the caller may send it again). When the wait ends for
-any reason rig removes the request and then the claim directory, in that order: a module that listed the request
-earlier and claims late then finds the request gone.
+At registration the module learns its own Claude pid: Claude Code sets `CLAUDE_PID` in its children's environment, so
+the module runs one command through `$.process.run` that prints it (`cmd /c echo %CLAUDE_PID%` on a drive-letter home,
+`sh -c 'printf %s "$CLAUDE_PID"'` otherwise); anything but a positive integer means the module records no pid. After a
+successful claim the module writes `claims/<req>/pid` (that pid). Rig's wait reads the pid file on each poll until it
+finds one, then looks the pid's creation time up (`process.createdAt`) on that poll and every later one: the first
+reading is the claimant's identity, and a pid that no longer exists or whose creation time differs (the pid was reused)
+ends the wait with `session-claim-lost` (the claiming process died mid-request; the request is not run by another
+process and the caller may send it again). Elapsed time never decides it: a claimant busy with a long step is still
+waited on. A claim with no usable pid file (the module could not learn its pid, or died between making the directory and
+writing the file) is waited on until the operation's own timeout, `session-timeout`. When the wait ends for any reason
+rig removes the request and then the claim directory, in that order: a module that listed the request earlier and claims
+late then finds the request gone.
 
 | Op | Args | Result |
 | --- | --- | --- |

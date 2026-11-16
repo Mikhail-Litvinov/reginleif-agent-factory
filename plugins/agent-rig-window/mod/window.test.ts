@@ -8,6 +8,7 @@ import { Window } from "./window";
 
 const DIR = "/home/tester/.agent-rig/sessions/sess-1";
 const TOKENS = 1;
+const PID = 4242;
 
 type Shared = { files: Map<string, string>; dirs: Set<string>; writes: string[]; now: number };
 
@@ -46,6 +47,7 @@ function process(s: Shared, ran: string[]): Deps {
       return undefined;
     },
     now: () => s.now,
+    pid: PID,
   };
 }
 
@@ -71,7 +73,7 @@ test("one request is run once and answered once by two windows on one folder", a
   expect(answers(s)).toHaveLength(3);
 });
 
-test("a claimed request is beaten while unanswered, and a window forgets ids answered by the other", async () => {
+test("a claimed request records the claimant pid, and a window forgets ids answered by the other", async () => {
   const s = shared();
   const a = new Window(DIR, process(s, []));
   const b = new Window(DIR, process(s, []));
@@ -80,10 +82,9 @@ test("a claimed request is beaten while unanswered, and a window forgets ids ans
   put(s, "c1", { id: "c1", op: "compact" });
   await a.poll();
   await b.poll();
-  expect(s.files.get(`${DIR}/claims/c1/beat`)).toBe(String(s.now));
-  s.now += 5000;
+  expect(s.files.get(`${DIR}/claims/c1/pid`)).toBe(String(PID));
   await a.poll();
-  expect(s.files.get(`${DIR}/claims/c1/beat`)).toBe(String(s.now));
+  expect(s.files.get(`${DIR}/claims/c1/pid`)).toBe(String(PID));
   a.turn(false);
   await a.poll();
   expect(s.files.has(`${DIR}/responses/c1.json`)).toBe(true);

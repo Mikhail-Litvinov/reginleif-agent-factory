@@ -13,11 +13,13 @@ const TOKENS = 1234;
 const OK = { exitCode: 0, stdout: "", stderr: "" };
 
 // The engine hands paths over in the platform spelling (C:home...); the fake files are keyed by one spelling.
+const CLAUDE_PID = "4242";
 const norm = (path: string): string => path.replace(/^[A-Za-z]:/, "").replaceAll("\\", "/");
 
 type World = {
   files: Map<string, string>;
   dirs: Set<string>;
+  pidText: string;
   compactions: (string | undefined)[];
   renames: string[];
   autocompacts: string[];
@@ -28,7 +30,7 @@ type World = {
 
 // Every `$` call the module makes, answered by the test; `session.start` is the engine's own echo.
 function world(on: On): World {
-  const w: World = { files: new Map(), dirs: new Set(), compactions: [], renames: [], autocompacts: [], compactResult: {}, clock: mock.clock(on) };
+  const w: World = { files: new Map(), dirs: new Set(), pidText: CLAUDE_PID, compactions: [], renames: [], autocompacts: [], compactResult: {}, clock: mock.clock(on) };
   on("session.start", (_, e) => ({ cwd: e.cwd }));
   on("env.get", (_, e) => ({ value: e.name === "HOME" ? HOME : undefined }));
   on("session.id", () => ({ value: SESSION }));
@@ -59,6 +61,8 @@ function world(on: On): World {
       }
     } else if (command === "rm") {
       for (const path of args.slice(1)) w.files.delete(norm(path));
+    } else if (command === "sh") {
+      return { value: { exitCode: 0, stdout: w.pidText, stderr: "" } };
     } else if (command === "mkdir") {
       // Plain mkdir fails on an existing directory (the claim); -p never does.
       const path = norm(args[args.length - 1] ?? "");
@@ -150,7 +154,17 @@ test("a request whose claim directory another process made is neither run nor an
   expect(response(w, "c1")).toBeUndefined();
   expect(w.files.has(`${DIR}/requests/c1.json`)).toBe(true);
   expect(response(w, "c2")?.ok).toBe(true);
-  expect(w.files.get(`${DIR}/claims/c2/beat`)).toBeDefined();
+  expect(w.files.get(`${DIR}/claims/c2/pid`)).toBe(CLAUDE_PID);
+});
+
+test("a claim records no pid when the environment variable is not a positive integer", async ($, on) => {
+  const w = world(on);
+  w.pidText = "";
+  await start($);
+  request(w, "c1", { id: "c1", op: "compact" });
+  await w.clock.advance(POLL_MS * 2);
+  expect(response(w, "c1")?.ok).toBe(true);
+  expect(w.files.has(`${DIR}/claims/c1/pid`)).toBe(false);
 });
 
 test("autocompact runs the session's own command and answers the window, with the command text when there is one", async ($, on) => {

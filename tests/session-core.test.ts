@@ -4,8 +4,7 @@ import { describe, expect, test } from "bun:test";
 
 import { runCli } from "../src/cli.js";
 import { apiOk } from "../src/output.js";
-import { CLAIM_STALE_MS } from "../plugins/agent-rig-window/mod/queue-protocol.js";
-import { COMPACT_TIMEOUT_MS, lookupSession, listSessions, requestSession, sessionLive, SESSION_POLL_MS } from "../src/session-core.js";
+import { lookupSession, listSessions, requestSession, sessionLive, SESSION_POLL_MS } from "../src/session-core.js";
 import { ok } from "../src/result.js";
 import { createMemoryRuntime } from "./fakes/memory-runtime.js";
 
@@ -85,33 +84,66 @@ describe("session core", () => {
 			if (!exits) expect(events).toEqual(["session-waiting"]);
 		}
 	});
-	test("a claimant that stops beating fails the wait, and a beating one does not; the claim is removed", async () => {
-		for (const beating of [false, true]) {
-			const h = setup();
-			let now = 0;
-			h.runtime.clock.now = () => new Date(now);
-			const claim = `${ROOT}/abc/claims/event-1`;
-			h.runtime.clock.sleep = async (ms) => {
-				now += ms;
-				h.fs.directories.add(claim);
-				if (now === SESSION_POLL_MS || beating) h.fs.seed(`${claim}/beat`, String(now));
-				if (beating && now >= CLAIM_STALE_MS * 3) h.fs.seed(`${ROOT}/abc/responses/event-1.json`, JSON.stringify({ id: "event-1", ok: true, result: 1 }));
-			};
-			const answer = await requestSession(h.runtime, record, "compact", {}, COMPACT_TIMEOUT_MS);
-			expect(answer.ok ? "ok" : answer.error.code).toBe(beating ? "ok" : "session-claim-lost");
-			if (!beating) expect(now).toBeLessThanOrEqual(CLAIM_STALE_MS + 2 * SESSION_POLL_MS);
-			expect(h.fs.files.has(`${ROOT}/abc/requests/event-1.json`)).toBe(false);
-			expect(h.fs.directories.has(claim)).toBe(false);
-		}
-	});
-	test("a claim directory with no beat yet counts from when it was first seen", async () => {
+	// A claim as the module leaves it: the directory, and its Claude pid when the module knows it.
+	const CLAIMANT = 77;
+	const CLAIMANT_CREATED = "2026-01-02T00:00:00.000000Z";
+	const LONG_SILENCE_MS = 5 * 60_000;
+	const claimWorld = (claimantCreated: () => string | null, pidFile: boolean) => {
 		const h = setup();
 		let now = 0;
 		h.runtime.clock.now = () => new Date(now);
-		h.runtime.clock.sleep = async (ms) => { now += ms; h.fs.directories.add(`${ROOT}/abc/claims/event-1`); };
-		const answer = await requestSession(h.runtime, record, "compact", {}, COMPACT_TIMEOUT_MS);
+		h.runtime.process.createdAt = async (pids) => ok(Object.fromEntries(pids.flatMap((pid) => {
+			if (pid === record.pid) return [[String(pid), CREATED]];
+			const created = claimantCreated();
+			return created === null ? [] : [[String(pid), created]];
+		})));
+		const claim = `${ROOT}/abc/claims/event-1`;
+		const sleeps: number[] = [];
+		h.runtime.clock.sleep = async (ms) => {
+			now += ms;
+			sleeps.push(now);
+			h.fs.directories.add(claim);
+			if (pidFile) h.fs.seed(`${claim}/pid`, String(CLAIMANT));
+		};
+		return { h, claim, sleeps, now: () => now };
+	};
+	test("a claimant whose process is gone fails the wait at once, and the claim is removed", async () => {
+		const w = claimWorld(() => null, true);
+		const answer = await requestSession(w.h.runtime, record, "compact", {}, LONG_SILENCE_MS * 2);
 		expect(answer.ok ? "ok" : answer.error.code).toBe("session-claim-lost");
-		expect(now).toBeLessThanOrEqual(CLAIM_STALE_MS + 2 * SESSION_POLL_MS);
+		expect(w.now()).toBeLessThanOrEqual(2 * SESSION_POLL_MS);
+		expect(w.h.fs.files.has(`${ROOT}/abc/requests/event-1.json`)).toBe(false);
+		expect(w.h.fs.directories.has(w.claim)).toBe(false);
+	});
+	test("a claimant silent for minutes is still waited on while its process lives", async () => {
+		const w = claimWorld(() => CLAIMANT_CREATED, true);
+		const sleep = w.h.runtime.clock.sleep;
+		w.h.runtime.clock.sleep = async (ms) => {
+			await sleep(ms);
+			if (w.now() >= LONG_SILENCE_MS) w.h.fs.seed(`${ROOT}/abc/responses/event-1.json`, JSON.stringify({ id: "event-1", ok: true, result: 1 }));
+		};
+		const answer = await requestSession(w.h.runtime, record, "compact", {}, LONG_SILENCE_MS * 2);
+		expect(answer.ok ? "ok" : answer.error.code).toBe("ok");
+		expect(w.now()).toBeGreaterThanOrEqual(LONG_SILENCE_MS);
+		expect(w.h.fs.directories.has(w.claim)).toBe(false);
+	});
+	test("a claimant pid reused by another process (other creation time) is lost", async () => {
+		let created = CLAIMANT_CREATED;
+		const w = claimWorld(() => created, true);
+		const sleep = w.h.runtime.clock.sleep;
+		w.h.runtime.clock.sleep = async (ms) => {
+			await sleep(ms);
+			if (w.now() >= 3 * SESSION_POLL_MS) created = "2026-01-03T00:00:00.000000Z";
+		};
+		const answer = await requestSession(w.h.runtime, record, "compact", {}, LONG_SILENCE_MS);
+		expect(answer.ok ? "ok" : answer.error.code).toBe("session-claim-lost");
+		expect(w.now()).toBeLessThanOrEqual(4 * SESSION_POLL_MS);
+	});
+	test("a claim with no pid file is waited on until the request's own timeout", async () => {
+		const w = claimWorld(() => null, false);
+		const answer = await requestSession(w.h.runtime, record, "compact", {}, LONG_SILENCE_MS);
+		expect(answer.ok ? "ok" : answer.error.code).toBe("session-timeout");
+		expect(w.now()).toBe(LONG_SILENCE_MS);
 	});
 	test("removed process files stop waiting without another process query", async () => {
 		const h = setup();

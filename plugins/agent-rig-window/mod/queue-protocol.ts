@@ -2,12 +2,10 @@
 export const ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 export const REQUEST_SUFFIX = ".json";
 // A request is claimed by making the directory claims/<id> (the one atomic step the engine offers: mkdir fails on an
-// existing directory); the claimant rewrites claims/<id>/beat (epoch milliseconds) on each module poll while the request
-// is unanswered. Rig treats a beat older than CLAIM_STALE_MS as a dead claimant. The beat comes every 1 s (the module's
-// poll), so one minute is sixty missed polls, long enough for a busy engine and short against a ten-minute wait.
+// existing directory); the claimant then writes its Claude pid to claims/<id>/pid. Rig decides the claimant is gone from
+// that pid's identity (pid and creation time), never from elapsed time.
 export const CLAIMS_DIR = "claims";
-export const CLAIM_BEAT_FILE = "beat";
-export const CLAIM_STALE_MS = 60_000;
+export const CLAIM_PID_FILE = "pid";
 export const OPS = ["compact", "rename", "autocompact", "usage", "mode"] as const;
 export type Op = (typeof OPS)[number];
 export type Args = Record<string, unknown>;
