@@ -204,6 +204,11 @@ export const requestSession = async (r: RuntimePorts, session: SessionRecord, op
 				const created = await r.process.createdAt([claimant.pid]);
 				if (!created.ok) return apiFail(SESSION_IO, m.io(created.error));
 				const now = created.value[String(claimant.pid)] ?? null;
+				if (claimant.created === null && now !== null) {
+					// The claimant existed before it made its claim directory, so a process created after the directory's last change is a stranger that reused the pid.
+					const claimChanged = await r.fs.modifiedAt(claimDir);
+					if (claimChanged !== null && Date.parse(now) > claimChanged) return apiFail(SESSION_CLAIM_LOST, m.claimLost());
+				}
 				claimant.created ??= now;
 				if (now === null || now !== claimant.created) return apiFail(SESSION_CLAIM_LOST, m.claimLost());
 			}

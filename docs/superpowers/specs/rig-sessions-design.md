@@ -83,7 +83,9 @@ the module runs one command through `$.process.run` that prints it (`cmd /c echo
 `sh -c 'printf %s "$CLAUDE_PID"'` otherwise); anything but a positive integer means the module records no pid. After a
 successful claim the module writes `claims/<req>/pid` (that pid). Rig's wait reads the pid file on each poll until it
 finds one, then looks the pid's creation time up (`process.createdAt`) on that poll and every later one: the first
-reading is the claimant's identity, and a pid that no longer exists or whose creation time differs (the pid was reused)
+reading is the claimant's identity (unless that process was created after the claim directory's last change: the claimant
+existed before it made the directory, so such a process is a stranger that reused the pid before the first read, and the
+wait ends with `session-claim-lost` at once), and a pid that no longer exists or whose creation time differs (the pid was reused)
 ends the wait with `session-claim-lost` (the claiming process died mid-request; the request is not run by another
 process and the caller may send it again). Elapsed time never decides it: a claimant busy with a long step is still
 waited on. A claim with no usable pid file (the module could not learn its pid, or died between making the directory and

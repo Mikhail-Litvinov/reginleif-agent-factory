@@ -88,12 +88,13 @@ describe("session core", () => {
 	const CLAIMANT = 77;
 	const CLAIMANT_CREATED = "2026-01-02T00:00:00.000000Z";
 	const LONG_SILENCE_MS = 5 * 60_000;
-	const claimWorld = (claimantCreated: () => string | null, pidFile: boolean) => {
+	const CLAIM_AFTER_CLAIMANT_MS = 1000;
+	const claimWorld = (claimantCreated: () => string | null, pidFile: boolean, claimModifiedMs = Date.parse(CLAIMANT_CREATED) + CLAIM_AFTER_CLAIMANT_MS) => {
 		const h = setup();
 		let now = 0;
 		h.runtime.clock.now = () => new Date(now);
 		h.runtime.process.createdAt = async (pids) => ok(Object.fromEntries(pids.flatMap((pid) => {
-			if (pid === record.pid) return [[String(pid), CREATED]];
+			if (pid === record.processes[0]?.pid) return [[String(pid), CREATED]];
 			const created = claimantCreated();
 			return created === null ? [] : [[String(pid), created]];
 		})));
@@ -103,6 +104,7 @@ describe("session core", () => {
 			now += ms;
 			sleeps.push(now);
 			h.fs.directories.add(claim);
+			h.fs.mtimes.set(claim, claimModifiedMs);
 			if (pidFile) h.fs.seed(`${claim}/pid`, String(CLAIMANT));
 		};
 		return { h, claim, sleeps, now: () => now };
@@ -138,6 +140,12 @@ describe("session core", () => {
 		const answer = await requestSession(w.h.runtime, record, "compact", {}, LONG_SILENCE_MS);
 		expect(answer.ok ? "ok" : answer.error.code).toBe("session-claim-lost");
 		expect(w.now()).toBeLessThanOrEqual(4 * SESSION_POLL_MS);
+	});
+	test("a process created after its claim directory is not the claimant (its pid was reused before rig read it)", async () => {
+		const w = claimWorld(() => CLAIMANT_CREATED, true, Date.parse(CLAIMANT_CREATED) - CLAIM_AFTER_CLAIMANT_MS);
+		const answer = await requestSession(w.h.runtime, record, "compact", {}, LONG_SILENCE_MS);
+		expect(answer.ok ? "ok" : answer.error.code).toBe("session-claim-lost");
+		expect(w.now()).toBeLessThanOrEqual(2 * SESSION_POLL_MS);
 	});
 	test("a claim with no pid file is waited on until the request's own timeout", async () => {
 		const w = claimWorld(() => null, false);
