@@ -80,7 +80,7 @@ substituting paths and the interpreter in place of `C:/Users/...`.
 The `SessionStart` hook runs it with `start`, the `SessionEnd` hook with `end`; both receive the hook's JSON on stdin.
 It is Python 3 with the standard library only, run as `python -I`.
 
-Record fields: `session_id`, `cwd`, `transcript_path`, `config_dir` (the `CLAUDE_CONFIG_DIR` value, empty for the default
+Record fields: `session_id`, `cwd`, `transcript_path` (kept as Claude Code named it, after the cwd; rig's readers resolve it to the existing `<config_dir or ~/.claude>/projects/*/<id>.jsonl`, see rig-sessions-design.md), `config_dir` (the `CLAUDE_CONFIG_DIR` value, empty for the default
 login), `pid_error` (null, or why the pid is unknown), `started_at` (UTC, whole seconds). The record holds no process
 fields: one session id can have several Claude Code processes at once (a window and a `claude -p --resume` of the same
 id), so each process has its own file `~/.agent-rig/sessions/<session_id>/processes/<pid>.json` with `pid`,

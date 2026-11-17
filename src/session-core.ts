@@ -7,6 +7,7 @@ import { joinPath } from "./file-system.js";
 import { messagesFor } from "./messages.js";
 import { apiFail, apiOk, PROGRESS_CODE_SESSION_RUNNING, PROGRESS_CODE_SESSION_WAITING, SESSION_BAD_ID, SESSION_BAD_RESPONSE, SESSION_CLAIM_LOST, SESSION_ENDED, SESSION_INVALID, SESSION_IO, SESSION_MODULE_ERROR, SESSION_NO_MODULE, SESSION_TIMEOUT, SESSION_UNKNOWN } from "./output.js";
 import { errorText } from "./result.js";
+import { resolveTranscriptPath } from "./transcript-path.js";
 
 // A pid file holds a positive decimal integer (the module validates the same shape before writing it).
 const PID_PATTERN = /^[1-9][0-9]*$/;
@@ -71,7 +72,10 @@ export const lookupSession = async (r: RuntimePorts, id: string): Promise<ApiRes
 	const legacy: SessionProcess | null = pid !== null && endedAt === null ? { pid, pidCreated, startedAt: value.started_at } : null;
 	const processes = await readProcesses(r, id, legacy);
 	if (!processes.ok) return processes;
-	return apiOk({ id, cwd: value.cwd, transcriptPath: value.transcript_path, startedAt: value.started_at, processes: processes.value });
+	// The record keeps the path Claude Code named; every reader gets the transcript file that really exists.
+	const transcriptPath = await resolveTranscriptPath(r, id, value.transcript_path, typeof value.config_dir === "string" ? value.config_dir : "");
+	if (!transcriptPath.ok) return transcriptPath;
+	return apiOk({ id, cwd: value.cwd, transcriptPath: transcriptPath.value, startedAt: value.started_at, processes: processes.value });
 };
 
 // The processes among `candidates` whose creation time matches the recorded one, earliest started first.
