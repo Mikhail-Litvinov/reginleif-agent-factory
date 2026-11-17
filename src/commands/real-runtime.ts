@@ -325,10 +325,13 @@ const createProcessPorts = (pathEnvironment: string, language: Language): Proces
 		const killed = await ports.run("kill", ["-KILL", ...members.map(String)]);
 		return killed.ok ? ok(undefined) : killed;
 	},
+	// A kill port fails only when the kill could not be done at all (the killer did not start, the process table could not be read,
+	// the platform has no such kill). A killer that ran and exited non-zero is ok: a member that ended since the listing makes it
+	// report that, and the caller verifies by liveness. The message text of a killer is never parsed.
 	killTree: async (pid, force = false): Promise<Result<void>> => {
 		if (hostPlatform() === "win32") {
 			const result = await ports.run("taskkill", ["/T", "/F", "/PID", String(pid)]);
-			return processSuccess(result, "taskkill");
+			return result.ok ? ok(undefined) : result;
 		}
 		const table = await ports.run("ps", ["-eo", "pid=,ppid="]);
 		if (!table.ok) return table;
@@ -343,14 +346,13 @@ const createProcessPorts = (pathEnvironment: string, language: Language): Proces
 		for (const child of tree.reverse()) {
 			const result = await ports.run("kill", [force ? "-KILL" : "-TERM", String(child)]);
 			if (!result.ok) return result;
-			if (result.value.exitCode !== PROCESS_SUCCESS_EXIT_CODE && child === pid) return err(result.value.stderr || messages.failure.processStopFailed());
 		}
 		return ok(undefined);
 	},
 	killGroup: async (pid): Promise<Result<void>> => {
 		if (hostPlatform() === "win32") return err(messages.failure.processGroupsUnavailable());
 		const result = await ports.run("kill", ["-KILL", "--", `-${pid}`]);
-		return processSuccess(result, "kill");
+		return result.ok ? ok(undefined) : result;
 	},
 	createdAt: async (pids: readonly number[]): Promise<Result<Record<string, string | null>>> => {
 		if (pids.length === 0) return ok({});

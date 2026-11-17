@@ -40,10 +40,13 @@ export type ProcessPorts = {
 	// How many processes of the caller's own run, other than the caller itself, are alive: the runner's job on Windows,
 	// the runner's process group on POSIX. A process that left the run on purpose (setsid, job breakaway) is not counted.
 	runMembers(): Promise<Result<number>>;
-	// Kills every process counted by runMembers (so not the caller itself): the runner's job on Windows, the runner's process group on POSIX. Succeeds when none is left to kill.
+	// Kills every process counted by runMembers (so not the caller itself): the runner's job on Windows, the runner's process group on POSIX.
+	// Error only when a kill could not be done at all; a member that ended meanwhile is not an error. Callers verify by liveness.
 	killRunMembers(): Promise<Result<void>>;
 	isAvailable(command: string): Promise<boolean>;
 	createdAt(pids: readonly number[]): Promise<Result<Record<string, string | null>>>;
+	// Kill contract (killTree, killGroup): error only when the kill could not be done at all (the killer did not start, the process table
+	// could not be read, the platform has no such kill). A killer that ran and exited non-zero is ok; callers verify by liveness.
 	killTree(pid: number, force?: boolean): Promise<Result<void>>;
 	// POSIX only: SIGKILL to the process group whose id is `pid` (a run started with spawnDetached leads its own group).
 	killGroup(pid: number): Promise<Result<void>>;

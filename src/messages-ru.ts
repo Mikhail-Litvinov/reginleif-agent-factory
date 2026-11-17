@@ -293,7 +293,6 @@ export const ru: Messages = {
 		processTableQueryFailed: (): string => "Не удалось получить таблицу процессов",
 		processTableInvalid: (): string => "Некорректный ответ таблицы процессов",
 		processTableIncomplete: (): string => "Неполный ответ таблицы процессов",
-		processStopFailed: (): string => "Не удалось остановить процесс",
 		processGroupsUnavailable: (): string => "Группы процессов недоступны в Windows",
 		procStatUnreadable: (pid: number): string => `Не удалось прочитать /proc/${pid}/stat`,
 		procStartUnreadable: (pid: number): string => `Не удалось прочитать время запуска в /proc/${pid}/stat`,
