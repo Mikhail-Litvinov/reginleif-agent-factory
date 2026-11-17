@@ -65,6 +65,10 @@ FREE_LINES = ("luna",)
 ALL_EFFORTS = ("low", "medium", "high", "xhigh", "max", "ultra")
 DEFAULT_INTERVAL = 180
 POLL_SECONDS = 2
+# Windows readers can briefly prevent an atomic replacement (and vice versa).
+SHARING_RETRY_ATTEMPTS = 5
+SHARING_RETRY_SECONDS = 0.05
+UNREADABLE = object()
 ORPHAN_SECONDS = int(os.environ.get("CODEX_RUN_ORPHAN_SECONDS", 30 * 60))
 IDLE_SECONDS = int(os.environ.get("CODEX_RUN_IDLE_SECONDS", 20 * 60))
 # a shell command prints no events until it ends: long builds and test runs get a longer leash
@@ -188,17 +192,31 @@ def hhmm(ts):
 
 
 def read_json(path, default=None):
-    try:
-        return json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return default
+    for attempt in range(SHARING_RETRY_ATTEMPTS):
+        try:
+            return json.loads(Path(path).read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return default
+        except PermissionError:
+            if attempt + 1 < SHARING_RETRY_ATTEMPTS:
+                time.sleep(SHARING_RETRY_SECONDS)
+        except (OSError, ValueError):
+            return UNREADABLE
+    return UNREADABLE
 
 
 def write_json(path, data):
     path = Path(path)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
-    os.replace(tmp, path)
+    for attempt in range(SHARING_RETRY_ATTEMPTS):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt + 1 == SHARING_RETRY_ATTEMPTS:
+                raise
+            time.sleep(SHARING_RETRY_SECONDS)
 
 
 def pid_alive(pid):
@@ -241,7 +259,7 @@ def version_of(slug, line):
 
 def resolve_model(line):
     cache = read_json(MODELS_CACHE)
-    if not cache:
+    if cache is UNREADABLE or not cache:
         sys.exit(f"ERROR: cannot read {MODELS_CACHE}; run any codex command once to create it")
     best = None
     for m in cache.get("models") or []:
@@ -291,6 +309,8 @@ class Supervisor:
         self.state_path = self.dir / "state.json"
         self.events_path = self.dir / "events.jsonl"
         self.state = read_json(self.state_path)
+        if not isinstance(self.state, dict):
+            sys.exit(f"ERROR: cannot read {self.state_path}")
         self.last_event = now()
         self.saw_turn_completed = False
         self.error_text = ""
@@ -450,8 +470,8 @@ def cleanup_old_jobs():
         return
     cutoff = now() - KEEP_JOBS_DAYS * 86400
     for d in JOBS_DIR.iterdir():
-        st = read_json(d / "state.json") or {}
-        if st.get("status") in TERMINAL and st.get("updated", now()) < cutoff:
+        st = read_json(d / "state.json")
+        if isinstance(st, dict) and st.get("status") in TERMINAL and st.get("updated", now()) < cutoff:
             shutil.rmtree(d, ignore_errors=True)
 
 
@@ -579,17 +599,32 @@ def cmd_wait(a):
         offset = 0
     while True:
         (d / "heartbeat").touch()
-        st = read_json(d / "state.json") or {}
+        st = read_json(d / "state.json")
+        if not isinstance(st, dict):
+            return print(f"ERROR: state for job {a.job} is unreadable or missing")
         status = st.get("status")
-        if status not in TERMINAL and status != "starting" and not pid_alive(st.get("supervisor_pid")):
-            st.update(status="blocked", error="supervisor process died", ended=now())
-            write_json(d / "state.json", st)
-            status = "blocked"
+        stale_start = status == "starting" and now() - st["created"] > 60
+        if status not in TERMINAL and (status != "starting" or stale_start) and not pid_alive(st.get("supervisor_pid")):
+            dead_pid = st.get("supervisor_pid")
+            st = read_json(d / "state.json")
+            if not isinstance(st, dict):
+                return print(f"ERROR: state for job {a.job} is unreadable or missing")
+            status = st.get("status")
+            if (status not in TERMINAL and st.get("supervisor_pid") == dead_pid
+                    and (status != "starting" or now() - st["created"] > 60)):
+                report = d / "last.md"
+                try:
+                    report_status, report_error = validate_report(report.read_text(encoding="utf-8", errors="replace"))
+                except OSError:
+                    report_status, report_error = None, "unreadable"
+                if not report_error:
+                    st.update(status=report_status, error=None, report_error=None, ended=now())
+                else:
+                    error = "supervisor did not start (see supervisor.log)" if status == "starting" else "supervisor process died"
+                    st.update(status="blocked", error=error, ended=now())
+                write_json(d / "state.json", st)
+                status = st["status"]
         if status in TERMINAL or now() >= deadline:
-            break
-        if status == "starting" and now() - st["created"] > 60:
-            st.update(status="blocked", error="supervisor did not start (see supervisor.log)", ended=now())
-            write_json(d / "state.json", st)
             break
         time.sleep(POLL_SECONDS)
     end, events = scan_events(d / "events.jsonl", offset)
@@ -602,7 +637,9 @@ def cmd_wait(a):
 def cmd_reply(a):
     account_allowlist.refuse_if_blocked(ALLOWLIST_CATEGORY, home=HOME)
     d = job_dir(a.job)
-    st = read_json(d / "state.json") or {}
+    st = read_json(d / "state.json")
+    if not isinstance(st, dict):
+        sys.exit(f"ERROR: state for job {a.job} is unreadable or missing")
     if st.get("status") not in REPLY_STATUSES or not st.get("session_id"):
         sys.exit(f"ERROR: job {a.job} is {st.get('status')}; reply needs a finished job with a session")
     text = take_prompt(a.prompt_file).rstrip()
@@ -621,15 +658,24 @@ def cmd_reply(a):
 def cmd_cancel(a):
     d = job_dir(a.job)
     (d / "cancel").touch()
-    st = read_json(d / "state.json") or {}
     deadline = now() + 15
-    while now() < deadline and (read_json(d / "state.json") or {}).get("status") not in TERMINAL:
+    st = read_json(d / "state.json")
+    while now() < deadline and isinstance(st, dict) and st.get("status") not in TERMINAL:
         time.sleep(1)
-    st = read_json(d / "state.json") or {}
+        st = read_json(d / "state.json")
+    if not isinstance(st, dict):
+        return print(f"ERROR: state for job {a.job} is unreadable or missing")
     if st.get("status") not in TERMINAL:
-        kill_pid(st.get("supervisor_pid"))
-        st.update(status="cancelled", ended=now())
-        write_json(d / "state.json", st)
+        killed_pid = st.get("supervisor_pid")
+        kill_pid(killed_pid)
+        if pid_alive(killed_pid):
+            return print(f"ERROR: supervisor for job {a.job} is still running")
+        st = read_json(d / "state.json")
+        if not isinstance(st, dict):
+            return print(f"ERROR: state for job {a.job} is unreadable or missing")
+        if st.get("status") not in TERMINAL and st.get("supervisor_pid") == killed_pid:
+            st.update(status="cancelled", ended=now())
+            write_json(d / "state.json", st)
     print(f"job {a.job}: {st.get('status')}")
 
 
@@ -643,7 +689,10 @@ def cmd_list(a):
     if not JOBS_DIR.exists():
         return print("no jobs")
     for d in sorted(JOBS_DIR.iterdir())[-15:]:
-        st = read_json(d / "state.json") or {}
+        st = read_json(d / "state.json")
+        if not isinstance(st, dict):
+            print(f"{d.name}  unknown (state unreadable or missing)")
+            continue
         print(f"{d.name}  {st.get('status')}  {st.get('slug')}/{st.get('effort')}  {st.get('cwd')}")
 
 

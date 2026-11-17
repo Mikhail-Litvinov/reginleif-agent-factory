@@ -498,6 +498,146 @@ class JobLifecycleTest(unittest.TestCase):
             cr.cmd_wait(mock.Mock(job="job1", interval=interval))
         return cr.read_json(d / "state.json"), out.getvalue()
 
+    def test_wait_retries_a_sharing_violation_without_writing(self):
+        d = self.make_job(status="running", supervisor_pid=123)
+        original = cr.read_json(d / "state.json")
+        read_text = Path.read_text
+        attempts = []
+
+        def flaky_read(path, *args, **kwargs):
+            if path == d / "state.json" and not attempts:
+                attempts.append(True)
+                raise PermissionError("sharing violation")
+            return read_text(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "read_text", flaky_read), mock.patch.object(cr, "pid_alive", return_value=True), \
+                mock.patch.object(cr.time, "sleep"), mock.patch.object(cr, "write_json", wraps=cr.write_json) as write:
+            state, _ = self.wait(d)
+        write.assert_not_called()
+        self.assertEqual(state, original)
+
+    def test_wait_recovers_valid_report_after_supervisor_dies(self):
+        d = self.make_job(status="running", supervisor_pid=123)
+        original = cr.read_json(d / "state.json")
+        (d / "last.md").write_text(REPORT_TEXT, encoding="utf-8")
+        with mock.patch.object(cr, "pid_alive", return_value=False):
+            state, out = self.wait(d)
+        self.assertEqual(state["status"], "done")
+        self.assertIn("secret report body", out)
+        for key, value in original.items():
+            if key != "status":
+                self.assertEqual(state[key], value)
+
+    def test_wait_preserves_fields_when_supervisor_dies_without_report(self):
+        d = self.make_job(status="running", supervisor_pid=123)
+        original = cr.read_json(d / "state.json")
+        with mock.patch.object(cr, "pid_alive", return_value=False):
+            state, _ = self.wait(d)
+        self.assertEqual((state["status"], state["error"]), ("blocked", "supervisor process died"))
+        for key, value in original.items():
+            if key != "status":
+                self.assertEqual(state[key], value)
+
+    def test_wait_keeps_terminal_state_written_during_pid_check(self):
+        d = self.make_job(status="running", supervisor_pid=123)
+
+        def finish(pid):
+            state = cr.read_json(d / "state.json")
+            state.update(status="done", ended=cr.now())
+            cr.write_json(d / "state.json", state)
+            return False
+
+        with mock.patch.object(cr, "pid_alive", side_effect=finish):
+            state, _ = self.wait(d)
+        self.assertEqual(state["status"], "done")
+
+    def test_cancel_keeps_terminal_state_written_before_kill(self):
+        d = self.make_job(status="running", supervisor_pid=123)
+
+        def finish(pid):
+            state = cr.read_json(d / "state.json")
+            state.update(status="done", ended=cr.now())
+            cr.write_json(d / "state.json", state)
+
+        with mock.patch.object(cr, "now", side_effect=[0, 16, 16]), \
+                mock.patch.object(cr, "kill_pid", side_effect=finish), redirect_stdout(io.StringIO()):
+            cr.cmd_cancel(mock.Mock(job="job1"))
+        self.assertEqual(cr.read_json(d / "state.json")["status"], "done")
+
+    def test_write_retries_a_sharing_violation(self):
+        d = self.make_job(status="running")
+        replace = os.replace
+        attempts = []
+
+        def flaky_replace(source, target):
+            if not attempts:
+                attempts.append(True)
+                raise PermissionError("sharing violation")
+            replace(source, target)
+
+        with mock.patch.object(cr.os, "replace", side_effect=flaky_replace), mock.patch.object(cr.time, "sleep"):
+            cr.write_json(d / "state.json", {"status": "done"})
+        self.assertEqual(cr.read_json(d / "state.json")["status"], "done")
+
+    def test_unreadable_state_is_distinct_from_missing(self):
+        d = self.make_job(status="running")
+        with mock.patch.object(Path, "read_text", side_effect=PermissionError), mock.patch.object(cr.time, "sleep"):
+            self.assertIs(cr.read_json(d / "state.json"), cr.UNREADABLE)
+        self.assertIsNone(cr.read_json(d / "missing.json"))
+
+    def test_unreadable_state_never_causes_client_write(self):
+        d = self.make_job(status="running", supervisor_pid=123)
+        original = cr.read_json(d / "state.json")
+        with mock.patch.object(cr, "read_json", return_value=cr.UNREADABLE), \
+                mock.patch.object(cr, "write_json") as write, redirect_stdout(io.StringIO()) as out:
+            cr.cmd_wait(mock.Mock(job="job1", interval=0))
+            cr.cmd_cancel(mock.Mock(job="job1"))
+            with self.assertRaises(SystemExit):
+                cr.cmd_reply(mock.Mock(job="job1"))
+            cr.cmd_list(mock.Mock())
+            cr.cleanup_old_jobs()
+        write.assert_not_called()
+        self.assertIn("unknown", out.getvalue())
+        self.assertEqual(cr.read_json(d / "state.json"), original)
+
+    def test_wait_does_not_write_when_fresh_read_is_unreadable(self):
+        d = self.make_job(status="running", supervisor_pid=123)
+        original = cr.read_json(d / "state.json")
+        with mock.patch.object(cr, "read_json", side_effect=[original, cr.UNREADABLE]), \
+                mock.patch.object(cr, "pid_alive", return_value=False), \
+                mock.patch.object(cr, "write_json") as write, redirect_stdout(io.StringIO()):
+            cr.cmd_wait(mock.Mock(job="job1", interval=0))
+        write.assert_not_called()
+        self.assertEqual(cr.read_json(d / "state.json"), original)
+
+    def test_wait_rejects_invalid_report_after_supervisor_dies(self):
+        d = self.make_job(status="running", supervisor_pid=123)
+        (d / "last.md").write_text("not a report", encoding="utf-8")
+        with mock.patch.object(cr, "pid_alive", return_value=False):
+            state, _ = self.wait(d)
+        self.assertEqual((state["status"], state["error"]), ("blocked", "supervisor process died"))
+
+    def test_wait_keeps_supervisor_started_during_stale_start_check(self):
+        d = self.make_job(status="starting", created=cr.now() - STARTING_STALE_SECONDS)
+
+        def start(pid):
+            state = cr.read_json(d / "state.json")
+            state.update(status="running", supervisor_pid=123)
+            cr.write_json(d / "state.json", state)
+            return False
+
+        with mock.patch.object(cr, "pid_alive", side_effect=start):
+            state, _ = self.wait(d)
+        self.assertEqual(state["status"], "running")
+
+    def test_cancel_does_not_write_if_killed_supervisor_is_still_alive(self):
+        d = self.make_job(status="running", supervisor_pid=123)
+        original = cr.read_json(d / "state.json")
+        with mock.patch.object(cr, "now", side_effect=[0, 16]), mock.patch.object(cr, "kill_pid"), \
+                mock.patch.object(cr, "pid_alive", return_value=True), redirect_stdout(io.StringIO()):
+            cr.cmd_cancel(mock.Mock(job="job1"))
+        self.assertEqual(cr.read_json(d / "state.json"), original)
+
     def test_wait_ends_a_job_whose_supervisor_died_as_blocked(self):
         d = self.make_job(status="running", supervisor_pid=None)
         state, out = self.wait(d)
