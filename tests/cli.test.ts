@@ -2,7 +2,7 @@ import type { ProgressEvent } from "../src/output.js";
 
 import { describe, expect, test } from "bun:test";
 import { parseCommand, runCli } from "../src/cli.js";
-import { ok } from "../src/result.js";
+import { err, ok } from "../src/result.js";
 import { createMemoryRuntime } from "./fakes/memory-runtime.js";
 import { messagesFor } from "../src/messages";
 
@@ -88,5 +88,16 @@ describe("CLI", () => {
 		await runCli(["apply"], () => undefined, harness.runtime, undefined, (event) => events.push(event));
 
 		expect(events).toEqual([]);
+	});
+
+	test.each(["en", "ru"] as const)("lock probe failure reaches %s progress with owner and error", async (language) => {
+		const harness = createMemoryRuntime();
+		harness.runtime.language = language;
+		harness.fs.seed(LOCK_PATH, JSON.stringify({ pid: HOLDER_PID, startTime: HOLDER_START }));
+		harness.runtime.lock.process.ownerStartTime = async () => err("probe failed");
+		harness.runtime.lock.clock.sleep = async () => { harness.fs.files.delete(LOCK_PATH); };
+		const events: ProgressEvent[] = [];
+		await runCli(["apply"], () => undefined, harness.runtime, undefined, (event) => events.push(event));
+		expect(events).toContainEqual({ code: "lock-waiting", data: { pid: HOLDER_PID, error: "probe failed", message: messagesFor(language).lock.probeFailed(HOLDER_PID, "probe failed") } });
 	});
 });

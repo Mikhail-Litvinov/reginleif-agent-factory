@@ -1,8 +1,10 @@
 import type { FeatureManifest, ProgramManifest } from "../feature.js";
+import type { ProgressEvent } from "../output.js";
 import type { Result } from "../result.js";
 import type { RuntimePorts } from "../ports.js";
 
 import { messagesFor } from "../messages.js";
+import { PROGRESS_CODE_MANAGED_PROGRAM_INSTALL } from "../output.js";
 import { err, ok } from "../result.js";
 import { pathJoin } from "./shared.js";
 
@@ -15,6 +17,7 @@ export const installMissingPrograms = async (
 	runtime: RuntimePorts,
 	features: readonly FeatureManifest[],
 	enabled: ReadonlySet<string>,
+	writeProgress: (event: ProgressEvent) => void = () => undefined,
 ): Promise<Result<MissingSystemProgram[]>> => {
 	const missingSystem: MissingSystemProgram[] = [];
 	const checked = new Set<string>();
@@ -31,6 +34,7 @@ export const installMissingPrograms = async (
 				missingSystem.push({ name: program.name, command: program.installCommand });
 				continue;
 			}
+			writeProgress({ code: PROGRESS_CODE_MANAGED_PROGRAM_INSTALL, data: { name: program.name, command: program.command } });
 			const installed = await runtime.programs.install(program.name, pathJoin(runtime.home, ".local", "bin"));
 			if (!installed.ok) return installed;
 			if (!await runtime.process.isAvailable(program.command)) return err(messagesFor(runtime.language).programs.stillUnavailable(program.name));

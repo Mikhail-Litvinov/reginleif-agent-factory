@@ -103,6 +103,7 @@ export const en = {
 		temporaryExists: (): string => "Temporary file already exists",
 	},
 	lock: {
+		probeFailed: (pid: number, error: string): string => `Could not check lock owner PID ${pid}: ${error}`,
 		waiting: (): string => "Another rig command is running, waiting for it to finish.",
 	},
 	apply: {

@@ -19,7 +19,7 @@ import type { RuntimePorts } from "../ports.js";
 import { appendEvent, trimEvents } from "../events.js";
 import { loadFeatures } from "../feature-graph.js";
 import { messagesFor } from "../messages.js";
-import { apiFail, apiOk, PROGRESS_CODE_LOCK_WAITING, PROGRESS_CODE_UPDATE_STEP_OUTPUT } from "../output.js";
+import { apiFail, apiOk, PROGRESS_CODE_GIT_COMMAND, PROGRESS_CODE_GIT_FETCH, PROGRESS_CODE_SERVICE_RESTARTING, PROGRESS_CODE_UPDATE_STEP_OUTPUT, PROGRESS_CODE_UPDATE_STEP_STARTING } from "../output.js";
 import { joinPath } from "../file-system.js";
 import { err, errorText, ok } from "../result.js";
 import { runPending, runUpdate } from "../update/update.js";
@@ -80,7 +80,7 @@ export const updateRig = async (
 		if (!trimmed.ok) return trimmed;
 		return ok("complete");
 	};
-	if (!pendingOnly) return finished(await withRigLock(runtime, () => writeProgress({ code: PROGRESS_CODE_LOCK_WAITING }), operation));
+	if (!pendingOnly) return finished(await withRigLock(runtime, writeProgress, operation));
 	// Spec: --pending never waits for the lock. A running rig command already handles the pending restart itself.
 	const acquired = await tryAcquireLock(runtime.lock);
 	if (!acquired.ok) return apiFail(UPDATE_ERROR_FAILED, acquired.error);
@@ -107,7 +107,7 @@ export const runUpdateStep = async (
 	const held = await parentHoldsLock(runtime, parent);
 	if (!held.ok) return reportStepError(runtime, held.error, writeLine);
 	if (step === "apply") {
-		const applied = await applyInstalledPrograms(runtime, writeLine);
+		const applied = await applyInstalledPrograms(runtime, writeLine, (event) => writeLine(JSON.stringify({ progress: event })));
 		return applied.ok ? UPDATE_STEP_SUCCESS_EXIT_CODE : reportStepError(runtime, applied.error, writeLine);
 	}
 	const inspection = await inspectRig(runtime);
@@ -143,7 +143,11 @@ const parentHoldsLock = async (runtime: RuntimePorts, parent: LockOwner): Promis
 	return ok(undefined);
 };
 
-const applyInstalledPrograms = async (runtime: RuntimePorts, writeLine: (line: string) => void): Promise<Result<void>> => {
+const applyInstalledPrograms = async (
+	runtime: RuntimePorts,
+	writeLine: (line: string) => void,
+	writeProgress: (event: ProgressEvent) => void,
+): Promise<Result<void>> => {
 	const state = await readState(runtime);
 	if (!state.ok) return state;
 	const features = await loadFeatures(runtime.fs, state.value.paths.repo, messagesFor(runtime.language));
@@ -152,10 +156,10 @@ const applyInstalledPrograms = async (runtime: RuntimePorts, writeLine: (line: s
 		.filter((feature) => feature.name === "base" || state.value.features[feature.name] === true)
 		.map((feature) => feature.name);
 	// Programs that need no root are installed here, so a good update is not rolled back for a missing tool.
-	const programs = await installMissingPrograms(runtime, features.value, new Set(enabled));
+	const programs = await installMissingPrograms(runtime, features.value, new Set(enabled), writeProgress);
 	if (!programs.ok) return programs;
 	for (const missing of programs.value) writeLine(messagesFor(runtime.language).programs.installPackage(missing.name, missing.command));
-	const result = await applyRig(runtime, { state: state.value, mode: "apply" });
+	const result = await applyRig(runtime, { state: state.value, mode: "apply" }, writeProgress);
 	return result.ok ? ok(undefined) : result;
 };
 
@@ -166,6 +170,7 @@ const runUpdateStepProcess = async (
 	writeProgress: (event: ProgressEvent) => void,
 ): Promise<StepOutcome> => {
 	const { pid, startTime } = runtime.lock.process;
+	writeProgress({ code: PROGRESS_CODE_UPDATE_STEP_STARTING, data: { program: runtime.executablePath, step } });
 	const launched = await runtime.process.run(
 		runtime.executablePath,
 		[runtime.resolvePath(paths.repo, "src", "cli.ts"), "update-step", step, String(pid), String(startTime)],
@@ -201,7 +206,7 @@ const makeUpdatePorts = (
 	environmentFailures: Pair[],
 ): UpdatePorts => ({
 	messages: messagesFor(runtime.language),
-	git: createRealGitAdapter(runtime.process, paths, messagesFor(runtime.language)),
+	git: withGitProgress(createRealGitAdapter(runtime.process, paths, messagesFor(runtime.language)), paths, writeProgress),
 	apply: async () => {
 		const update = await readUpdateState(runtime, paths, !pendingOnly);
 		if (!update.ok) return update;
@@ -209,7 +214,7 @@ const makeUpdatePorts = (
 			// Rolling back, the old code in this process is the code that must run.
 			const state = await readState(runtime);
 			if (!state.ok) return state;
-			const result = await applyRig(runtime, { state: state.value, mode: "apply" });
+			const result = await applyRig(runtime, { state: state.value, mode: "apply" }, writeProgress);
 			return result.ok ? ok(undefined) : result;
 		}
 		const stepped = await runUpdateStepProcess(runtime, paths, "apply", writeProgress);
@@ -235,8 +240,37 @@ const makeUpdatePorts = (
 		const features = await loadFeatures(runtime.fs, paths.repo, messagesFor(runtime.language));
 		return features.ok ? ok(features.value.filter((feature) => feature.name !== "base").map((feature) => feature.name)) : features;
 	},
-	service: { restart: () => runtime.service.restart() },
+	service: { restart: async () => {
+		writeProgress({ code: PROGRESS_CODE_SERVICE_RESTARTING });
+		return runtime.service.restart();
+	} },
 	clock: { now: () => runtime.clock.now() },
+});
+
+const withGitProgress = (
+	git: UpdatePorts["git"],
+	paths: RigState["paths"],
+	writeProgress: (event: ProgressEvent) => void,
+): UpdatePorts["git"] => ({
+	...git,
+	fetchMain: (repository) => {
+		const repositoryPath = repository === "rig" ? paths.repo : paths.hub;
+		writeProgress({
+			code: PROGRESS_CODE_GIT_FETCH,
+			data: { program: "git", args: ["-C", repositoryPath, "fetch", "origin", "+refs/heads/main:refs/remotes/origin/main"] },
+		});
+		return git.fetchMain(repository);
+	},
+	fastForward: (repository, commit) => {
+		const repositoryPath = repository === "rig" ? paths.repo : paths.hub;
+		writeProgress({ code: PROGRESS_CODE_GIT_COMMAND, data: { program: "git", args: ["-C", repositoryPath, "merge", "--ff-only", commit] } });
+		return git.fastForward(repository, commit);
+	},
+	resetKeep: (repository, commit) => {
+		const repositoryPath = repository === "rig" ? paths.repo : paths.hub;
+		writeProgress({ code: PROGRESS_CODE_GIT_COMMAND, data: { program: "git", args: ["-C", repositoryPath, "reset", "--keep", commit] } });
+		return git.resetKeep(repository, commit);
+	},
 });
 
 const readUpdateState = async (runtime: RuntimePorts, paths: RigState["paths"], loadConfirmed: boolean): Promise<Result<UpdateState>> => {

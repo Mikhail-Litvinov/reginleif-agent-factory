@@ -2,12 +2,14 @@ import type { FeatureManifest } from "../feature.js";
 import type { RigState } from "../state.js";
 import type { Result } from "../result.js";
 import type { RuntimePorts } from "../ports.js";
+import type { ProgressEvent } from "../output.js";
 
 import { loadFeatures } from "../feature-graph.js";
 import { acquireLock } from "../lock.js";
 import { appendEvent } from "../events.js";
 import { joinPath } from "../file-system.js";
 import { messagesFor } from "../messages.js";
+import { PROGRESS_CODE_LOCK_WAITING } from "../output.js";
 import { readState } from "../state.js";
 import { err, errorText, ok } from "../result.js";
 
@@ -35,12 +37,14 @@ export const emitRigEvent = async (
 
 export const withRigLock = async <T>(
 	runtime: RuntimePorts,
-	writeLine: (line: string) => void,
+	writeProgress: (event: ProgressEvent) => void,
 	operation: () => Promise<Result<T>>,
 	keepLockForProcessExit = false,
 ): Promise<Result<T>> => {
 	// Printed once, before a command waits for a lock that another rig process holds. The hub shows it as plain output.
-	const acquired = await acquireLock(runtime.lock, () => writeLine(messagesFor(runtime.language).lock.waiting()));
+	const acquired = await acquireLock(runtime.lock, (problem) => writeProgress(problem === undefined
+		? { code: PROGRESS_CODE_LOCK_WAITING }
+		: { code: PROGRESS_CODE_LOCK_WAITING, data: { pid: problem.pid, error: problem.error, message: messagesFor(runtime.language).lock.probeFailed(problem.pid, problem.error) } }));
 	if (!acquired.ok) return acquired;
 	let result: Result<T>;
 	try {

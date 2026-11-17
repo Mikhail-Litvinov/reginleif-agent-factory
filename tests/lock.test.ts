@@ -205,6 +205,19 @@ describe("lock file creation failure", () => {
 });
 
 describe("lock wait notice", () => {
+	test("probe errors identify the owner while the waiter continues waiting", async () => {
+		const fs = new MemoryFileSystem();
+		fs.seed(LOCK_PATH, JSON.stringify({ pid: SECOND_PID, startTime: SECOND_START }));
+		const notices: Array<{ pid: number; error: string } | undefined> = [];
+		let polls = 0;
+		const result = await acquireLock(dependenciesFor(fs, FIRST_PID, FIRST_START, async () => err("probe failed"), async () => {
+			polls += 1;
+			if (polls === WAIT_POLLS_BEFORE_RELEASE) fs.files.delete(LOCK_PATH);
+		}), (problem) => { notices.push(problem); });
+		expect(result.ok).toBe(true);
+		expect(polls).toBe(WAIT_POLLS_BEFORE_RELEASE);
+		expect(notices).toContainEqual({ pid: SECOND_PID, error: "probe failed" });
+	});
 	test("a busy lock calls the notice once, before the first wait, however many polls pass", async () => {
 		const fs = new MemoryFileSystem();
 		fs.seed(LOCK_PATH, JSON.stringify({ pid: SECOND_PID, startTime: SECOND_START }));

@@ -413,23 +413,26 @@ export const ownerStartTime = async (
 		}
 	}
 	if (hostName === "win32") {
-		// Without ErrorAction Stop a missing process prints nothing and exits 0, so a failure is not mistaken for absence.
-		const script = `$p = Get-Process -Id ${pid} -ErrorAction SilentlyContinue; if ($p) { $p.StartTime.ToUniversalTime().Ticks }`;
+		const script = `try { $p = Get-Process -Id ${pid} -ErrorAction Stop; Write-Output ('present ' + $p.StartTime.ToUniversalTime().Ticks) } catch { if ($_.FullyQualifiedErrorId -eq 'NoProcessFoundForGivenId,Microsoft.PowerShell.Commands.GetProcessCommand') { Write-Output 'absent' } else { [Console]::Error.WriteLine($_.ToString()); exit 1 } }`;
 		const result = await processPorts.run("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script]);
 		if (!result.ok) return err(result.error);
 		if (result.value.exitCode !== PROCESS_SUCCESS_EXIT_CODE) return err(result.value.stderr || messages.failure.powershellExited(result.value.exitCode));
 		const text = result.value.stdout.trim();
-		if (text.length === 0) return ok(null);
-		const ticks = Number(text);
+		if (text === "absent") return ok(null);
+		if (!/^present \d+$/.test(text)) return err(messages.failure.startTimeUnexpectedPowershell(text));
+		const ticks = Number(text.slice("present ".length));
 		return Number.isFinite(ticks) ? ok(ticks) : err(messages.failure.startTimeUnexpectedPowershell(text));
 	}
 	if (hostName === "darwin") {
 		// BSD ps prints lstart in the user's locale; LC_ALL=C keeps the English format that Date.parse reads.
-		const result = await processPorts.run("ps", ["-o", "lstart=", "-p", String(pid)], { environment: { LC_ALL: "C" } });
+		const script = "table=$(ps -axo pid=,lstart=) || exit 1; printf '%s\\n' \"$table\" | awk -v pid=\"$1\" '$1 == pid { $1 = \"\"; print \"present\" $0; found = 1 } END { if (!found) print \"absent\" }'";
+		const result = await processPorts.run("sh", ["-c", script, "rig-process-probe", String(pid)], { environment: { LC_ALL: "C" } });
 		if (!result.ok) return err(result.error);
 		const text = result.value.stdout.trim();
-		if (result.value.exitCode !== PROCESS_SUCCESS_EXIT_CODE) return text.length === 0 && result.value.stderr.trim().length === 0 ? ok(null) : err(result.value.stderr);
-		const start = Date.parse(text);
+		if (result.value.exitCode !== PROCESS_SUCCESS_EXIT_CODE) return err(result.value.stderr || messages.failure.processTableQueryFailed());
+		if (text === "absent") return ok(null);
+		if (!text.startsWith("present ")) return err(messages.failure.startTimeUnexpectedPs(text));
+		const start = Date.parse(text.slice("present ".length));
 		return Number.isFinite(start) ? ok(start) : err(messages.failure.startTimeUnexpectedPs(text));
 	}
 	return err(messages.failure.startTimeUnsupported(hostName));

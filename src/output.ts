@@ -55,7 +55,7 @@ export const renderFailure = (error: ApiError): string => JSON.stringify({ error
 export type ProgressEvent = { code: string; data?: JsonValue };
 export const renderProgress = (event: ProgressEvent): string => JSON.stringify({ progress: event });
 
-// The command waits for the rig lock that another rig process holds; it carries no data.
+// The command waits for the rig lock; probe failures carry the owner PID, error, and localized message.
 export const PROGRESS_CODE_LOCK_WAITING = "lock-waiting";
 
 // `rig update` relays one text line of its child step (`update-step apply|check`, internal protocol); data: {step, line}.
@@ -66,3 +66,24 @@ export const PROGRESS_CODE_PROGRAM_INSTALL = "program-install";
 
 // `rig feature telegram disable` is stopping the hub service before it exits; it carries no data.
 export const PROGRESS_CODE_SERVICE_STOPPING = "service-stopping";
+
+// A long-running plugin or marketplace mutation through the Claude CLI; data: {program, args}.
+export const PROGRESS_CODE_PLUGIN_COMMAND = "plugin-command";
+
+// The Telegram hub service is starting; it carries no data.
+export const PROGRESS_CODE_SERVICE_STARTING = "service-starting";
+
+// The Telegram hub service is restarting; it carries no data.
+export const PROGRESS_CODE_SERVICE_RESTARTING = "service-restarting";
+
+// A git fetch for one repository during rig update; data: {program, args}.
+export const PROGRESS_CODE_GIT_FETCH = "git-fetch";
+
+// The isolated update step is starting; data: {program, step}.
+export const PROGRESS_CODE_UPDATE_STEP_STARTING = "update-step-starting";
+
+// Rig is installing a managed program dependency; data: {name, command}.
+export const PROGRESS_CODE_MANAGED_PROGRAM_INSTALL = "managed-program-install";
+
+// A git merge or reset during rig update; data: {program, args}.
+export const PROGRESS_CODE_GIT_COMMAND = "git-command";

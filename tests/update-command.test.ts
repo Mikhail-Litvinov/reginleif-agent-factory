@@ -66,7 +66,17 @@ describe("rig update runs the new code in a child process under the parent lock"
 		expect(lines).toEqual([JSON.stringify({ mode: "update", outcome: "complete" })]);
 		expect(code).toBe(SUCCESS_EXIT_CODE);
 		expect(lines).toEqual([JSON.stringify({ mode: "update", outcome: "complete" })]);
-		expect(progress).toEqual([{ code: "update-step-output", data: { step: "apply", line: "install-line" } }]);
+		expect(progress.filter((event) => event.code === "update-step-output")).toEqual([{ code: "update-step-output", data: { step: "apply", line: "install-line" } }]);
+		// Each slow external step announces itself before it runs.
+		expect(progress.map((event) => event.code)).toEqual([
+			"git-fetch",
+			"git-fetch",
+			"git-command",
+			"git-command",
+			"update-step-starting",
+			"update-step-output",
+			"update-step-starting",
+		]);
 	}, HANG_BUDGET_MS);
 
 	test("a failed update prints the update-failed error object and exits 1", async () => {

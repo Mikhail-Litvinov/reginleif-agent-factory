@@ -1,11 +1,13 @@
 import type { FileContent } from "../content-hash.js";
 import type { Messages } from "../messages.js";
+import type { ProgressEvent } from "../output.js";
 import type { Result } from "../result.js";
 
 import { chooseBackupPath } from "../backup-path.js";
 import { hashContent } from "../content-hash.js";
 import { toSlashPath } from "../file-system.js";
 import { resolvePlaceholders } from "../placeholders.js";
+import { PROGRESS_CODE_PLUGIN_COMMAND } from "../output.js";
 
 const EMPTY_LENGTH = 0;
 const PATH_SEPARATOR_LENGTH = 1;
@@ -105,6 +107,7 @@ export type PluginEnvironment = {
   runner: ProcessRunner;
   claudeCommand: string;
   messages: Messages;
+  writeProgress?: (event: ProgressEvent) => void;
   // True when the path exists (a file or a directory): an installed plugin whose copy is gone is not up to date.
   pathExists(path: string): Promise<boolean>;
 };
@@ -616,6 +619,12 @@ function isNotFound(error: string): boolean {
 }
 
 async function runClaude(environment: PluginEnvironment, args: readonly string[]): Promise<Result<ProcessResult>> {
+  if (isPluginMutation(args)) {
+    environment.writeProgress?.({
+      code: PROGRESS_CODE_PLUGIN_COMMAND,
+      data: { program: environment.claudeCommand, args: [...args] },
+    });
+  }
   const result = await environment.runner.run(environment.claudeCommand, args);
   if (!result.ok) return { ok: false, error: environment.messages.failure.claudeFailed(args.join(" "), result.error) };
   if (result.value.exitCode !== SUCCESS_EXIT_CODE) {
@@ -626,6 +635,11 @@ async function runClaude(environment: PluginEnvironment, args: readonly string[]
   }
   return result;
 }
+
+const isPluginMutation = (args: readonly string[]): boolean =>
+  args[0] === "plugin" &&
+  (args[1] === "install" || args[1] === "update" || args[1] === "uninstall" ||
+    (args[1] === "marketplace" && (args[2] === "add" || args[2] === "remove")));
 
 type MarketplaceEntry = { name: string; path: string | null };
 

@@ -8,6 +8,7 @@ import type { Result } from "./result.js";
 import type { RuntimePorts } from "./ports.js";
 import type { FileSystem } from "./file-system.js";
 import type { HookPrograms } from "./hook-programs.js";
+import type { ProgressEvent } from "./output.js";
 
 import { buildJournal, emitJournalEvents, isRigRecordKey, planEvents, recoverRecords } from "./apply-journal.js";
 import { executeAssetOperations, planAssets, applyPlugins } from "./assets/installer.js";
@@ -61,7 +62,11 @@ export type PluginChanges = {
 	marketplacesRemoved: string[];
 };
 
-export const applyRig = async (runtime: RuntimePorts, request: ApplyRequest): Promise<Result<ApplyOutcome>> => {
+export const applyRig = async (
+	runtime: RuntimePorts,
+	request: ApplyRequest,
+	writeProgress: (event: ProgressEvent) => void = () => undefined,
+): Promise<Result<ApplyOutcome>> => {
 	const messages = messagesFor(runtime.language);
 	const featuresResult = await loadFeatures(runtime.fs, request.state.paths.repo, messages);
 	if (!featuresResult.ok) return featuresResult;
@@ -182,6 +187,7 @@ export const applyRig = async (runtime: RuntimePorts, request: ApplyRequest): Pr
 		runner: { run: (command, args) => runtime.process.run(command, args) },
 		claudeCommand: "claude",
 		messages,
+		writeProgress,
 		pathExists: async (path) => (await runtime.fs.modifiedAt(path)) !== null,
 	}, keepKnownDisabledPlugins(pluginPlansResult.value, pluginRecords), pluginRecords);
 	if (!plugins.ok) return plugins;

@@ -2,11 +2,13 @@ import type { ProcessOptions, ProcessOutput } from "../src/ports.js";
 import type { Result } from "../src/result.js";
 
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { spawn } from "node:child_process";
 import { promises as nodeFs } from "node:fs";
 import { chmod, lstat, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createFileSystem, ownerStartTime } from "../src/commands/real-runtime.js";
+import { runProcess } from "../src/commands/process-runner.js";
 import { atomicWrite } from "../src/file-system.js";
 import { err, ok } from "../src/result.js";
 import { MemoryFileSystem } from "./fakes/memory-runtime.js";
@@ -237,12 +239,32 @@ describe("owner start time", () => {
 		expect((await ownerStartTime(1, runner(output("garbage")), TEST_MESSAGES, "win32")).ok).toBe(false);
 	});
 
-	test("windows: empty output with a clean exit means the process does not exist", async () => {
-		expect(await ownerStartTime(1, runner(output("\r\n")), TEST_MESSAGES, "win32")).toEqual(ok(null));
+	test("windows: the probe explicitly reports a missing process", async () => {
+		expect(await ownerStartTime(1, runner(output("absent\r\n")), TEST_MESSAGES, "win32")).toEqual(ok(null));
+		expect((await ownerStartTime(1, runner(output("")), TEST_MESSAGES, "win32")).ok).toBe(false);
+		expect((await ownerStartTime(1, runner(output("", 1)), TEST_MESSAGES, "win32")).ok).toBe(false);
+	});
+
+	test("windows: the missing PID script handles PowerShell's nonzero not-found result", async () => {
+		const fake = { run: async (_command: string, args: readonly string[]): Promise<Result<ProcessOutput>> =>
+			args.some((arg) => arg.includes("NoProcessFoundForGivenId") && arg.includes("-ErrorAction Stop"))
+				? output("absent") : output("", 1) };
+		expect(await ownerStartTime(1, fake, TEST_MESSAGES, "win32")).toEqual(ok(null));
+	});
+
+	test.skipIf(process.platform !== "win32")("windows: real probe distinguishes an exited child from this process", async () => {
+		const child = spawn(process.execPath, ["-e", ""], { windowsHide: true, stdio: "ignore" });
+		const pid = child.pid;
+		if (pid === undefined) throw new Error("child did not start");
+		await new Promise<void>((resolve, reject) => { child.once("exit", () => resolve()); child.once("error", reject); });
+		const real = { run: (command: string, args: readonly string[], options?: ProcessOptions) => runProcess(process.env.PATH ?? "", command, args, TEST_MESSAGES, options) };
+		expect(await ownerStartTime(pid, real, TEST_MESSAGES, "win32")).toEqual(ok(null));
+		const own = await ownerStartTime(process.pid, real, TEST_MESSAGES, "win32");
+		expect(own.ok && typeof own.value === "number").toBe(true);
 	});
 
 	test("windows: ticks are returned as the start time", async () => {
-		expect(await ownerStartTime(1, runner(output(`${WINDOWS_TICKS}\r\n`)), TEST_MESSAGES, "win32")).toEqual(ok(WINDOWS_TICKS));
+		expect(await ownerStartTime(1, runner(output(`present ${WINDOWS_TICKS}\r\n`)), TEST_MESSAGES, "win32")).toEqual(ok(WINDOWS_TICKS));
 	});
 
 	test("linux: a missing /proc entry means no such process, any other failure is unknown", async () => {
@@ -261,8 +283,14 @@ describe("owner start time", () => {
 			},
 		};
 		await ownerStartTime(1, recorder, TEST_MESSAGES, "darwin");
-		expect(calls.map((call) => call.command)).toEqual(["ps"]);
+		expect(calls.map((call) => call.command)).toEqual(["sh"]);
 		expect(calls[0]?.options?.environment?.LC_ALL).toBe("C");
+	});
+
+	test("darwin: only explicit absence is absent; failed and malformed probes are unknown", async () => {
+		expect(await ownerStartTime(1, runner(output("absent")), TEST_MESSAGES, "darwin")).toEqual(ok(null));
+		expect((await ownerStartTime(1, runner(output("", 1)), TEST_MESSAGES, "darwin")).ok).toBe(false);
+		expect((await ownerStartTime(1, runner(output("")), TEST_MESSAGES, "darwin")).ok).toBe(false);
 	});
 
 	test("an unsupported host is unknown", async () => {

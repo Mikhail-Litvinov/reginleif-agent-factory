@@ -88,6 +88,7 @@ export const ru: Messages = {
 		temporaryExists: (): string => "Временный файл уже существует",
 	},
 	lock: {
+		probeFailed: (pid: number, error: string): string => `Не удалось проверить владельца блокировки с PID ${pid}: ${error}`,
 		waiting: (): string => "Другая команда rig работает, жду её конца.",
 	},
 	apply: {

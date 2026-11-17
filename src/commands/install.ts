@@ -11,7 +11,7 @@ import { toSlashPath } from "../file-system.js";
 import { loadFeatures } from "../feature-graph.js";
 import { buildCronEntries, mergeCronEntries } from "../update/cron.js";
 import { messagesFor } from "../messages.js";
-import { apiFail, apiOk, PROGRESS_CODE_LOCK_WAITING } from "../output.js";
+import { apiFail, apiOk } from "../output.js";
 import { parseState } from "../state.js";
 import { err, errorText, ok } from "../result.js";
 import { PROCESS_SUCCESS_EXIT_CODE } from "../ports.js";
@@ -56,7 +56,7 @@ const installLocked = (
 	runtime: RuntimePorts,
 	dev: boolean,
 	writeProgress: (event: ProgressEvent) => void,
-): Promise<Result<InstallData>> => withRigLock(runtime, () => writeProgress({ code: PROGRESS_CODE_LOCK_WAITING }), async () => {
+): Promise<Result<InstallData>> => withRigLock(runtime, writeProgress, async () => {
 	const paths = dev
 		? await resolveDevPaths(runtime)
 		: ok({ repo: pathJoin(runtime.home, SERVER_REPO_PATH), hub: pathJoin(runtime.home, SERVER_HUB_PATH) });
@@ -78,9 +78,9 @@ const installLocked = (
 		? stateWithFeatureDefaults(withPaths, loaded.value, runtime.platform)
 		: withPaths;
 	const enabled = enabledNames(initialized, loaded.value);
-	const programs = await installMissingPrograms(runtime, loaded.value, new Set(enabled));
+	const programs = await installMissingPrograms(runtime, loaded.value, new Set(enabled), writeProgress);
 	if (!programs.ok) return programs;
-	const applied = await applyRig(runtime, { state: initialized, mode: "install" });
+	const applied = await applyRig(runtime, { state: initialized, mode: "install" }, writeProgress);
 	if (!applied.ok) return applied;
 	const shim = await installShim(runtime, paths.value.repo);
 	if (!shim.ok) return shim;

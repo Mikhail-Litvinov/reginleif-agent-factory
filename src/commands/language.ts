@@ -5,7 +5,7 @@ import type { RuntimePorts } from "../ports.js";
 
 import { applyRig } from "../apply.js";
 import { DEFAULT_LANGUAGE, messagesFor } from "../messages.js";
-import { apiFail, apiOk, PROGRESS_CODE_LOCK_WAITING } from "../output.js";
+import { apiFail, apiOk } from "../output.js";
 import { err, ok } from "../result.js";
 import { readStateReport, writeState } from "../state.js";
 import { emitRigEvent, withRigLock } from "./shared.js";
@@ -45,7 +45,7 @@ export const setLanguage = async (
 	writeProgress: (event: ProgressEvent) => void,
 ): Promise<ApiResult<LanguageChangeData>> => {
 	let failureCode = LANGUAGE_ERROR_FAILED;
-	const result = await withRigLock(runtime, () => writeProgress({ code: PROGRESS_CODE_LOCK_WAITING }), async (): Promise<Result<LanguageChangeData>> => {
+	const result = await withRigLock(runtime, writeProgress, async (): Promise<Result<LanguageChangeData>> => {
 		const stored = await readStateReport(runtime.fs, runtime.home, messagesFor(runtime.language));
 		if (!stored.ok) return stored;
 		if (stored.value === null) {
@@ -63,7 +63,7 @@ export const setLanguage = async (
 			if (!event.ok) return event;
 			// Rig's own hook entries in settings.json carry their status message in the language, so the normal apply runs
 			// again with the new one. A message the user edited by hand follows the ownership rules there.
-			const applied = await applyRig({ ...runtime, language }, { state: { ...state, language }, mode: "apply" });
+			const applied = await applyRig({ ...runtime, language }, { state: { ...state, language }, mode: "apply" }, writeProgress);
 			if (!applied.ok) return applied;
 		}
 		return ok({ language, changed });

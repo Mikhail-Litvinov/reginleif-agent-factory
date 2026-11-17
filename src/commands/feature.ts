@@ -8,7 +8,7 @@ import type { RuntimePorts } from "../ports.js";
 import { applyRig } from "../apply.js";
 import { resolveFeatureChange } from "../feature-graph.js";
 import { isTranslatedLanguage, messagesFor } from "../messages.js";
-import { apiFail, apiOk, PROGRESS_CODE_LOCK_WAITING, PROGRESS_CODE_PROGRAM_INSTALL, PROGRESS_CODE_SERVICE_STOPPING } from "../output.js";
+import { apiFail, apiOk, PROGRESS_CODE_PROGRAM_INSTALL, PROGRESS_CODE_SERVICE_STARTING, PROGRESS_CODE_SERVICE_STOPPING } from "../output.js";
 import { err, ok } from "../result.js";
 import { emitRigEvent, readFeatureManifests, readRigState, withRigLock } from "./shared.js";
 import { installMissingPrograms } from "./programs.js";
@@ -58,7 +58,7 @@ export const changeFeature = async (
 		failureCode = code;
 		return err(message);
 	};
-	const result = await withRigLock(runtime, () => writeProgress({ code: PROGRESS_CODE_LOCK_WAITING }), async (): Promise<Result<FeatureChangeData>> => {
+	const result = await withRigLock(runtime, writeProgress, async (): Promise<Result<FeatureChangeData>> => {
 		const stateResult = await readRigState(runtime);
 		if (!stateResult.ok) return stateResult;
 		const state = stateResult.value;
@@ -72,17 +72,18 @@ export const changeFeature = async (
 		const nextFeatures = { ...state.features, [name]: action === "enable" };
 		const nextState = { ...state, features: nextFeatures };
 		if (action === "enable") {
-			const programs = await installMissingPrograms(runtime, loaded.value, new Set(resolved.value));
+			const programs = await installMissingPrograms(runtime, loaded.value, new Set(resolved.value), writeProgress);
 			if (!programs.ok) return programs;
 			for (const missing of programs.value) writeProgress({ code: PROGRESS_CODE_PROGRAM_INSTALL, data: { name: missing.name, command: missing.command } });
 		}
-		const applied = await applyRig(runtime, { state: nextState, mode: "apply" });
+		const applied = await applyRig(runtime, { state: nextState, mode: "apply" }, writeProgress);
 		if (!applied.ok) return applied;
 		if (name === "telegram" && action === "enable") {
+			writeProgress({ code: PROGRESS_CODE_SERVICE_STARTING });
 			const started = await runtime.service.start();
 			if (!started.ok) {
 				failureCode = FEATURE_ERROR_SERVICE_NOT_STARTED;
-				return revertFeatureChange(runtime, applied.value.state, state.features, messages.feature.serviceNotStarted(started.error));
+				return revertFeatureChange(runtime, applied.value.state, state.features, messages.feature.serviceNotStarted(started.error), writeProgress);
 			}
 		}
 		const changedText = messages.feature.changed(name, action === "enable");
@@ -104,8 +105,9 @@ const revertFeatureChange = async (
 	appliedState: RigState,
 	previousFeatures: RigState["features"],
 	cause: string,
+	writeProgress: (event: ProgressEvent) => void,
 ): Promise<Result<never>> => {
-	const reverted = await applyRig(runtime, { state: { ...appliedState, features: previousFeatures }, mode: "apply" });
+	const reverted = await applyRig(runtime, { state: { ...appliedState, features: previousFeatures }, mode: "apply" }, writeProgress);
 	if (!reverted.ok) return err(messagesFor(runtime.language).feature.revertFailed(cause, reverted.error));
 	return err(cause);
 };

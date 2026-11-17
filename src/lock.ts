@@ -35,14 +35,14 @@ const parseOwner = (text: string): LockOwner | null => {
 };
 
 // Unknown counts as running: taking a live lock is worse than waiting a little longer.
-const ownerMayBeRunning = async (owner: LockOwner, dependencies: LockDependencies): Promise<boolean> => {
-	if (!Number.isInteger(owner.pid) || !Number.isFinite(owner.startTime)) return false;
+const ownerMayBeRunning = async (owner: LockOwner, dependencies: LockDependencies): Promise<Result<boolean>> => {
+	if (!Number.isInteger(owner.pid) || !Number.isFinite(owner.startTime)) return ok(false);
 	try {
 		const start = await dependencies.process.ownerStartTime(owner.pid);
-		if (!start.ok) return true;
-		return start.value === owner.startTime;
-	} catch {
-		return true;
+		if (!start.ok) return start;
+		return ok(start.value === owner.startTime);
+	} catch (error) {
+		return err(dependencies.messages.failure.unexpectedFailure(errorText(error)));
 	}
 };
 
@@ -88,7 +88,10 @@ const takeOverStale = async (fs: FileSystem, lockPath: string, dependencies: Loc
 		} catch {
 			return;
 		}
-		if (current !== null && !(await ownerMayBeRunning(current, dependencies))) await fs.remove(lockPath);
+		if (current !== null) {
+			const running = await ownerMayBeRunning(current, dependencies);
+			if (running.ok && !running.value) await fs.remove(lockPath);
+		}
 	} finally {
 		await fs.remove(takeoverPath).catch(() => undefined);
 	}
@@ -107,12 +110,14 @@ const clearDeadTakeover = async (fs: FileSystem, takeoverPath: string, dependenc
 };
 
 // onWait is null when the caller does not wait: then a live owner means ok(null) at once.
-const acquire = async (dependencies: LockDependencies, onWait: (() => void) | null): Promise<Result<LockHandle | null>> => {
+type LockProbeProblem = { pid: number; error: string };
+const acquire = async (dependencies: LockDependencies, onWait: ((problem?: LockProbeProblem) => void) | null): Promise<Result<LockHandle | null>> => {
 	const fs = dependencies.fs;
 	const lockPath = dependencies.lockPath ?? joinPath(dependencies.home, ".agent-rig", "rig.lock");
 	try {
 		await fs.ensureDirectory(joinPath(dependencies.home, ".agent-rig"));
 		let announced = false;
+		let lastProblem = "";
 		while (true) {
 			const owner: LockOwner = { pid: dependencies.process.pid, startTime: dependencies.process.startTime };
 			const created = await fs.writeExclusive(lockPath, `${JSON.stringify(owner)}\n`);
@@ -126,12 +131,19 @@ const acquire = async (dependencies: LockDependencies, onWait: (() => void) | nu
 			}
 			const existing = parseOwner(existingText);
 			if (existing === null) return err(dependencies.messages.failure.lockMalformed());
-			if (await ownerMayBeRunning(existing, dependencies)) {
+			const running = await ownerMayBeRunning(existing, dependencies);
+			if (!running.ok || running.value) {
 				if (onWait === null) return ok(null);
 				if (!announced) {
 					announced = true;
 					onWait();
 				}
+				if (!running.ok) {
+					const problem = { pid: existing.pid, error: running.error };
+					const key = JSON.stringify(problem);
+					if (key !== lastProblem) onWait(problem);
+					lastProblem = key;
+				} else lastProblem = "";
 				await dependencies.clock.sleep(dependencies.pollIntervalMs);
 				continue;
 			}
@@ -143,7 +155,7 @@ const acquire = async (dependencies: LockDependencies, onWait: (() => void) | nu
 };
 
 // onWait runs at most once, right before the first wait, and only when a live owner holds the lock.
-export const acquireLock = async (dependencies: LockDependencies, onWait: () => void): Promise<Result<LockHandle>> => {
+export const acquireLock = async (dependencies: LockDependencies, onWait: (problem?: LockProbeProblem) => void): Promise<Result<LockHandle>> => {
 	const acquired = await acquire(dependencies, onWait);
 	if (!acquired.ok) return acquired;
 	return acquired.value === null ? err(dependencies.messages.failure.lockHeld()) : ok(acquired.value);
