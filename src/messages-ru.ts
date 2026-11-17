@@ -261,6 +261,7 @@ export const ru: Messages = {
 		updateStateInvalidShape: (): string => "запись состояния обновления имеет неверную структуру",
 		missingProcessId: (): string => "Нет идентификатора процесса",
 		processIdentityUnavailable: (): string => "Не удалось определить идентичность процесса",
+		processStillRunningAfterKill: (): string => "процесс запуска всё ещё работает после завершения",
 		duplicateAssetTarget: (path: string): string => `Повторяющаяся цель ассета: ${path}`,
 		duplicatePluginId: (id: string): string => `Повторяющийся идентификатор плагина: ${id}`,
 		assetSourceMissing: (path: string): string => `Источник ассета пуст или отсутствует: ${path}`,

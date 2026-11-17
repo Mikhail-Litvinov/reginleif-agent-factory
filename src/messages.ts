@@ -276,6 +276,7 @@ export const en = {
 		updateStateInvalidShape: (): string => "update state record has an invalid shape",
 		missingProcessId: (): string => "Missing process ID",
 		processIdentityUnavailable: (): string => "Process identity unavailable",
+		processStillRunningAfterKill: (): string => "the run's process is still running after the kill",
 		duplicateAssetTarget: (path: string): string => `Duplicate asset target: ${path}`,
 		duplicatePluginId: (id: string): string => `Duplicate plugin id: ${id}`,
 		assetSourceMissing: (path: string): string => `Asset source is empty or missing: ${path}`,

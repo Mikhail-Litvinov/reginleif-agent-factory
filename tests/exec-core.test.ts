@@ -120,8 +120,8 @@ describe("exec core", () => {
 			await startExec(h.runtime, "bash", "/work", "echo hi");
 			h.fs.seed(`${ROOT}/event-1/identity.json`, JSON.stringify({ pid: PID, pidCreated: "born" }));
 			const calls: string[] = [];
-			h.runtime.process.killTree = async (pid) => { calls.push(`tree:${pid}`); return ok(undefined); };
-			h.runtime.process.killGroup = async (pid) => { calls.push(`group:${pid}`); return ok(undefined); };
+			h.runtime.process.killTree = async (pid) => { calls.push(`tree:${pid}`); h.runtime.process.createdAt = async () => ok({}); return ok(undefined); };
+			h.runtime.process.killGroup = async (pid) => { calls.push(`group:${pid}`); h.runtime.process.createdAt = async () => ok({}); return ok(undefined); };
 			const start = Date.parse(NOW);
 			let at = start;
 			h.runtime.clock.now = () => new Date(at);
@@ -133,6 +133,47 @@ describe("exec core", () => {
 			expect(calls).toEqual([platform === "windows" ? `tree:${PID}` : `group:${PID}`]);
 			const state = await statusExec(h.runtime, "event-1", 0);
 			expect(state.ok && state.value).toMatchObject({ state: "ended", end: { kind: "stopped" } });
+		}
+	});
+
+	// The kill port answers ok; the runner counts as gone once `gone()` says so (checked by identity on each poll after the kill).
+	const killedRun = async (platform: "linux" | "windows", gone: (polls: number) => boolean) => {
+		const h = seed(platform);
+		await startExec(h.runtime, "bash", "/work", "echo hi");
+		h.fs.seed(`${ROOT}/event-1/identity.json`, JSON.stringify({ pid: PID, pidCreated: "born" }));
+		h.fs.seed(`${ROOT}/event-1/stop-request`, new Date(Date.parse(NOW) - EXEC_STOP_GRACE_MS).toISOString());
+		const calls: string[] = [];
+		let at = Date.parse(NOW);
+		h.runtime.clock.now = () => new Date(at);
+		h.runtime.clock.nowText = () => new Date(at).toISOString();
+		h.runtime.clock.sleep = async (ms) => { at += ms; };
+		let killedAlready = false;
+		let polls = 0;
+		h.runtime.process.killTree = async (pid) => { calls.push(`tree:${pid}`); killedAlready = true; return ok(undefined); };
+		h.runtime.process.killGroup = async (pid) => { calls.push(`group:${pid}`); killedAlready = true; return ok(undefined); };
+		h.runtime.process.createdAt = async () => {
+			if (killedAlready) polls += 1;
+			const present: Record<string, string | null> = killedAlready && gone(polls) ? {} : { [PID]: "born" };
+			return ok(present);
+		};
+		return { h, calls };
+	};
+
+	test("an outside kill that returns ok but leaves the runner alive answers an error, writes no end and keeps the request", async () => {
+		for (const platform of ["linux", "windows"] as const) {
+			const { h, calls } = await killedRun(platform, () => false);
+			expect(await stopExec(h.runtime, "event-1")).toMatchObject({ ok: false, error: { code: "exec-io" } });
+			expect(calls).toEqual([platform === "windows" ? `tree:${PID}` : `group:${PID}`]);
+			expect(h.fs.files.has(`${ROOT}/event-1/exit.json`)).toBe(false);
+			expect(h.fs.files.has(`${ROOT}/event-1/stop-request`)).toBe(true);
+		}
+	});
+
+	test("an outside kill that returns ok and whose runner is gone on a later poll records stopped", async () => {
+		for (const platform of ["linux", "windows"] as const) {
+			const { h } = await killedRun(platform, (polls) => polls >= 2);
+			expect(await stopExec(h.runtime, "event-1")).toMatchObject({ ok: true, value: { stopping: true } });
+			expect(JSON.parse(h.fs.files.get(`${ROOT}/event-1/exit.json`) ?? "{}")).toMatchObject({ kind: "stopped", code: null });
 		}
 	});
 

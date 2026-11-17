@@ -286,6 +286,18 @@ const requestStop = async (r: RuntimePorts, id: string): Promise<ApiResult<numbe
 	return apiOk(Date.parse(text));
 };
 
+// Whether the runner is gone after an outside kill, polled by identity for a bounded time on the injected clock. The bound is
+// one runner poll (EXEC_RUN_POLL_MS) checked at the wait poll (EXEC_WAIT_POLL_MS): a killed process ends at once, and the stop is retried by the caller.
+const runnerGone = async (r: RuntimePorts, pid: number, pidCreated: string): Promise<ApiResult<boolean>> => {
+	for (let waited = 0; ; waited += EXEC_WAIT_POLL_MS) {
+		const created = await r.process.createdAt([pid]);
+		if (!created.ok) return apiFail(EXEC_IO, messagesFor(r.language).exec.io(created.error));
+		if (created.value[pid] !== pidCreated) return apiOk(true);
+		if (waited >= EXEC_RUN_POLL_MS) return apiOk(false);
+		await r.clock.sleep(EXEC_WAIT_POLL_MS);
+	}
+};
+
 // A stop is a request: the runner alone decides the end (see `superviseRun`) and kills its run's processes itself. Only a
 // runner that is gone, or one that has not acted within EXEC_STOP_GRACE_MS (a hung runner), is killed from outside.
 const stop = async (r: RuntimePorts, id: string): Promise<ApiResult<JsonValue>> => {
@@ -328,6 +340,10 @@ const stop = async (r: RuntimePorts, id: string): Promise<ApiResult<JsonValue>> 
 	// The runner did not act within the grace: kill the run from outside. The run is one unit: a kill-on-close job on Windows, the runner's own process group on POSIX.
 	const killed = r.platform === "windows" ? await r.process.killTree(pid, true) : await r.process.killGroup(pid);
 	if (!killed.ok) return apiFail(EXEC_IO, messagesFor(r.language).exec.io(killed.error));
+	// A kill port's ok only means the killer ran, so the runner is verified gone by the same identity check as before the kill.
+	const gone = await runnerGone(r, pid, pidCreated);
+	if (!gone.ok) return gone;
+	if (!gone.value) return apiFail(EXEC_IO, messagesFor(r.language).exec.io(messagesFor(r.language).failure.processStillRunningAfterKill()));
 	const written = await r.fs.writeExclusive(file(r, id, "exit.json"), JSON.stringify({ kind: "stopped", code: null, at: r.clock.nowText() }));
 	if (!written.ok) return apiFail(EXEC_IO, messagesFor(r.language).exec.io(written.error));
 	return written.value ? apiOk({ id, stopping: true }) : apiOk({ id, state: "ended" });

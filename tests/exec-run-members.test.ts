@@ -39,8 +39,8 @@ const endOf = async (h: ReturnType<typeof seed>): Promise<unknown> => {
 // Every way a run can be killed: by the runner itself (members) and from outside (the runner's group or tree).
 const recordKills = (h: ReturnType<typeof seed>): string[] => {
 	const kills: string[] = [];
-	h.runtime.process.killGroup = async (pid) => { kills.push(`group:${pid}`); return ok(undefined); };
-	h.runtime.process.killTree = async (pid) => { kills.push(`tree:${pid}`); return ok(undefined); };
+	h.runtime.process.killGroup = async (pid) => { kills.push(`group:${pid}`); h.runtime.process.createdAt = async () => ok({}); return ok(undefined); };
+	h.runtime.process.killTree = async (pid) => { kills.push(`tree:${pid}`); h.runtime.process.createdAt = async () => ok({}); return ok(undefined); };
 	return kills;
 };
 
