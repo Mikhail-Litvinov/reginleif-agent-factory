@@ -136,6 +136,29 @@ def kinds(answer):
     return [p["kind"] for p in answer["problems"]] if answer else []
 
 
+class TranscriptLookupTests(ProjectCase):
+    def test_a_transcript_named_under_a_missing_folder_is_read_from_the_folder_holding_the_session_file(self):
+        config = self.dir / "config"
+        os.environ["CLAUDE_CONFIG_DIR"] = str(config)
+        payload = self.payload("How long will the refactor take?", "It will take about 40 minutes.")
+        real = config / "projects" / "C--work-project" / "probe.jsonl"
+        real.parent.mkdir(parents=True)
+        Path(payload["transcript_path"]).replace(real)
+        payload["transcript_path"] = str(config / "projects" / "C--work-project-plugin" / "probe.jsonl")
+        text = self.review_input(payload)
+        self.assertIn("How long will the refactor take?", text)
+
+    def test_started_by_wake_reads_the_found_transcript(self):
+        config = self.dir / "config"
+        os.environ["CLAUDE_CONFIG_DIR"] = str(config)
+        real = config / "projects" / "C--work-project" / "probe.jsonl"
+        real.parent.mkdir(parents=True)
+        real.write_text(json.dumps(text_entry("user", 0, REFLECT.WAKE_MARKER + " wake")) + "\n", encoding="utf-8")
+        named = config / "projects" / "C--work-project-plugin" / "probe.jsonl"
+        self.assertEqual(REFLECT.resolve_transcript(str(named), "probe"), real)
+        self.assertTrue(REFLECT.skipped({"transcript_path": str(named), "session_id": "probe"}))
+
+
 @unittest.skipUnless(os.environ.get("REFLECT_LIVE_PROBE") == "1", "set REFLECT_LIVE_PROBE=1 to run the real reviewer probe")
 class ReflectLiveProbe(ProjectCase):
     """Real reviewer, three invented turns; the input is built by reflect.review like a Stop hook run."""

@@ -13,6 +13,10 @@ import json
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import transcript_file  # noqa: E402  (next to this script, found by the path insert above)
+
 TOOL_INPUT_LIMIT = 1500
 TOOL_RESULT_LIMIT = 2000
 META_KEPT = ("channel", "peer")
@@ -121,7 +125,7 @@ def render(transcript: Path) -> str:
 def main() -> None:
     sys.stdout.reconfigure(encoding="utf-8")
     payload = json.load(sys.stdin)
-    transcript = Path(payload.get("transcript_path") or "")
+    transcript = transcript_file.resolve(payload.get("transcript_path"), payload.get("session_id"))
     if not transcript.is_file():
         return
 

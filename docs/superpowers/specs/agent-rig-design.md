@@ -74,6 +74,13 @@ Linux, `python` on Windows. `rig check` verifies that the interpreter starts.
 Hooks run straight from the clone. Claude Code looks for agents and skills in `~/.claude`, so `rig` copies them there,
 substituting paths and the interpreter in place of `C:/Users/...`.
 
+Hooks that read the session transcript (`compact_history.py`, the reflection hook, the subagent-tasks guard) do not
+trust the `transcript_path` of their input: Claude Code names it after the session's current cwd, but a session resumed
+in another cwd keeps its file where it began. `base/hooks/transcript_file.py` resolves it: the named path when it is a
+file, else the existing `<config dir>/projects/*/<session_id>.jsonl` (the newest when several; the config dir is
+`CLAUDE_CONFIG_DIR` or `~/.claude`), else the named path. The guard also looks for the subagent transcript under the
+resolved main transcript's folder. Hooks outside `base/hooks` put the clone's `base/hooks` on `sys.path`.
+
 ## Session record
 
 `base/hooks/session_record.py` keeps one JSON file per Claude Code session in `~/.agent-rig/sessions/<session_id>.json`.

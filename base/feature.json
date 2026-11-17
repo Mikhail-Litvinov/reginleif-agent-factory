@@ -462,6 +462,7 @@
     "hooks/no_ampersand.py",
     "hooks/system-temp-guard.py",
     "hooks/session_record.py",
+    "hooks/transcript_file.py",
     "hooks/project-tmp.sh",
     "hooks/project-tmp-settings.ps1",
     "tools/patchlib.py",

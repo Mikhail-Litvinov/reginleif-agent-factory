@@ -36,6 +36,7 @@ sys.path.insert(0, str(REPOSITORY_ROOT / "base" / "hooks"))
 sys.path.insert(0, str(REPOSITORY_ROOT / "features" / "analysis-gate" / "hooks"))
 from compact_history import block_text, clip, iter_line_events  # noqa: E402
 from analysis_file import check as analysis_check, project_root  # noqa: E402
+from transcript_file import resolve as resolve_transcript  # noqa: E402
 
 HOME_CLAUDE = Path.home() / ".claude"
 # rig apply records which features are on in this file: {"features": {"<name>": true|false}}.
@@ -442,7 +443,7 @@ def ask(model: str, verdicts: list[str], text: str, cwd: str, dirs: list[Path], 
 def review(payload: dict) -> tuple[str, dict | None]:
     """Returns (what happened, the answer that blocks or None)."""
     started = time.monotonic()
-    transcript = Path(payload.get("transcript_path") or "")
+    transcript = resolve_transcript(payload.get("transcript_path"), payload.get("session_id"))
     if not transcript.is_file():
         return "no transcript", None
     events = events_of(tail_lines(transcript))
@@ -553,7 +554,7 @@ def skipped(payload: dict) -> bool:
         return True
     if guard_hit(payload):
         return True
-    return started_by_wake(Path(payload.get("transcript_path") or ""))
+    return started_by_wake(resolve_transcript(payload.get("transcript_path"), payload.get("session_id")))
 
 
 def replay(transcript: Path, line: int) -> None:

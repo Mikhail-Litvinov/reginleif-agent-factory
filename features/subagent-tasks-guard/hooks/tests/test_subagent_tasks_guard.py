@@ -244,6 +244,25 @@ class SubagentTasksGuardTests(unittest.TestCase):
         payload = self.base("SubagentStop", stop_hook_active=False, background_tasks=[self.running("bash0001")])
         self.assert_blocked(self.run_hook(payload), "bash0001")
 
+    def test_a_session_resumed_in_another_cwd_is_found_by_its_session_id(self):
+        # The input names a project folder that does not exist; the session's files are in another one.
+        config = self.root / "config"
+        named = config / "projects" / "C--work-project-plugin" / f"{SESSION}.jsonl"
+        real = config / "projects" / "C--work-project" / f"{SESSION}.jsonl"
+        subagents = real.parent / SESSION / "subagents"
+        subagents.mkdir(parents=True)
+        real.write_text("{}\n", encoding="utf-8")
+        records = start_bash("toolu_1", "bash0001")
+        (subagents / f"agent-{AGENT}.jsonl").write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
+        env = {**os.environ, "CLAUDE_CONFIG_DIR": str(config)}
+        handback = self.base("PreToolUse", tool_name="SubagentHandback", tool_input={"message": "done"},
+                             transcript_path=str(named))
+        self.assert_denied(self.run_hook(handback, env), "bash0001")
+        own_named = named.parent / SESSION / "subagents" / f"agent-{AGENT}.jsonl"
+        stop = self.base("SubagentStop", transcript_path=str(named), agent_transcript_path=str(own_named),
+                         stop_hook_active=False, background_tasks=[self.running("bash0001")])
+        self.assert_blocked(self.run_hook(stop, env), "bash0001")
+
 
 if __name__ == "__main__":
     unittest.main()

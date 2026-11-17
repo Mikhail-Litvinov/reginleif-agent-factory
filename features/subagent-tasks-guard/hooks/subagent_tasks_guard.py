@@ -14,9 +14,12 @@ import json
 import sys
 from pathlib import Path
 
+REPOSITORY_ROOT = Path(__file__).resolve().parents[3]  # hooks run from the clone: <root>/features/<feature>/hooks
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(REPOSITORY_ROOT / "base" / "hooks"))
 
 import subagent_tasks  # resolved next to this script by the path insert above
+import transcript_file  # noqa: E402  (base/hooks of the clone)
 
 HANDBACK_TOOL = "SubagentHandback"
 EVENT_STOP = "SubagentStop"
@@ -27,13 +30,21 @@ BLOCK_EXIT_CODE = 2
 def transcript_path(payload, agent_id):
     # SubagentStop names the subagent's transcript; otherwise it sits at <main dir>/<session_id>/subagents/agent-<id>.jsonl
     # next to the main transcript, which every hook input carries.
+    # Both paths are named after the session's cwd, which may differ from where the session's files are, so the
+    # subagent transcript is looked up under the folder of the resolved main transcript.
     own = payload.get("agent_transcript_path")
-    if isinstance(own, str) and own:
-        return Path(own)
     main = payload.get("transcript_path")
     session = payload.get("session_id")
-    if isinstance(main, str) and main and isinstance(session, str) and session:
-        return Path(main).parent / session / "subagents" / f"agent-{agent_id}.jsonl"
+    has_session = isinstance(session, str) and session
+    folder = transcript_file.resolve(main, session).parent if has_session and isinstance(main, str) and main else None
+    if isinstance(own, str) and own:
+        if folder is not None and not Path(own).is_file():
+            moved = folder / session / "subagents" / Path(own).name
+            if moved.is_file():
+                return moved
+        return Path(own)
+    if folder is not None:
+        return folder / session / "subagents" / f"agent-{agent_id}.jsonl"
     return None
 
 
