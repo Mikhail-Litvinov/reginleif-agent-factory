@@ -2,10 +2,10 @@ import type { Args, Op, Request, Response } from "../plugins/agent-rig-window/mo
 import type { ApiResult, ProgressEvent } from "./output.js";
 import type { RuntimePorts } from "./ports.js";
 
-import { CLAIM_PID_FILE, CLAIMS_DIR, ID_PATTERN, REQUEST_SUFFIX } from "../plugins/agent-rig-window/mod/queue-protocol.js";
+import { CLAIM_PID_FILE, CLAIM_STATE_FILE, CLAIM_STATE_RUNNING, CLAIM_STATE_WAITING, CLAIMS_DIR, ID_PATTERN, REQUEST_SUFFIX } from "../plugins/agent-rig-window/mod/queue-protocol.js";
 import { joinPath } from "./file-system.js";
 import { messagesFor } from "./messages.js";
-import { apiFail, apiOk, PROGRESS_CODE_SESSION_WAITING, SESSION_BAD_ID, SESSION_BAD_RESPONSE, SESSION_CLAIM_LOST, SESSION_ENDED, SESSION_INVALID, SESSION_IO, SESSION_MODULE_ERROR, SESSION_NO_MODULE, SESSION_TIMEOUT, SESSION_UNKNOWN } from "./output.js";
+import { apiFail, apiOk, PROGRESS_CODE_SESSION_RUNNING, PROGRESS_CODE_SESSION_WAITING, SESSION_BAD_ID, SESSION_BAD_RESPONSE, SESSION_CLAIM_LOST, SESSION_ENDED, SESSION_INVALID, SESSION_IO, SESSION_MODULE_ERROR, SESSION_NO_MODULE, SESSION_TIMEOUT, SESSION_UNKNOWN } from "./output.js";
 import { errorText } from "./result.js";
 
 // A pid file holds a positive decimal integer (the module validates the same shape before writing it).
@@ -177,9 +177,13 @@ export const requestSession = async (r: RuntimePorts, session: SessionRecord, op
 		published = true;
 		const deadline = r.clock.now().getTime() + timeout;
 		let malformed = false;
-		let notified = false;
+		// The last progress code sent: each is sent when the module's observed state changes to it, never twice in a row.
+		let lastCode: string | null = null;
 		for (;;) {
-			if (!notified && r.clock.now().getTime() - (deadline - timeout) >= SESSION_POLL_MS) { progress({ code: PROGRESS_CODE_SESSION_WAITING }); notified = true; }
+			let stateText: string | null = null;
+			try { stateText = (await r.fs.readText(joinPath(claimDir, CLAIM_STATE_FILE))).trim(); } catch (e) { if (!missing(e)) throw e; }
+			if (stateText === CLAIM_STATE_WAITING && lastCode !== PROGRESS_CODE_SESSION_WAITING) { progress({ code: PROGRESS_CODE_SESSION_WAITING }); lastCode = PROGRESS_CODE_SESSION_WAITING; }
+			if (stateText === CLAIM_STATE_RUNNING && lastCode === PROGRESS_CODE_SESSION_WAITING) { progress({ code: PROGRESS_CODE_SESSION_RUNNING }); lastCode = PROGRESS_CODE_SESSION_RUNNING; }
 			let text: string | null = null;
 			try { text = await r.fs.readText(responsePath); } catch (e) { if (!missing(e)) throw e; }
 			if (text !== null) {

@@ -6,6 +6,11 @@ export const REQUEST_SUFFIX = ".json";
 // that pid's identity (pid and creation time), never from elapsed time.
 export const CLAIMS_DIR = "claims";
 export const CLAIM_PID_FILE = "pid";
+// claims/<id>/state: what the claiming module observes about the request, so rig reports progress from a fact, never
+// from elapsed time. Written on every change: `waiting` (it cannot start now) or `running` (the op has started).
+export const CLAIM_STATE_FILE = "state";
+export const CLAIM_STATE_WAITING = "waiting";
+export const CLAIM_STATE_RUNNING = "running";
 export const OPS = ["compact", "rename", "autocompact", "usage", "mode"] as const;
 export type Op = (typeof OPS)[number];
 export type Args = Record<string, unknown>;

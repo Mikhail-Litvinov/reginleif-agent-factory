@@ -41,6 +41,7 @@ export const EXEC_IO = "exec-io";
 export const EXEC_UNAVAILABLE = "exec-unavailable";
 export const EXEC_LAUNCH = "exec-launch";
 export const PROGRESS_CODE_SESSION_WAITING = "session-waiting";
+export const PROGRESS_CODE_SESSION_RUNNING = "session-running";
 export const LAUNCH_UNAVAILABLE = "launch-unavailable";
 
 export const SUCCESS_EXIT_CODE = 0;

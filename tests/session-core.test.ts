@@ -4,7 +4,7 @@ import { describe, expect, test } from "bun:test";
 
 import { runCli } from "../src/cli.js";
 import { apiOk } from "../src/output.js";
-import { lookupSession, listSessions, requestSession, sessionLive, SESSION_POLL_MS } from "../src/session-core.js";
+import { COMPACT_TIMEOUT_MS, lookupSession, listSessions, requestSession, sessionLive, SESSION_POLL_MS } from "../src/session-core.js";
 import { ok } from "../src/result.js";
 import { createMemoryRuntime } from "./fakes/memory-runtime.js";
 
@@ -68,6 +68,41 @@ describe("session core", () => {
 		h.runtime.clock.sleep = async (ms) => { now += ms; h.fs.seed(path, JSON.stringify({ id: "event-1", ok: true, result: 7 })); };
 		expect(await requestSession(h.runtime, record, "usage", {}, SESSION_POLL_MS * 3)).toEqual(apiOk(7));
 	});
+	// Progress comes from the claiming module's claims/<id>/state, never from elapsed time.
+	const progressWorld = (states: (poll: number) => string | null, answerAtPoll: number) => {
+		const h = setup();
+		const state = `${ROOT}/abc/claims/event-1/state`;
+		let poll = 0;
+		const sleep = h.runtime.clock.sleep;
+		h.runtime.clock.sleep = async (ms) => {
+			await sleep(ms);
+			poll++;
+			const text = states(poll);
+			if (text !== null) h.fs.seed(state, text);
+			if (poll >= answerAtPoll) h.fs.seed(`${ROOT}/abc/responses/event-1.json`, JSON.stringify({ id: "event-1", ok: true, result: 1 }));
+		};
+		const events: string[] = [];
+		const run = () => requestSession(h.runtime, record, "compact", {}, COMPACT_TIMEOUT_MS, (event) => events.push(event.code));
+		return { events, run, seedFirst: (text: string) => h.fs.seed(state, text) };
+	};
+	const LONG_OP_POLLS = 8;
+	test("an idle session running a long op reports no progress, however long it takes", async () => {
+		const w = progressWorld(() => "running", LONG_OP_POLLS);
+		w.seedFirst("running");
+		expect((await w.run()).ok).toBe(true);
+		expect(w.events).toEqual([]);
+	});
+	test("waiting then running reports each once, in order", async () => {
+		const w = progressWorld((poll) => (poll < 4 ? "waiting" : "running"), LONG_OP_POLLS);
+		w.seedFirst("waiting");
+		expect((await w.run()).ok).toBe(true);
+		expect(w.events).toEqual(["session-waiting", "session-running"]);
+	});
+	test("no state file (a module without it) reports no progress", async () => {
+		const w = progressWorld(() => null, LONG_OP_POLLS);
+		expect((await w.run()).ok).toBe(true);
+		expect(w.events).toEqual([]);
+	});
 	test("timeout and process exit remove the published request", async () => {
 		for (const exits of [false, true]) {
 			const h = setup();
@@ -81,7 +116,7 @@ describe("session core", () => {
 			expect(answer.ok ? "ok" : answer.error.code).toBe(exits ? "session-ended" : "session-timeout");
 			expect(calls).toEqual([0, SESSION_POLL_MS * 3]);
 			expect(h.fs.files.has(`${ROOT}/abc/requests/event-1.json`)).toBe(false);
-			if (!exits) expect(events).toEqual(["session-waiting"]);
+			expect(events).toEqual([]);
 		}
 	});
 	// A claim as the module leaves it: the directory, and its Claude pid when the module knows it.

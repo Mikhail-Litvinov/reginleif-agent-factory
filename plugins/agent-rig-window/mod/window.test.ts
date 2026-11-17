@@ -10,9 +10,9 @@ const DIR = "/home/tester/.agent-rig/sessions/sess-1";
 const TOKENS = 1;
 const PID = 4242;
 
-type Shared = { files: Map<string, string>; dirs: Set<string>; writes: string[]; now: number };
+type Shared = { files: Map<string, string>; dirs: Set<string>; writes: string[]; states: string[]; now: number };
 
-const shared = (): Shared => ({ files: new Map(), dirs: new Set(), writes: [], now: 1_000_000 });
+const shared = (): Shared => ({ files: new Map(), dirs: new Set(), writes: [], states: [], now: 1_000_000 });
 
 // One process's view of the shared folder; `ran` records what this process executed.
 function process(s: Shared, ran: string[]): Deps {
@@ -22,6 +22,7 @@ function process(s: Shared, ran: string[]): Deps {
     writeAtomic: async (path, text) => {
       s.files.set(path, text);
       s.writes.push(path);
+      if (path.endsWith("/state")) s.states.push(`${path.split("/").slice(-2)[0]}:${text}`);
     },
     remove: async path => {
       s.files.delete(path);
@@ -87,6 +88,7 @@ test("a claimed request records the claimant pid, and a window forgets ids answe
   expect(s.files.get(`${DIR}/claims/c1/pid`)).toBe(String(PID));
   a.turn(false);
   await a.poll();
+  await flush();
   expect(s.files.has(`${DIR}/responses/c1.json`)).toBe(true);
 });
 
@@ -106,4 +108,75 @@ test("a request answered and removed before the late window claims it is not run
   await w.poll();
   expect(ran).toEqual([]);
   expect(s.dirs.has(`${DIR}/claims/c1`)).toBe(false);
+});
+
+// Lets the chained promises of a window settle without a real wait.
+const MICROTASK_ROUNDS = 20;
+const flush = async () => {
+  for (let i = 0; i < MICROTASK_ROUNDS; i++) await Promise.resolve();
+};
+
+test("a request during a turn writes waiting, then running once the turn ends", async () => {
+  const s = shared();
+  const w = new Window(DIR, process(s, []));
+  w.turn(true);
+  put(s, "c1", { id: "c1", op: "compact" });
+  await w.poll();
+  await flush();
+  expect(s.states).toEqual(["c1:waiting"]);
+  w.turn(false);
+  await flush();
+  expect(s.states).toEqual(["c1:waiting", "c1:running"]);
+  expect(s.files.has(`${DIR}/responses/c1.json`)).toBe(true);
+});
+
+test("a request with no turn running writes only running, and immediate ops write nothing", async () => {
+  const s = shared();
+  const w = new Window(DIR, process(s, []));
+  put(s, "c1", { id: "c1", op: "compact" });
+  put(s, "u1", { id: "u1", op: "usage" });
+  put(s, "m1", { id: "m1", op: "mode", args: { mode: "plan" } });
+  await w.poll();
+  await flush();
+  expect(s.states).toEqual(["c1:running"]);
+});
+
+test("a second request queued behind a running first writes waiting, then running", async () => {
+  const s = shared();
+  const deps = process(s, []);
+  let release: () => void = () => undefined;
+  const gate = new Promise<void>(resolve => {
+    release = resolve;
+  });
+  deps.compact = async () => {
+    await gate;
+    return { tokensBefore: 2, tokensAfter: 1 };
+  };
+  const w = new Window(DIR, deps);
+  put(s, "c1", { id: "c1", op: "compact" });
+  put(s, "r1", { id: "r1", op: "rename", args: { name: "x" } });
+  await w.poll();
+  await flush();
+  expect(s.states).toEqual(["c1:running", "r1:waiting"]);
+  release();
+  await flush();
+  expect(s.states).toEqual(["c1:running", "r1:waiting", "r1:running"]);
+});
+
+test("a rejected compaction goes back to waiting and is not rewritten while it stays so", async () => {
+  const s = shared();
+  const deps = process(s, []);
+  let rejects = 1;
+  deps.compact = async () => {
+    if (rejects-- > 0) throw new Error("a turn is running");
+    return { tokensBefore: 2, tokensAfter: 1 };
+  };
+  const w = new Window(DIR, deps);
+  put(s, "c1", { id: "c1", op: "compact" });
+  await w.poll();
+  await flush();
+  expect(s.states).toEqual(["c1:running", "c1:waiting"]);
+  await w.poll();
+  await flush();
+  expect(s.states).toEqual(["c1:running", "c1:waiting", "c1:running"]);
 });

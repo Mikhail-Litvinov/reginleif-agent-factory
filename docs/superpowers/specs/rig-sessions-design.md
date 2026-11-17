@@ -12,7 +12,7 @@ The module learns the home directory (`HOME`, else `USERPROFILE`) and the sessio
 
 Rig validates session ids against the shared queue identifier pattern before using them as paths, then reads and validates the corresponding record written by the session hook. A session has one process file per Claude Code process (`<id>/processes/<pid>.json`, written by the hook) and is live while at least one of them names a running process with the recorded creation time; a session with no process file, or whose process files all name gone or reused pids, is not live. A legacy record that still holds `pid`, `pid_created` and no `ended_at` counts as one process. Creation times are queried once per session. Process lookup failures are reported rather than treated as a stopped process.
 
-The queue client checks process liveness before publishing a request and atomically publishes it. It polls for its matching response and rereads the session's process files using the runtime clock; no process file left ends the wait. At the deadline it checks process liveness once more, returning `session-ended` if the process is gone and `session-timeout` otherwise. It tolerates one malformed response read, removes a consumed response and removes its request when finished, including on timeout or process exit. A missing module folder requires restarting the session. After one poll it emits `session-waiting` once. Read-only operations wait three seconds (three module polls); compact, rename and autocompact wait ten minutes (`COMPACT_TIMEOUT_MS` in `src/session-core.ts`) and allowing the current turn to finish.
+The queue client checks process liveness before publishing a request and atomically publishes it. It polls for its matching response and rereads the session's process files using the runtime clock; no process file left ends the wait. At the deadline it checks process liveness once more, returning `session-ended` if the process is gone and `session-timeout` otherwise. It tolerates one malformed response read, removes a consumed response and removes its request when finished, including on timeout or process exit. A missing module folder requires restarting the session. Progress comes from the claiming module's `claims/<id>/state` (read on each poll; a missing file means no state): rig emits `session-waiting` when the state becomes `waiting` (a turn runs, another request is ahead, or a rejected compaction awaits a retry) and `session-running` when it becomes `running` after a `session-waiting`, never the same code twice in a row, and nothing when the op ran without waiting. Elapsed time never produces a progress code. Read-only operations wait three seconds (three module polls); compact, rename and autocompact wait ten minutes (`COMPACT_TIMEOUT_MS` in `src/session-core.ts`) and allowing the current turn to finish.
 
 Failures use `session-bad-id`, `session-unknown`, `session-invalid`, `session-io`, `session-ended`, `session-no-module`, `session-timeout`, `session-claim-lost`, `session-module-error` and `session-bad-response`. Module errors carry the module's text.
 
@@ -41,6 +41,7 @@ Failures use `session-bad-id`, `session-unknown`, `session-invalid`, `session-io
   requests/<req>.json   one request, written by rig
   responses/<req>.json  the answer, written by the module
   claims/<req>/pid      the claim on a request (a directory) and the claiming Claude pid, written by the claiming module
+  claims/<req>/state    `waiting` or `running`, written by the claiming module on every change
 ```
 
 ## Snapshot: `usage.json`
@@ -89,7 +90,11 @@ wait ends with `session-claim-lost` at once), and a pid that no longer exists or
 ends the wait with `session-claim-lost` (the claiming process died mid-request; the request is not run by another
 process and the caller may send it again). Elapsed time never decides it: a claimant busy with a long step is still
 waited on. A claim with no usable pid file (the module could not learn its pid, or died between making the directory and
-writing the file) is waited on until the operation's own timeout, `session-timeout`. When the wait ends for any reason
+writing the file) is waited on until the operation's own timeout, `session-timeout`.
+The module also writes `claims/<req>/state` (atomically, only when it changes): `waiting` when a claimed turn-gated
+request cannot start now (a turn runs, another request is ahead of it, or a compaction was rejected and awaits a retry),
+`running` right before the op starts. A request that starts at once is never marked `waiting`, and the immediate ops
+(usage, mode) write no state. A failed state write is ignored, like the pid write. When the wait ends for any reason
 rig removes the request and then the claim directory, in that order: a module that listed the request earlier and claims
 late then finds the request gone.
 

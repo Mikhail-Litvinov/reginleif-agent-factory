@@ -2,7 +2,7 @@
 // Claude Code with no Node, so everything outside comes in as Deps (the engine's `$` calls, wired in register.ts).
 import type { Request, Response, Usage, UsageSnapshot } from "./protocol";
 
-import { CLAIM_PID_FILE, CLAIMS_DIR, errorText, idOfFile, parseRequest, responseText } from "./protocol";
+import { CLAIM_PID_FILE, CLAIM_STATE_FILE, CLAIM_STATE_RUNNING, CLAIM_STATE_WAITING, CLAIMS_DIR, errorText, idOfFile, parseRequest, responseText } from "./protocol";
 
 const REQUESTS_DIR = "requests";
 const RESPONSES_DIR = "responses";
@@ -48,6 +48,8 @@ export class Window {
   // Ids this window claimed and has not answered: they are not forgotten while the request file stays.
   private claimed = new Set<string>();
   private pending: Pending[] = [];
+  // The last state written for each claimed id, so a state is written only when it changes.
+  private states = new Map<string, string>();
   private polling = false;
   private working = false;
   private turnRuns = false;
@@ -122,6 +124,17 @@ export class Window {
     }
   }
 
+  // Writes claims/<id>/state when the state changes: rig reports progress from it (waiting for the turn, running).
+  private async recordState(id: string, state: string): Promise<void> {
+    if (this.states.get(id) === state) return;
+    this.states.set(id, state);
+    try {
+      await this.deps.writeAtomic(`${this.dir}/${CLAIMS_DIR}/${id}/${CLAIM_STATE_FILE}`, state);
+    } catch {
+      // Like the pid file, the state is advisory: without it rig reports no progress, and the request is unaffected.
+    }
+  }
+
   // One request, one executor: the window that makes the claim directory runs and answers the request; another
   // process with the same session id (a second window, `claude -p --resume`) finds the claim taken and skips it.
   private async intake(id: string): Promise<void> {
@@ -154,7 +167,11 @@ export class Window {
       }
     }
     if (request.op === "mode") return this.answer({ id, ok: false, error: MODE_UNAVAILABLE });
+    // A request that cannot start in this pass (a turn runs, or another request is ahead of it) is marked waiting; one
+    // that work() starts at once is never marked.
+    const blocked = this.turnRuns || this.pending.length > 0;
     this.pending.push({ request, failed: 0 });
+    if (blocked) await this.recordState(id, CLAIM_STATE_WAITING);
     void this.work();
   }
 
@@ -164,8 +181,13 @@ export class Window {
     this.working = true;
     try {
       for (let head = this.pending[0]; head && !this.turnRuns; head = this.pending[0]) {
+        await this.recordState(head.request.id, CLAIM_STATE_RUNNING);
         const outcome = await this.run(head);
-        if (outcome === undefined) return;
+        if (outcome === undefined) {
+          // Rejected (a turn runs or just started): it waits for a later try.
+          await this.recordState(head.request.id, CLAIM_STATE_WAITING);
+          return;
+        }
         this.pending.shift();
         await this.answer(outcome);
       }
@@ -209,6 +231,7 @@ export class Window {
       await this.deps.remove(`${this.dir}/${REQUESTS_DIR}/${response.id}.json`);
       this.seen.delete(response.id);
       this.claimed.delete(response.id);
+      this.states.delete(response.id);
     } catch {
       // The answer is not written or the request not removed: the id stays seen, so it is not run twice.
     }
