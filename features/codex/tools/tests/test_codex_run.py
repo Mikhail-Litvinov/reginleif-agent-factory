@@ -53,6 +53,26 @@ def process_alive(pid):
     return True
 
 
+class ProcessProbeTest(unittest.TestCase):
+    def test_unknown_process_errors_are_not_absence(self):
+        kernel = mock.Mock()
+        kernel.OpenProcess.return_value = 0
+        with mock.patch.object(cr.os, "name", "nt"), mock.patch.object(cr.ctypes, "WinDLL", create=True, return_value=kernel) as win_dll, \
+                mock.patch.object(cr.ctypes, "get_last_error", create=True) as last_error:
+            last_error.return_value = 5
+            self.assertTrue(cr.pid_alive(123))
+            win_dll.assert_called_with("kernel32", use_last_error=True)
+            last_error.return_value = 87
+            self.assertFalse(cr.pid_alive(123))
+            kernel.OpenProcess.return_value = 1
+            kernel.GetExitCodeProcess.return_value = 0
+            self.assertTrue(cr.pid_alive(123))
+        with mock.patch.object(cr.os, "name", "posix"), mock.patch.object(cr.os, "kill", side_effect=PermissionError()):
+            self.assertTrue(cr.pid_alive(123))
+        with mock.patch.object(cr.os, "name", "posix"), mock.patch.object(cr.os, "kill", side_effect=ProcessLookupError()):
+            self.assertFalse(cr.pid_alive(123))
+
+
 class RunRulesTest(unittest.TestCase):
     def test_report_contract_in_prompt(self):
         self.assertIn("More work than expected is never a reason to stop", cr.run_rules(False))

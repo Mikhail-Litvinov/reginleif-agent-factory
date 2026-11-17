@@ -226,16 +226,18 @@ def pid_alive(pid):
         try:
             os.kill(pid, 0)
             return True
-        except OSError:
+        except ProcessLookupError:
             return False
-    kernel32 = ctypes.windll.kernel32
+        except OSError:
+            return True
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
     if not handle:
-        return False
+        return ctypes.get_last_error() != 87  # ERROR_INVALID_PARAMETER: no such PID
     code = ctypes.c_ulong()
     ok = kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
     kernel32.CloseHandle(handle)
-    return bool(ok) and code.value == 259  # STILL_ACTIVE
+    return not ok or code.value == 259  # A failed query is unknown, so assume alive.
 
 
 def kill_pid(pid):

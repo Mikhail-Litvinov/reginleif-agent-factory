@@ -32,7 +32,7 @@ PROCESSES_DIR_NAME = "processes"
 PROC_STAT_STARTTIME_INDEX = 19
 PROC_STAT_PPID_INDEX = 1
 WINDOWS_TABLE_COMMAND = (
-    "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,"
+    "$ErrorActionPreference = 'Stop'; Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,"
     "@{n='Created';e={if($_.CreationDate){$_.CreationDate.ToFileTimeUtc()}else{0}}} | ConvertTo-Json -Compress"
 )
 EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
@@ -144,8 +144,10 @@ def linux_process_table(proc=Path("/proc"), clock_ticks=None):
     for entry in entries:
         try:
             comm, ppid, start_ticks = parse_proc_stat((entry / "stat").read_text(encoding="utf-8"))
-        except (OSError, ValueError, IndexError):
+        except FileNotFoundError:
             continue
+        except (OSError, ValueError, IndexError) as error:
+            return None, f"process table: {error}"
         name = comm
         with contextlib.suppress(OSError):
             argv = (entry / "cmdline").read_bytes().split(b"\0")
@@ -303,7 +305,9 @@ def main(argv):
             result = {}
             for pid in pids:
                 process = table.get(pid)
-                result[str(pid)] = iso_micro_from_us(process.created_us) if process is not None and process.created_us is not None else None
+                if process is not None and process.created_us is None:
+                    raise ValueError(f"creation time unavailable for pid {pid}")
+                result[str(pid)] = iso_micro_from_us(process.created_us) if process is not None else None
             print(json.dumps(result))
             return 0
         except Exception as error:

@@ -66,6 +66,26 @@ def load_fresh_module():
 vr = load_fresh_module()
 
 
+class ProcessProbeTest(unittest.TestCase):
+    def test_unknown_process_errors_are_not_absence(self):
+        kernel = mock.Mock()
+        kernel.OpenProcess.return_value = 0
+        with mock.patch.object(vr.os, "name", "nt"), mock.patch.object(vr.ctypes, "WinDLL", create=True, return_value=kernel) as win_dll, \
+                mock.patch.object(vr.ctypes, "get_last_error", create=True) as last_error:
+            last_error.return_value = 5
+            self.assertTrue(vr.pid_alive(123))
+            win_dll.assert_called_with("kernel32", use_last_error=True)
+            last_error.return_value = 87
+            self.assertFalse(vr.pid_alive(123))
+            kernel.OpenProcess.return_value = 1
+            kernel.GetExitCodeProcess.return_value = 0
+            self.assertTrue(vr.pid_alive(123))
+        with mock.patch.object(vr.os, "name", "posix"), mock.patch.object(vr.os, "kill", side_effect=PermissionError()):
+            self.assertTrue(vr.pid_alive(123))
+        with mock.patch.object(vr.os, "name", "posix"), mock.patch.object(vr.os, "kill", side_effect=ProcessLookupError()):
+            self.assertFalse(vr.pid_alive(123))
+
+
 def stamp(delta=timedelta()):
     return (datetime.now(timezone.utc) - delta).strftime("%Y-%m-%dT%H:%M:%SZ")
 
