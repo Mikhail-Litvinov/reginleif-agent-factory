@@ -52,6 +52,7 @@ class FeatureFileSystem implements FileSystem {
 	async stat(): Promise<FileStat | null> { return null; }
 	async modifiedAt(): Promise<number | null> { return null; }
 	async readRange(): Promise<Uint8Array> { return new Uint8Array(0); }
+	async readHead(path: string, maxBytes: number): Promise<string> { return new TextDecoder().decode(new TextEncoder().encode(await this.readText(path)).subarray(0, maxBytes)); }
 	async listDirectory(): Promise<Array<{ name: string; directory: boolean }>> {
 		return [{ name: "codex", directory: true }, { name: "ignored.txt", directory: false }];
 	}

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import { cleanupSession } from "../src/commands/session-cleanup.js";
 import { transcriptMode } from "../src/commands/session-run.js";
-import { listSessions, lookupSession } from "../src/session-core.js";
+import { listSessions, lookupSession, TRANSCRIPT_HEAD_BYTES, transcriptHeadCwd } from "../src/session-core.js";
 import { ok } from "../src/result.js";
 import { createMemoryRuntime } from "./fakes/memory-runtime.js";
 
@@ -36,6 +36,30 @@ const loaded = async (h: ReturnType<typeof setup>) => {
 };
 
 describe("a session's transcript is the existing <id>.jsonl", () => {
+	test("the first transcript cwd corrects the record for lookup and list", async () => {
+		const h = setup(NAMED);
+		h.fs.seed(`${ROOT}/${ID}.json`, JSON.stringify({ session_id: ID, cwd: "/work/sub", transcript_path: NAMED, started_at: "start" }));
+		h.fs.seed(REAL, '{"type":"mode"}\n{"type":"attachment","cwd":"/work"}\n{"cwd":"/work/sub"}\n');
+		expect((await loaded(h)).cwd).toBe("/work");
+		expect(h.fs.rangeReads).toContainEqual({ path: REAL, start: 0, length: TRANSCRIPT_HEAD_BYTES });
+		expect(h.fs.textReads).not.toContain(REAL);
+		const list = await listSessions(h.runtime);
+		expect(list.ok && list.value.sessions[0] && "cwd" in list.value.sessions[0] ? list.value.sessions[0].cwd : null).toBe("/work");
+	});
+	test("falls back to the recorded cwd for missing, unreadable, or cwd-free transcripts", async () => {
+		const h = setup(NAMED);
+		expect((await loaded(h)).cwd).toBe("/work");
+		for (const head of ['{"type":"mode"}\n', 'invalid\n{"cwd":"/other"}\n']) {
+			h.fs.seed(NAMED, head);
+			expect((await loaded(h)).cwd).toBe("/work");
+		}
+		h.fs.readHead = async () => { throw new Error("unreadable"); };
+		expect((await loaded(h)).cwd).toBe("/work");
+	});
+	test("the head parser skips lines without string cwd and ignores a cut last line", () => {
+		expect(transcriptHeadCwd('{"type":"mode"}\n{"cwd":42}\n{"cwd":"/root"}\n{"cwd":"/later"}\n')).toBe("/root");
+		expect(transcriptHeadCwd('{"type":"mode"}\n{"cwd":"/cut"}')).toBeNull();
+	});
 	test("a missing named file resolves to the one existing match; list reports it", async () => {
 		const h = setup(NAMED);
 		h.fs.seed(REAL, MODE_PLAN);

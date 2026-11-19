@@ -218,6 +218,14 @@ const isMissingPath = (error: unknown): boolean =>
 
 export const createFileSystem = (messages: Messages, hostKind: HostPlatform = hostPlatform() === "win32" ? "windows" : "posix"): FileSystem => ({
 	readText: (path) => fs.readFile(path, "utf8"),
+	readHead: async (path, maxBytes) => {
+		const handle = await fs.open(path, "r");
+		try {
+			const buffer = new Uint8Array(maxBytes);
+			const { bytesRead } = await handle.read(buffer, 0, maxBytes, 0);
+			return new TextDecoder().decode(buffer.subarray(0, bytesRead));
+		} finally { await handle.close(); }
+	},
 	stat: async (path) => {
 		try {
 			const info = await fs.stat(path);

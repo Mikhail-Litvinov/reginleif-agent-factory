@@ -11,6 +11,8 @@ import { resolveTranscriptPath } from "./transcript-path.js";
 
 // A pid file holds a positive decimal integer (the module validates the same shape before writing it).
 const PID_PATTERN = /^[1-9][0-9]*$/;
+// A cwd appears in the first few lines, but an attachment line can be large; scan up to 1 MiB and only complete lines.
+export const TRANSCRIPT_HEAD_BYTES = 1024 * 1024;
 // The window polls once per second; allow three polls for read-only operations.
 export const SESSION_POLL_MS = 1000;
 export const READ_TIMEOUT_MS = 3 * SESSION_POLL_MS;
@@ -29,6 +31,16 @@ export type LiveProcess = { pid: number; startedAt: string };
 export type SessionSummary = { id: string; cwd: string | null; transcriptPath: string | null; pid: number | null; processes: LiveProcess[]; startedAt: string; live: boolean; module: boolean };
 export type SessionListEntry = SessionSummary | { id: string; error: { code: string; message: string } };
 const object = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+export const transcriptHeadCwd = (head: string): string | null => {
+	const lines = head.split("\n");
+	lines.pop();
+	for (const line of lines) {
+		let value: unknown;
+		try { value = JSON.parse(line); } catch { return null; }
+		if (object(value) && typeof value.cwd === "string") return value.cwd;
+	}
+	return null;
+};
 const nullableString = (v: unknown): v is string | null => v === null || typeof v === "string";
 const missing = (e: unknown): boolean => object(e) && (e.code === "ENOENT" || e.code === "ENOTDIR");
 const root = (r: RuntimePorts): string => joinPath(r.home, ".agent-rig", "sessions");
@@ -75,7 +87,12 @@ export const lookupSession = async (r: RuntimePorts, id: string): Promise<ApiRes
 	// The record keeps the path Claude Code named; every reader gets the transcript file that really exists.
 	const transcriptPath = await resolveTranscriptPath(r, id, value.transcript_path, typeof value.config_dir === "string" ? value.config_dir : "");
 	if (!transcriptPath.ok) return transcriptPath;
-	return apiOk({ id, cwd: value.cwd, transcriptPath: transcriptPath.value, startedAt: value.started_at, processes: processes.value });
+	let cwd = value.cwd;
+	if (transcriptPath.value !== null) {
+		try { cwd = transcriptHeadCwd(await r.fs.readHead(transcriptPath.value, TRANSCRIPT_HEAD_BYTES)) ?? cwd; }
+		catch { /* A missing or unreadable transcript leaves the recorded cwd in place. */ }
+	}
+	return apiOk({ id, cwd, transcriptPath: transcriptPath.value, startedAt: value.started_at, processes: processes.value });
 };
 
 // The processes among `candidates` whose creation time matches the recorded one, earliest started first.

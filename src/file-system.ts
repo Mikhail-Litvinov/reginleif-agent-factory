@@ -8,6 +8,7 @@ export type FileStat = { size: number; mtimeMs: number };
 
 export type FileSystem = {
 	readText(path: string): Promise<string>;
+	readHead(path: string, maxBytes: number): Promise<string>;
 	// Size and modification time of a file; null when it does not exist.
 	stat(path: string): Promise<FileStat | null>;
 	// Modification time in milliseconds of a file or a directory; null when neither exists.

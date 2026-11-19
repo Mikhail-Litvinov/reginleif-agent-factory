@@ -7,6 +7,7 @@ import { runCli } from "../src/cli.js";
 import { findCswap, modeCommand, prepareLaunch, resolveLaunch, runSession, transcriptMode } from "../src/commands/session-run.js";
 import { buildLaunchCommand } from "../src/launch-command.js";
 import { messagesFor } from "../src/messages.js";
+import { lookupSession } from "../src/session-core.js";
 import { apiFail, apiOk } from "../src/output.js";
 import { ok } from "../src/result.js";
 import { baseManifest, createMemoryRuntime, seedFeature, seedHubManifest } from "./fakes/memory-runtime.js";
@@ -35,6 +36,17 @@ const setup = () => {
 	h.runtime.clock.sleep = async (ms) => { now += ms; };
 	return h;
 };
+
+test("a session with a drifted record launches in its transcript's original directory", async () => {
+	const h = setup();
+	h.fs.seed(`${ROOT}/sessions/${ID}.json`, JSON.stringify({ ...raw, cwd: "/work/sub" }));
+	h.fs.seed("/transcript", '{"type":"mode"}\n{"cwd":"/work"}\n');
+	h.fs.seed("/usr/bin/tmux", "");
+	const record = await lookupSession(h.runtime, ID);
+	if (!record.ok) throw new Error(record.error.message);
+	const command = await prepare(h, record.value, "", null);
+	expect(command.ok && command.value[command.value.indexOf("-c") + 1]).toBe("/work");
+});
 
 // The launch answer for a directory: the refusal message, or "ok" when the directory passed the check.
 const launchRefusal = async (platform: Platform, cwd: string): Promise<string> => {

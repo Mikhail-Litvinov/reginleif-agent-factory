@@ -94,6 +94,10 @@ export class MemoryFileSystem implements FileSystem {
 		return value;
 	}
 
+	async readHead(path: string, maxBytes: number): Promise<string> {
+		return new TextDecoder().decode(await this.readRange(path, 0, maxBytes));
+	}
+
 	async writeText(path: string, value: string): Promise<void> {
 		this.record(`write:${path}`);
 		this.ensureParentDirectories(path);
