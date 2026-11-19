@@ -20,6 +20,7 @@ const processFile = { pid: 42, pid_created: CREATED, started_at: record.startedA
 const setup = (response: unknown) => {
 	const harness = createMemoryRuntime();
 	harness.fs.seed(`${ROOT}/abc.json`, JSON.stringify(raw));
+	harness.fs.seed("/transcript", "{}");
 	harness.fs.seed(`${ROOT}/abc/usage.json`, "{}");
 	harness.fs.seed(`${ROOT}/abc/processes/42.json`, JSON.stringify(processFile));
 	harness.fs.seed(`${ROOT}/abc/responses/event-1.json`, JSON.stringify({ id: "event-1", ok: true, result: response }));

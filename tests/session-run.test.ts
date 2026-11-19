@@ -30,6 +30,7 @@ const setup = () => {
 	const h = createMemoryRuntime();
 	h.fs.directories.add("/work");
 	h.fs.seed(`${ROOT}/sessions/${ID}.json`, JSON.stringify(raw));
+	h.fs.seed("/transcript", "{}");
 	h.fs.seed(`${ROOT}/state.json`, JSON.stringify({ mode: "dev", paths: { repo: "/repo", hub: "/hub" }, features: {}, records: {}, badPairs: [], pendingHubRestart: null }));
 	let now = 0;
 	h.runtime.clock.now = () => new Date(now);

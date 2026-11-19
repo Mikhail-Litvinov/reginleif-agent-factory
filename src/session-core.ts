@@ -70,7 +70,7 @@ const readProcesses = async (r: RuntimePorts, id: string, legacy: SessionProcess
 	return apiOk(processes);
 };
 
-export const lookupSession = async (r: RuntimePorts, id: string): Promise<ApiResult<SessionRecord>> => {
+const readSession = async (r: RuntimePorts, id: string): Promise<ApiResult<SessionRecord>> => {
 	const m = messagesFor(r.language).session;
 	if (!ID_PATTERN.test(id)) return apiFail(SESSION_BAD_ID, m.badId(id));
 	let value: unknown;
@@ -113,6 +113,26 @@ export const sessionLive = async (r: RuntimePorts, session: SessionRecord): Prom
 	return live.ok ? apiOk(live.value.length > 0) : live;
 };
 
+// A record without a transcript is useful only while a process is still running.
+const retainSession = async (r: RuntimePorts, session: SessionRecord, getLive: () => Promise<ApiResult<SessionProcess[]>>): Promise<ApiResult<SessionRecord>> => {
+	const m = messagesFor(r.language).session;
+	try {
+		if (session.transcriptPath !== null && await r.fs.stat(session.transcriptPath) !== null) return apiOk(session);
+		const live = await getLive();
+		if (!live.ok) return live;
+		if (live.value.length > 0) return apiOk(session);
+		try { await r.fs.remove(joinPath(root(r), `${session.id}.json`)); } catch (e) { if (!missing(e)) throw e; }
+		try { await r.fs.removeDirectoryTree(folder(r, session.id)); } catch (e) { if (!missing(e)) throw e; }
+		return apiFail(SESSION_UNKNOWN, m.unknown(session.id));
+	} catch (e) { return apiFail(SESSION_IO, m.io(errorText(e))); }
+};
+
+export const lookupSession = async (r: RuntimePorts, id: string): Promise<ApiResult<SessionRecord>> => {
+	const session = await readSession(r, id);
+	if (!session.ok) return session;
+	return retainSession(r, session.value, () => liveProcesses(r, session.value));
+};
+
 export const lookupSessionForCommand = async (r: RuntimePorts, id: string, requireLive: boolean): Promise<ApiResult<SessionRecord>> => {
 	const session = await lookupSession(r, id);
 	if (!session.ok || !requireLive) return session;
@@ -147,8 +167,8 @@ export const listSessions = async (r: RuntimePorts): Promise<ApiResult<{ session
 	for (const entry of entries) {
 		if (entry.directory || !entry.name.endsWith(REQUEST_SUFFIX)) continue;
 		const id = entry.name.slice(0, -REQUEST_SUFFIX.length);
-		const record = await lookupSession(r, id);
-		if (!record.ok) { sessions.push({ id, error: record.error }); continue; }
+		const record = await readSession(r, id);
+		if (!record.ok) { if (record.error.code !== SESSION_UNKNOWN) sessions.push({ id, error: record.error }); continue; }
 		records.push(record.value);
 	}
 	// One creation-time query for the processes of all sessions.
@@ -156,14 +176,15 @@ export const listSessions = async (r: RuntimePorts): Promise<ApiResult<{ session
 	const created = pids.length === 0 ? null : await r.process.createdAt(pids);
 	for (const record of records) {
 		const { id, cwd, transcriptPath, startedAt } = record;
-		if (created !== null && !created.ok && checkable(record.processes).length > 0) {
-			sessions.push({ id, error: { code: SESSION_IO, message: messagesFor(r.language).session.io(created.error) } });
-			continue;
-		}
+		const live = created !== null && !created.ok && checkable(record.processes).length > 0
+			? apiFail(SESSION_IO, messagesFor(r.language).session.io(created.error))
+			: apiOk(created !== null && created.ok ? liveAmong(record.processes, created.value) : []);
+		const retained = await retainSession(r, record, async () => live);
+		if (!retained.ok) { if (retained.error.code !== SESSION_UNKNOWN) sessions.push({ id, error: retained.error }); continue; }
+		if (!live.ok) { sessions.push({ id, error: live.error }); continue; }
 		const module = await sessionModule(r, record);
 		if (!module.ok) { sessions.push({ id, error: module.error }); continue; }
-		const live = created !== null && created.ok ? liveAmong(record.processes, created.value) : [];
-		sessions.push({ id, cwd, transcriptPath, pid: live[0]?.pid ?? null, processes: live.map((process) => ({ pid: process.pid, startedAt: process.startedAt })), startedAt, live: live.length > 0, module: module.value });
+		sessions.push({ id, cwd, transcriptPath, pid: live.value[0]?.pid ?? null, processes: live.value.map((process) => ({ pid: process.pid, startedAt: process.startedAt })), startedAt, live: live.value.length > 0, module: module.value });
 	}
 	sessions.sort((a, b) => ("startedAt" in b ? b.startedAt : "").localeCompare("startedAt" in a ? a.startedAt : ""));
 	return apiOk({ sessions });

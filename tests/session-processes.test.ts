@@ -20,6 +20,7 @@ const processFile = (pid: number, created: string, startedAt: string) => JSON.st
 const setup = (running: Record<string, string>) => {
 	const h = createMemoryRuntime();
 	h.fs.seed(`${ROOT}/${ID}.json`, JSON.stringify(record));
+	h.fs.seed("/transcript", "{}");
 	h.fs.seed(`${ROOT}/${ID}/usage.json`, "{}");
 	const table = new Map(Object.entries(running));
 	h.runtime.process.createdAt = async (pids) => ok(Object.fromEntries(pids.map((pid) => [String(pid), table.get(String(pid)) ?? null])));

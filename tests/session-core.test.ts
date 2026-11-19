@@ -19,6 +19,7 @@ const setup = () => {
 	h.fs.seed(`${ROOT}/abc.json`, JSON.stringify(raw));
 	h.fs.seed(`${ROOT}/abc/usage.json`, "{}");
 	h.fs.seed(`${ROOT}/abc/processes/42.json`, JSON.stringify(processFile));
+	h.fs.seed("/transcript", "{}");
 	h.runtime.process.createdAt = async (pids) => ok(Object.fromEntries(pids.map((pid) => [String(pid), CREATED])));
 	let now = 0;
 	h.runtime.clock.now = () => new Date(now);
