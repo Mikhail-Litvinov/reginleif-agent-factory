@@ -267,6 +267,8 @@ def run_event(event, stdin_text, home, env, start_pid, load_table, now):
 
     previous = read_record(path)
     started_at = previous.get("started_at") if previous and isinstance(previous.get("started_at"), str) else iso_seconds(now)
+    cwd = previous.get("cwd") if previous and isinstance(previous.get("cwd"), str) else string_or_null(data, "cwd")
+    transcript_path = previous.get("transcript_path") if previous and isinstance(previous.get("transcript_path"), str) else string_or_null(data, "transcript_path")
     table, pid_error = load_table()
     process = None
     if table is not None:
@@ -283,8 +285,8 @@ def run_event(event, stdin_text, home, env, start_pid, load_table, now):
         })
     record = {
         "session_id": data["session_id"],
-        "cwd": string_or_null(data, "cwd"),
-        "transcript_path": string_or_null(data, "transcript_path"),
+        "cwd": cwd,
+        "transcript_path": transcript_path,
         "config_dir": env.get("CLAUDE_CONFIG_DIR", ""),
         "pid_error": pid_error,
         "started_at": started_at,

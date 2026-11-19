@@ -302,6 +302,22 @@ class SessionRecordTests(unittest.TestCase):
                 self.assertEqual(self.read_process(555)["started_at"], "2026-11-15T11:30:00Z")
                 self.assertEqual(self.process_pids(), [555])
 
+    def test_resume_keeps_the_first_cwd_and_transcript_path(self):
+        self.run_hook("start", self.start_data())
+        self.run_hook("start", self.start_data(source="resume", cwd="C:/work/project/.worktrees/x", transcript_path="C:/work/project/.worktrees/x/transcript.jsonl"), now=LATER)
+        record = self.read()
+        self.assertEqual(record["cwd"], "C:/work/project")
+        self.assertEqual(record["transcript_path"], "C:/t/probe.jsonl")
+
+    def test_start_fills_a_null_previous_cwd_from_the_hook_input(self):
+        self.sessions.mkdir(parents=True)
+        previous = {"session_id": SESSION, "cwd": None, "transcript_path": "C:/t/probe.jsonl", "config_dir": "C:/cfg/1", "pid_error": None, "started_at": "2026-11-15T10:00:00Z"}
+        (self.sessions / f"{SESSION}.json").write_text(json.dumps(previous), encoding="utf-8")
+        self.run_hook("start", self.start_data(source="resume", cwd="C:/work/project/.worktrees/x", transcript_path="C:/work/project/.worktrees/x/transcript.jsonl"))
+        record = self.read()
+        self.assertEqual(record["cwd"], "C:/work/project/.worktrees/x")
+        self.assertEqual(record["transcript_path"], "C:/t/probe.jsonl")
+
     def test_a_second_live_process_keeps_the_first_process_file(self):
         both = multi_table([CLAUDE_INNER, 555], 555)
         self.run_hook("start", self.start_data(), load=self.table_loader(multi_table([CLAUDE_INNER, 555], CLAUDE_INNER)))
