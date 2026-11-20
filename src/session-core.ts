@@ -196,9 +196,14 @@ export const requestSession = async (r: RuntimePorts, session: SessionRecord, op
 	const module = await sessionModule(r, session);
 	if (!module.ok) return module;
 	if (!module.value) return apiFail(SESSION_NO_MODULE, m.noModule());
-	const initialLive = await sessionLive(r, session);
-	if (!initialLive.ok) return initialLive;
-	if (!initialLive.value) return apiFail(SESSION_ENDED, m.ended());
+	const initialPids = checkable(session.processes);
+	let initialCreated: Record<string, string | null> = {};
+	if (initialPids.length > 0) {
+		const checked = await r.process.createdAt(initialPids);
+		if (!checked.ok) return apiFail(SESSION_IO, m.io(errorText(checked.error)));
+		initialCreated = checked.value;
+	}
+	if (liveAmong(session.processes, initialCreated).length === 0) return apiFail(SESSION_ENDED, m.ended());
 	const id = r.ids.next();
 	if (!ID_PATTERN.test(id)) return apiFail(SESSION_IO, m.io(messagesFor(r.language).failure.requestIdInvalid()));
 	const requests = joinPath(folder(r, session.id), "requests");
@@ -211,6 +216,7 @@ export const requestSession = async (r: RuntimePorts, session: SessionRecord, op
 	// The claiming module's Claude pid once its pid file is read, and that pid's creation time once first looked up.
 	let claimant: { pid: number; created: string | null } | null = null;
 	let published = false;
+	let firstPoll = true;
 	try {
 		await r.fs.ensureDirectory(requests);
 		await r.fs.ensureDirectory(responses);
@@ -246,10 +252,21 @@ export const requestSession = async (r: RuntimePorts, session: SessionRecord, op
 				try { pidText = (await r.fs.readText(joinPath(claimDir, CLAIM_PID_FILE))).trim(); } catch (e) { if (!missing(e)) throw e; }
 				if (pidText !== null && PID_PATTERN.test(pidText) && Number.isSafeInteger(Number(pidText))) claimant = { pid: Number(pidText), created: null };
 			}
+			const current = await lookupSession(r, session.id);
+			if (!current.ok) return current;
+			const sessionPids = checkable(current.value.processes);
+			const pollPids = firstPoll
+				? [...new Set([...sessionPids.filter((pid) => !(String(pid) in initialCreated)), ...(claimant === null ? [] : [claimant.pid])])]
+				: [...new Set([...sessionPids, ...(claimant === null ? [] : [claimant.pid])])];
+			let created: Record<string, string | null> = initialCreated;
+			if (pollPids.length > 0) {
+				const queried = await r.process.createdAt(pollPids);
+				if (!queried.ok) return apiFail(SESSION_IO, m.io(queried.error));
+				created = firstPoll ? { ...created, ...queried.value } : queried.value;
+			}
+			firstPoll = false;
 			if (claimant !== null) {
-				const created = await r.process.createdAt([claimant.pid]);
-				if (!created.ok) return apiFail(SESSION_IO, m.io(created.error));
-				const now = created.value[String(claimant.pid)] ?? null;
+				const now = created[String(claimant.pid)] ?? null;
 				if (claimant.created === null && now !== null) {
 					// The claimant existed before it made its claim directory, so a process created after the directory's last change is a stranger that reused the pid.
 					const claimChanged = await r.fs.modifiedAt(claimDir);
@@ -258,11 +275,7 @@ export const requestSession = async (r: RuntimePorts, session: SessionRecord, op
 				claimant.created ??= now;
 				if (now === null || now !== claimant.created) return apiFail(SESSION_CLAIM_LOST, m.claimLost());
 			}
-			const current = await lookupSession(r, session.id);
-			if (!current.ok) return current;
-			const live = await sessionLive(r, current.value);
-			if (!live.ok) return live;
-			if (!live.value) return apiFail(SESSION_ENDED, m.ended());
+			if (liveAmong(current.value.processes, created).length === 0) return apiFail(SESSION_ENDED, m.ended());
 			const remaining = deadline - r.clock.now().getTime();
 			if (remaining <= 0) {
 				return apiFail(SESSION_TIMEOUT, m.timeout());

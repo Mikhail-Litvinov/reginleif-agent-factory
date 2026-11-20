@@ -104,21 +104,33 @@ describe("session core", () => {
 		expect((await w.run()).ok).toBe(true);
 		expect(w.events).toEqual([]);
 	});
-	test("timeout and process exit remove the published request", async () => {
-		for (const exits of [false, true]) {
-			const h = setup();
-			let now = 0;
-			h.runtime.clock.now = () => new Date(now);
-			const calls: number[] = [];
-			h.runtime.process.createdAt = async () => { calls.push(now); return ok({ "42": exits && now > 0 ? null : CREATED }); };
-			h.runtime.clock.sleep = async (ms) => { now += ms; };
-			const events: string[] = [];
-			const answer = await requestSession(h.runtime, record, "usage", {}, SESSION_POLL_MS * 3, (event) => events.push(event.code));
-			expect(answer.ok ? "ok" : answer.error.code).toBe(exits ? "session-ended" : "session-timeout");
-			expect(calls).toEqual([0, SESSION_POLL_MS * 3]);
-			expect(h.fs.files.has(`${ROOT}/abc/requests/event-1.json`)).toBe(false);
-			expect(events).toEqual([]);
-		}
+	// Guards one query per poll and reuses the pre-publish identity check at the first poll's same instant.
+	test("timeout removes the published request after one query per poll", async () => {
+		const h = setup();
+		let now = 0;
+		h.runtime.clock.now = () => new Date(now);
+		const calls: number[] = [];
+		h.runtime.process.createdAt = async () => { calls.push(now); return ok({ "42": CREATED }); };
+		h.runtime.clock.sleep = async (ms) => { now += ms; };
+		const events: string[] = [];
+		const answer = await requestSession(h.runtime, record, "usage", {}, SESSION_POLL_MS * 3, (event) => events.push(event.code));
+		expect(answer.ok ? "ok" : answer.error.code).toBe("session-timeout");
+		expect(calls).toEqual([0, SESSION_POLL_MS, SESSION_POLL_MS * 2, SESSION_POLL_MS * 3]);
+		expect(h.fs.files.has(`${ROOT}/abc/requests/event-1.json`)).toBe(false);
+		expect(events).toEqual([]);
+	});
+	// Guards session-ended at the first poll after process death rather than waiting for the deadline.
+	test("process exit removes the published request at the first dead-process poll", async () => {
+		const h = setup();
+		let now = 0;
+		h.runtime.clock.now = () => new Date(now);
+		const calls: number[] = [];
+		h.runtime.process.createdAt = async () => { calls.push(now); return ok({ "42": now === 0 ? CREATED : null }); };
+		h.runtime.clock.sleep = async (ms) => { now += ms; };
+		const answer = await requestSession(h.runtime, record, "usage", {}, SESSION_POLL_MS * 3);
+		expect(answer.ok ? "ok" : answer.error.code).toBe("session-ended");
+		expect(calls).toEqual([0, SESSION_POLL_MS]);
+		expect(h.fs.files.has(`${ROOT}/abc/requests/event-1.json`)).toBe(false);
 	});
 	// A claim as the module leaves it: the directory, and its Claude pid when the module knows it.
 	const CLAIMANT = 77;
@@ -189,6 +201,7 @@ describe("session core", () => {
 		expect(answer.ok ? "ok" : answer.error.code).toBe("session-timeout");
 		expect(w.now()).toBe(LONG_SILENCE_MS);
 	});
+	// Guards that no query runs once removed files leave no checkable process.
 	test("removed process files stop waiting without another process query", async () => {
 		const h = setup();
 		let calls = 0;
@@ -197,6 +210,26 @@ describe("session core", () => {
 		const answer = await requestSession(h.runtime, record, "usage", {}, SESSION_POLL_MS * 3);
 		expect(answer.ok ? "ok" : answer.error.code).toBe("session-ended");
 		expect(calls).toBe(1);
+	});
+	test("a claimant and live session share one creation-time query", async () => {
+		const h = setup();
+		const calls: number[][] = [];
+		h.runtime.process.createdAt = async (pids) => {
+			calls.push([...pids]);
+			return ok(Object.fromEntries(pids.map((pid) => [String(pid), pid === 42 ? CREATED : CLAIMANT_CREATED])));
+		};
+		let poll = 0;
+		h.runtime.clock.sleep = async (ms) => {
+			poll++;
+			h.fs.directories.add(`${ROOT}/abc/claims/event-1`);
+			// The claimant existed before it made its claim directory (otherwise rig reads the pid as reused).
+			h.fs.mtimes.set(`${ROOT}/abc/claims/event-1`, Date.parse(CLAIMANT_CREATED) + CLAIM_AFTER_CLAIMANT_MS);
+			h.fs.seed(`${ROOT}/abc/claims/event-1/pid`, String(CLAIMANT));
+			if (poll === 2) h.fs.seed(`${ROOT}/abc/responses/event-1.json`, JSON.stringify({ id: "event-1", ok: true, result: 1 }));
+		};
+		const answer = await requestSession(h.runtime, record, "compact", {}, SESSION_POLL_MS * 4);
+		expect(answer).toEqual(apiOk(1));
+		expect(calls).toEqual([[42], [42, CLAIMANT]]);
 	});
 	test("a dead claimed session ends after one poll when its process file remains", async () => {
 		const h = setup();
