@@ -397,7 +397,7 @@ describe("session ending ownership", () => {
 				const h = setup();
 				h.fs.files.delete(TRANSCRIPT);
 				h.identities[String(h.runtime.lock.process.pid)] = identity;
-				h.fs.seed(MARKER, JSON.stringify({ pid: h.runtime.lock.process.pid, pidCreated: FAKE_OWNER_CREATED, token: "launching", launch: { startedAt: 0, registrationWaitMs: LAUNCH_REGISTRATION_WAIT_MS }, takenOver: false, otherOwners: [] }));
+				h.fs.seed(MARKER, JSON.stringify({ pid: h.runtime.lock.process.pid, pidCreated: FAKE_OWNER_CREATED, token: "launching", launch: { registrationDeadline: LAUNCH_REGISTRATION_WAIT_MS }, takenOver: false, otherOwners: [] }));
 				const stopping = h.caller();
 				const advance = stopping.clock.sleep;
 				const registrationAt = registration === "before-deadline" ? LAUNCH_REGISTRATION_WAIT_MS - SESSION_POLL_MS : LAUNCH_REGISTRATION_WAIT_MS;

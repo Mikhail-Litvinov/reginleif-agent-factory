@@ -29,11 +29,8 @@ const parseOwner = (value: unknown): Owner | null => {
 	const launch = "launch" in value ? value.launch : null;
 	if (launch !== null) {
 		if (typeof launch !== "object" || Array.isArray(launch)) return null;
-		let deadline: number;
-		if ("registrationDeadline" in launch && typeof launch.registrationDeadline === "number" && Number.isFinite(launch.registrationDeadline)) deadline = launch.registrationDeadline;
-		else if ("startedAt" in launch && typeof launch.startedAt === "number" && Number.isFinite(launch.startedAt) && "registrationWaitMs" in launch && typeof launch.registrationWaitMs === "number" && Number.isFinite(launch.registrationWaitMs) && launch.registrationWaitMs > 0) deadline = launch.startedAt + launch.registrationWaitMs;
-		else return null;
-		return { pid: value.pid, pidCreated: value.pidCreated, token: value.token, launch: { registrationDeadline: deadline } };
+		if (!("registrationDeadline" in launch) || typeof launch.registrationDeadline !== "number" || !Number.isFinite(launch.registrationDeadline)) return null;
+		return { pid: value.pid, pidCreated: value.pidCreated, token: value.token, launch: { registrationDeadline: launch.registrationDeadline } };
 	}
 	return { pid: value.pid, pidCreated: value.pidCreated, token: value.token, launch: null };
 };

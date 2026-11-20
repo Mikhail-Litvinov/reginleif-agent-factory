@@ -257,6 +257,16 @@ describe("lock when waiting is not wanted", () => {
 		expect(result).toEqual(ok(null));
 	});
 
+	test("tryAcquireLock reports busy when the lock vanishes between its create and read, without retrying", async () => {
+		const fs = new MemoryFileSystem();
+		let creates = 0;
+		fs.writeExclusive = async () => { creates += 1; return ok(false); };
+		fs.readText = async () => { throw Object.assign(new Error("gone"), { code: "ENOENT" }); };
+		const result = await tryAcquireLock(dependenciesFor(fs, FIRST_PID, FIRST_START, liveOwners(new Map()), async () => { throw new Error("must not wait"); }));
+		expect(result).toEqual(ok(null));
+		expect(creates).toBe(1);
+	});
+
 	test("tryAcquireLock takes a free lock", async () => {
 		const fs = new MemoryFileSystem();
 		const result = await tryAcquireLock(dependenciesFor(fs, FIRST_PID, FIRST_START, liveOwners(new Map())));

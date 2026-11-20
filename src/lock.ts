@@ -185,6 +185,9 @@ const acquire = async (dependencies: LockDependencies, onWait: ((problem?: LockP
 				existingText = await fs.readText(lockPath);
 			} catch (error) {
 				if (isMissing(error)) {
+					// The holder released between our create and read: a non-waiting caller reports busy rather than
+					// retrying, so sustained contention cannot keep it from returning.
+					if (onWait === null) return ok(null);
 					await dependencies.clock.sleep(0);
 					continue;
 				}
