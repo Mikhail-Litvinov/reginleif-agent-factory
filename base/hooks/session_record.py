@@ -31,8 +31,6 @@ SESSIONS_DIR_PARTS = (".agent-rig", "sessions")
 PROCESSES_DIR_NAME = "processes"
 PROC_STAT_STARTTIME_INDEX = 19
 PROC_STAT_PPID_INDEX = 1
-# A retirement can remove the parent or temporary pathname during a write; recreate both once.
-ATOMIC_WRITE_ATTEMPTS = 2
 WINDOWS_TABLE_COMMAND = (
     "$ErrorActionPreference = 'Stop'; Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,"
     "@{n='Created';e={if($_.CreationDate){$_.CreationDate.ToFileTimeUtc()}else{0}}} | ConvertTo-Json -Compress"
@@ -192,23 +190,16 @@ def read_record(path):
 
 
 def write_json_atomic(path, data):
-    for attempt in range(ATOMIC_WRITE_ATTEMPTS):
-        temp = None
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            fd, temp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump(data, handle, indent=2)
-                handle.write("\n")
-            os.replace(temp, path)
-            return
-        except FileNotFoundError:
-            if attempt == ATOMIC_WRITE_ATTEMPTS - 1:
-                raise
-        finally:
-            if temp is not None:
-                with contextlib.suppress(OSError):
-                    os.unlink(temp)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=2)
+            handle.write("\n")
+        os.replace(temp, path)
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(temp)
 
 
 def string_or_null(data, key):
@@ -284,8 +275,7 @@ def run_event(event, stdin_text, home, env, start_pid, load_table, now):
         migrate_legacy_process(previous, processes_dir, table)
         delete_dead_process_files(processes_dir, table)
     if process is not None:
-        # Publish registration before the record: rig may detach an expired record and recheck processes.
-        # Rig recovers a live registration from a retired folder; atomic writes retry if it moves mid-write.
+        # Publish the process first so a newly published record has its live registration.
         write_json_atomic(processes_dir / f"{process.pid}.json", {
             "pid": process.pid,
             "pid_created": iso_micro_from_us(process.created_us) if process.created_us is not None else None,

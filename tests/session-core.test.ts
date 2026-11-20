@@ -28,6 +28,12 @@ const setup = () => {
 };
 
 describe("session core", () => {
+	test("a record removed during a request ends the session", async () => {
+		const h = setup();
+		h.runtime.clock.sleep = async () => { await h.fs.remove(`${ROOT}/abc.json`); };
+		const answer = await requestSession(h.runtime, record, "usage", {}, SESSION_POLL_MS * 3);
+		expect(answer.ok ? "ok" : answer.error.code).toBe("session-ended");
+	});
 	test("rejects unsafe and unknown ids before accessing their paths", async () => {
 		const h = setup();
 		for (const id of ["../abc", "a/b", "a.b", "x".repeat(65)]) {

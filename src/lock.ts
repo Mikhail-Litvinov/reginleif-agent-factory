@@ -7,8 +7,6 @@ import { err, errorText, ok } from "./result.js";
 
 // One initial probe and three retries allow transient process-query failures to clear without hanging callers indefinitely.
 const MAX_CONSECUTIVE_PROBE_FAILURES = 4;
-// Kept for callers checking the age of legacy takeover files during migration.
-export const TAKEOVER_STALE_MS = 30_000;
 
 export type LockOwner = { pid: number; startTime: number };
 type LockRecord = LockOwner & { token: string };
@@ -74,7 +72,8 @@ const cleanClaims = async (fs: FileSystem, lockPath: string, token: string): Pro
 		if (!entry.directory && entry.name === `${lockPath.slice(separator + 1)}.takeover`) {
 			await fs.remove(joinPath(directory, entry.name)).catch(() => undefined);
 		}
-		if (!entry.directory && entry.name.startsWith(prefix) && !entry.name.startsWith(`${prefix}${token}.`)) {
+		const claim = entry.name.startsWith(prefix) ? entry.name.slice(prefix.length).match(/^([a-zA-Z0-9-]+)\.[0-9]+$/) : null;
+		if (!entry.directory && claim !== null && claim[1] !== token) {
 			await fs.remove(joinPath(directory, entry.name)).catch(() => undefined);
 		}
 	}
@@ -101,7 +100,7 @@ const createHandle = (fs: FileSystem, lockPath: string, owner: LockRecord, messa
 type Recovery = { kind: "acquired" } | { kind: "wait" } | { kind: "read-failure"; cause: unknown } | { kind: "problem"; problem: LockProbeProblem };
 
 // Each generation can advance only after every earlier recoverer is dead. The lock is replaced atomically, never removed.
-const takeOverStale = async (fs: FileSystem, lockPath: string, stale: LockRecord, owner: LockRecord, dependencies: LockDependencies): Promise<Result<Recovery>> => {
+const takeOverStale = async (fs: FileSystem, lockPath: string, stale: LockRecord, owner: LockRecord, dependencies: LockDependencies, canWait: boolean): Promise<Result<Recovery>> => {
 	for (let generation = 0; ; generation += 1) {
 		const path = `${lockPath}.recover-${stale.token}.${generation}`;
 		const created = await fs.writeExclusive(path, `${JSON.stringify(owner)}\n`);
@@ -112,23 +111,28 @@ const takeOverStale = async (fs: FileSystem, lockPath: string, stale: LockRecord
 				await fs.remove(path).catch(() => undefined);
 				return isMissing(error) ? ok({ kind: "wait" }) : ok({ kind: "read-failure", cause: error });
 			}
-			if (current?.token !== stale.token) {
+			if (current === null) {
+				await fs.remove(path).catch(() => undefined);
+				return ok({ kind: "read-failure", cause: dependencies.messages.failure.lockMalformed() });
+			}
+			if (current.token !== stale.token) {
 				await fs.remove(path).catch(() => undefined);
 				return ok({ kind: "wait" });
 			}
 			const replaced = await atomicWrite(fs, lockPath, `${JSON.stringify(owner)}\n`, dependencies.messages);
 			if (!replaced.ok) {
 				await fs.remove(path).catch(() => undefined);
-				return replaced;
+				return ok({ kind: "read-failure", cause: replaced.error });
 			}
 			return ok({ kind: "acquired" });
 		}
+		if (!canWait) return ok({ kind: "wait" });
 		let text: string;
 		try { text = await fs.readText(path); } catch (error) {
 			return isMissing(error) ? ok({ kind: "wait" }) : ok({ kind: "read-failure", cause: error });
 		}
 		const recoverer = parseOwner(text);
-		if (recoverer === null) return err(dependencies.messages.failure.lockMalformed());
+		if (recoverer === null) return ok({ kind: "read-failure", cause: dependencies.messages.failure.lockMalformed() });
 		const running = await ownerMayBeRunning(recoverer, dependencies);
 		if (!running.ok) return ok({ kind: "problem", problem: { pid: recoverer.pid, error: running.error } });
 		if (running.value) return ok({ kind: "wait" });
@@ -205,7 +209,7 @@ const acquire = async (dependencies: LockDependencies, onWait: ((problem?: LockP
 				if (!waited.ok) return waited;
 				continue;
 			}
-			const recovery = await takeOverStale(fs, lockPath, existing, owner, dependencies);
+			const recovery = await takeOverStale(fs, lockPath, existing, owner, dependencies, onWait !== null);
 			if (!recovery.ok) return recovery;
 			if (recovery.value.kind === "read-failure") {
 				const waited = await readFailure(errorText(recovery.value.cause));
@@ -230,5 +234,5 @@ export const acquireLock = async (dependencies: LockDependencies, onWait: (probl
 	return acquired.value === null ? err(dependencies.messages.failure.lockHeld()) : ok(acquired.value);
 };
 
-// Takes the lock only if it is free right now; ok(null) means another live process holds it.
+// Takes the lock only if it is free right now; ok(null) means acquisition would require waiting.
 export const tryAcquireLock = (dependencies: LockDependencies): Promise<Result<LockHandle | null>> => acquire(dependencies, null);

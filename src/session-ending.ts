@@ -87,128 +87,16 @@ const guarded = async <T>(runtime: RuntimePorts, id: string, action: () => Promi
 	return !released.ok && result.ok ? io(runtime, released.error) : result;
 };
 
-type ReadLiveRegistration = (folderId: string) => Promise<ApiResult<number[]>>;
-
-// Never replace a record or process file that a newer hook has already published.
-const restoreRetiredRecord = async (runtime: RuntimePorts, path: string, retired: string): Promise<ApiResult<void>> => {
-	const restored = await runtime.fs.writeExclusive(path, await runtime.fs.readText(retired));
-	return restored.ok ? apiOk(undefined) : io(runtime, restored.error);
-};
-
-const restoreRetiredFolder = async (runtime: RuntimePorts, directory: string, id: string, retiredId: string, livePids: number[] | null): Promise<ApiResult<void>> => {
-	const target = joinPath(directory, id);
-	const source = joinPath(directory, retiredId);
-	if (await runtime.fs.modifiedAt(target) === null) {
-		try { await runtime.fs.rename(source, target); return apiOk(undefined); }
-		catch (error) { if (await runtime.fs.modifiedAt(target) === null) return io(runtime, errorText(error)); }
-	}
-	const processes = joinPath(source, "processes");
-	const names = livePids === null
-		? (await runtime.fs.listDirectory(processes)).filter((entry) => !entry.directory).map((entry) => entry.name)
-		: livePids.map((pid) => `${pid}.json`);
-	const destination = joinPath(target, "processes");
-	await runtime.fs.ensureDirectory(destination);
-	for (const name of names) {
-		const restored = await runtime.fs.writeExclusive(joinPath(destination, name), await runtime.fs.readText(joinPath(processes, name)));
-		// Leave the source intact if publication fails; the next guarded sweep retries it.
-		if (!restored.ok) return io(runtime, restored.error);
-	}
-	await runtime.fs.removeDirectoryTree(source);
-	return apiOk(undefined);
-};
-
-// Holding the guard proves that every retirement for this id belongs to an interrupted remover.
-const sweepRetirements = async (runtime: RuntimePorts, id: string, readLive: ReadLiveRegistration): Promise<ApiResult<boolean>> => {
+// The caller has already established that neither transcript nor session process remains.
+export const removeSessionUnlessEnding = async (runtime: RuntimePorts, id: string): Promise<ApiResult<boolean>> => guarded(runtime, id, async () => {
+	const live = await sessionEndingLive(runtime, id);
+	if (!live.ok) return live;
+	if (live.value) return apiOk(false);
 	const directory = joinPath(runtime.home, ".agent-rig", "sessions");
-	const entries = await runtime.fs.listDirectory(directory);
-	const records = entries.filter((entry) => !entry.directory && entry.name.startsWith(`${id}.json.retired-`));
-	const folders = entries.filter((entry) => entry.directory && entry.name.startsWith(`${id}.retired-`));
-	for (const entry of records) {
-		const retired = joinPath(directory, entry.name);
-		const restored = await restoreRetiredRecord(runtime, joinPath(directory, `${id}.json`), retired);
-		if (!restored.ok) return restored;
-		await runtime.fs.remove(retired);
-	}
-	for (const entry of folders) {
-		const live = await readLive(entry.name);
-		if (!live.ok) return live;
-		if (live.value.length > 0) {
-			const restored = await restoreRetiredFolder(runtime, directory, id, entry.name, live.value);
-			if (!restored.ok) return restored;
-		} else await runtime.fs.removeDirectoryTree(joinPath(directory, entry.name));
-	}
-	return apiOk(records.length > 0 || folders.length > 0);
-};
-
-export const recoverSessionRemoval = async (runtime: RuntimePorts, id: string, readLive: ReadLiveRegistration): Promise<ApiResult<boolean>> => {
-	let registrationFailed = false;
-	const result = await guarded(runtime, id, () => sweepRetirements(runtime, id, async (folderId) => {
-		const live = await readLive(folderId);
-		if (!live.ok) registrationFailed = true;
-		return live;
-	}));
-	return result.ok || registrationFailed ? result : apiOk(false);
-};
-
-// Detach each generation under the ending guard; registration after the folder rename gets a new folder.
-export const removeSessionUnlessEnding = async (runtime: RuntimePorts, id: string, keepRegistered: () => Promise<ApiResult<boolean>>, readLive: ReadLiveRegistration): Promise<ApiResult<boolean>> => {
-	let registrationFailed = false;
-	const inspect: ReadLiveRegistration = async (folderId) => {
-		const live = await readLive(folderId);
-		if (!live.ok) registrationFailed = true;
-		return live;
-	};
-	const result = await guarded(runtime, id, async () => {
-		const swept = await sweepRetirements(runtime, id, inspect);
-		if (!swept.ok) return swept;
-		const live = await sessionEndingLive(runtime, id);
-		if (!live.ok) { registrationFailed = true; return live; }
-		if (live.value) return apiOk(false);
-		const directory = joinPath(runtime.home, ".agent-rig", "sessions");
-		const path = joinPath(directory, `${id}.json`);
-		const retired = `${path}.retired-${runtime.fs.uniqueSuffix()}`;
-		const retiredId = `${id}.retired-${runtime.fs.uniqueSuffix()}`;
-		let detached = false;
-		const restore = async (): Promise<ApiResult<void>> => {
-			if (!detached) return apiOk(undefined);
-			const restored = await restoreRetiredRecord(runtime, path, retired);
-			if (restored.ok) { await runtime.fs.remove(retired); detached = false; }
-			return restored;
-		};
-		try {
-			try { await runtime.fs.rename(path, retired); detached = true; }
-			catch (error) { if (!missing(error)) return apiOk(false); }
-			const keep = await keepRegistered();
-			if (!keep.ok || keep.value) {
-				if (!keep.ok) registrationFailed = true;
-				await restore();
-				return keep.ok ? apiOk(false) : keep;
-			}
-			let moved = false;
-			try { await runtime.fs.rename(joinPath(directory, id), joinPath(directory, retiredId)); moved = true; }
-			catch (error) {
-				if (!missing(error)) { await restore(); return apiOk(false); }
-			}
-			if (moved) {
-				const registered = await inspect(retiredId);
-				if (!registered.ok || registered.value.length > 0) {
-					const restored = await restoreRetiredFolder(runtime, directory, id, retiredId, registered.ok ? registered.value : null);
-					// Keep the detached record paired with an unrecovered folder if restoration was interrupted.
-					if (restored.ok) await restore();
-					return registered.ok ? apiOk(false) : registered;
-				}
-				await runtime.fs.removeDirectoryTree(joinPath(directory, retiredId));
-			}
-			if (detached) { await runtime.fs.remove(retired); detached = false; }
-			return apiOk(await runtime.fs.stat(path) === null);
-		} catch {
-			// Filesystem contention only postpones collection. Preserve recovery artifacts if restoration fails.
-			try { await restore(); } catch { /* A later lookup retries under the guard. */ }
-			return apiOk(false);
-		}
-	});
-	return result.ok || registrationFailed ? result : apiOk(false);
-};
+	await runtime.fs.remove(joinPath(directory, `${id}.json`));
+	await runtime.fs.removeDirectoryTree(joinPath(directory, id));
+	return apiOk(true);
+});
 
 type Entered = { marker: Marker; interrupted: boolean };
 
@@ -278,6 +166,7 @@ export const withSessionEnding = async <T>(runtime: RuntimePorts, id: string, ac
 	const released = await guarded(runtime, id, async () => {
 		const current = await readMarker(runtime, path);
 		if (!current.ok) return current;
+		// A missing marker cannot prove ownership, so release reports takeover.
 		if (current.value === null) return apiOk(true);
 		const owners = [current.value, ...current.value.otherOwners];
 		const remaining = owners.filter((owner) => owner.token !== marker.token);

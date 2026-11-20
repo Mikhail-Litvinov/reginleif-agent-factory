@@ -244,6 +244,27 @@ describe("lock when the owner cannot be inspected", () => {
 });
 
 describe("lock when waiting is not wanted", () => {
+	test("a dead recovery claim reports busy without sleeping or advancing", async () => {
+		const fs = new MemoryFileSystem();
+		fs.seed(LOCK_PATH, JSON.stringify({ pid: DEAD_PID, startTime: DEAD_START }));
+		fs.seed(CLAIM_PATH, JSON.stringify({ pid: SECOND_PID, startTime: SECOND_START }));
+		const result = await tryAcquireLock(dependenciesFor(fs, FIRST_PID, FIRST_START, liveOwners(new Map()), async () => { throw new Error("must not wait"); }));
+		expect(result).toEqual(ok(null));
+		expect(fs.files.has(`${LOCK_PATH}.recover-${STALE_TOKEN}.1`)).toBe(false);
+	});
+
+	test("cleanup preserves another contender's unfinished claim files", async () => {
+		const fs = new MemoryFileSystem();
+		const temporary = `${CLAIM_PATH}.another-uuid.tmp`;
+		fs.seed(temporary, "in progress");
+		fs.seed(CLAIM_PATH, "finished");
+		const result = await tryAcquireLock(dependenciesFor(fs, FIRST_PID, FIRST_START, liveOwners(new Map())));
+		expect(result.ok && result.value !== null).toBe(true);
+		expect(fs.files.has(temporary)).toBe(true);
+		expect(fs.files.has(CLAIM_PATH)).toBe(false);
+		if (result.ok && result.value !== null) await result.value.release();
+		expect(fs.files.has(temporary)).toBe(true);
+	});
 	test("tryAcquireLock returns null at once while a live owner holds the lock", async () => {
 		const fs = new MemoryFileSystem();
 		fs.seed(LOCK_PATH, JSON.stringify({ pid: SECOND_PID, startTime: SECOND_START }));
@@ -285,6 +306,35 @@ describe("lock file creation failure", () => {
 });
 
 describe("lock file read failure", () => {
+	for (const failure of ["malformed claim", "atomic replace"]) {
+		for (const persistent of [false, true]) {
+			test(`${failure} ${persistent ? "exhausts the budget" : "recovers within the budget"}`, async () => {
+				const fs = new MemoryFileSystem();
+				fs.seed(LOCK_PATH, JSON.stringify({ pid: DEAD_PID, startTime: DEAD_START }));
+				if (failure === "malformed claim") fs.seed(CLAIM_PATH, "invalid");
+				let failures = 0;
+				let sleeps = 0;
+				const rename = fs.rename.bind(fs);
+				fs.rename = async (from, to) => {
+					if (failure === "atomic replace" && (persistent || failures < RETRIES_BEFORE_FAILURE)) {
+						failures += 1;
+						throw new Error("sharing violation");
+					}
+					return rename(from, to);
+				};
+				const result = await acquireLock(dependenciesFor(fs, FIRST_PID, FIRST_START, liveOwners(new Map()), async () => {
+					sleeps += 1;
+					if (failure === "malformed claim") {
+						failures += 1;
+						if (!persistent && failures === RETRIES_BEFORE_FAILURE) fs.files.delete(CLAIM_PATH);
+					}
+				}), ignoreNotice);
+				expect(result.ok).toBe(!persistent);
+				expect(sleeps).toBe(RETRIES_BEFORE_FAILURE);
+				if (failure === "atomic replace") expect(failures).toBe(persistent ? READ_FAILURE_LIMIT : RETRIES_BEFORE_FAILURE);
+			});
+		}
+	}
 	test("persistent read errors end acquisition after the probe limit with sleeps between attempts", async () => {
 		const fs = new MemoryFileSystem();
 		fs.seed(LOCK_PATH, JSON.stringify({ pid: DEAD_PID, startTime: DEAD_START }));

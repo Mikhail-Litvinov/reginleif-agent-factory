@@ -4,6 +4,7 @@ import type { SessionRecord } from "../src/session-core.js";
 import { describe, expect, test } from "bun:test";
 
 import { runCli } from "../src/cli.js";
+import { messagesFor } from "../src/messages.js";
 import { cleanupSession } from "../src/commands/session-cleanup.js";
 import { launchRegistrationDeadline, LAUNCH_REGISTRATION_WAIT_MS, modeCommand } from "../src/commands/session-run.js";
 import { stopSession } from "../src/commands/session-stop.js";
@@ -126,13 +127,54 @@ describe("session ending ownership", () => {
 			expect(await stopping).toEqual(apiOk({ session: ID, stopped: true, compacted: null }));
 			const result = await first;
 			expect(code(result)).toBe(operation === "cleanup" ? "session-ended" : operation === "mode" ? "session-ending" : "ok");
-			if (operation === "stop") expect(result).toEqual(apiOk({ session: ID, stopped: false, reason: "not-running" } as const));
+			if (operation === "stop") expect(result).toEqual(apiOk({ session: ID, stopped: false, reason: "not-running", compacted: { error: messagesFor(h.runtime.language).session.ended() } } as const));
 			expect(await h.fs.readText(TRANSCRIPT)).toBe(SKILLS);
 			expect((await h.fs.listDirectory("/transcripts")).map((entry) => entry.name)).toEqual([`${ID}.jsonl`]);
 			expect(launches).toBe(0);
 			expect(await h.fs.stat(MARKER)).toBeNull();
 		});
 	}
+
+	for (const operation of ["stop", "cleanup"] as const) {
+		test(`${operation} ends processes registered during compaction`, async () => {
+			const h = setup();
+			if (operation === "stop") h.response("event-1", { context: { tokens: TOKENS_BEFORE } });
+			const paused = h.pause();
+			const ending = operation === "stop" ? stopSession(h.runtime, SESSION, () => {}) : cleanupSession(h.runtime, SESSION, () => {});
+			try {
+				await paused.waiting;
+				h.identities[String(LAUNCHED_PID)] = LAUNCHED_CREATED;
+				h.fs.seed(`${DIRECTORY}/processes/${LAUNCHED_PID}.json`, JSON.stringify({ pid: LAUNCHED_PID, pid_created: LAUNCHED_CREATED, started_at: "start" }));
+				h.response(operation === "stop" ? "event-2" : "event-1", { tokensBefore: TOKENS_BEFORE, tokensAfter: TOKENS_AFTER });
+			} finally { paused.resume(); }
+			expect(code(await ending)).toBe("ok");
+			expect(h.killed).toContain(LAUNCHED_PID);
+		});
+		test(`${operation} handles a record removed during compaction`, async () => {
+			const h = setup();
+			if (operation === "stop") h.response("event-1", { context: { tokens: TOKENS_BEFORE } });
+			const paused = h.pause();
+			const ending = operation === "stop" ? stopSession(h.runtime, SESSION, () => {}) : cleanupSession(h.runtime, SESSION, () => {});
+			try {
+				await paused.waiting;
+				h.fs.files.delete(`${ROOT}/sessions/${ID}.json`);
+				for (const process of SESSION.processes) h.fs.files.delete(`${DIRECTORY}/processes/${process.pid}.json`);
+				h.response(operation === "stop" ? "event-2" : "event-1", { tokensBefore: TOKENS_BEFORE, tokensAfter: TOKENS_AFTER });
+			} finally { paused.resume(); }
+			const result = await ending;
+			if (operation === "stop") expect(result).toEqual(apiOk({ session: ID, stopped: false, reason: "not-running", compacted: { tokensBefore: TOKENS_BEFORE, tokensAfter: TOKENS_AFTER } } as const));
+			else expect(code(result)).toBe("session-ended");
+			expect(h.killed).toEqual([]);
+		});
+	}
+
+	test("a takeover accepts a vanished session record", async () => {
+		const h = setup();
+		h.fs.seed(MARKER, JSON.stringify({ pid: OTHER_OWNER_PID, pidCreated: OTHER_OWNER_CREATED, token: "owner", takenOver: false, otherOwners: [] }));
+		h.runtime.clock.sleep = async () => { h.identities[String(OTHER_OWNER_PID)] = null; };
+		h.fs.files.delete(`${ROOT}/sessions/${ID}.json`);
+		expect(await stopSession(h.runtime, SESSION, () => {})).toEqual(apiOk({ session: ID, stopped: false, reason: "not-running" }));
+	});
 
 	test("a takeover after mode's stop but before spawn still prevents relaunch", async () => {
 		const h = setup();

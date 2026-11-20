@@ -95,6 +95,18 @@ describe("session stop and cleanup", () => {
 		expect(result.ok && result.value).toEqual({ session: "abc", stopped: false, reason: "not-running" });
 		expect(events).toEqual([]);
 	});
+	test("a stop retains a skipped compaction when the record disappears", async () => {
+		const h = setup();
+		response(h, "event-1", { context: { tokens: 120_001 } });
+		response(h, "event-2", { skip: "vetoed" });
+		const result = await stopSession(h.runtime, SESSION, (event) => {
+			if (event.code === "session-terminating") {
+				h.fs.files.delete(`${ROOT}/abc.json`);
+				h.fs.files.delete(`${ROOT}/abc/processes/42.json`);
+			}
+		});
+		expect(result).toEqual(apiOk({ session: "abc", stopped: false, reason: "not-running", compacted: { skip: "vetoed" } } as const));
+	});
 	test("does not kill a reused PID and reports exit timeout", async () => {
 		const h = setup();
 		let kills = 0;

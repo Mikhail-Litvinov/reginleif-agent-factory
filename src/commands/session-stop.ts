@@ -3,9 +3,9 @@ import type { RuntimePorts } from "../ports.js";
 import type { SessionProcess, SessionRecord } from "../session-core.js";
 import type { SessionEnding } from "../session-ending.js";
 
-import { apiFail, apiOk, PROGRESS_CODE_SESSION_COMPACTING, PROGRESS_CODE_SESSION_TERMINATING, SESSION_IO, SESSION_STOP_TIMEOUT } from "../output.js";
+import { apiFail, apiOk, PROGRESS_CODE_SESSION_COMPACTING, PROGRESS_CODE_SESSION_TERMINATING, SESSION_IO, SESSION_STOP_TIMEOUT, SESSION_UNKNOWN } from "../output.js";
 import { messagesFor } from "../messages.js";
-import { compactSessionCore, liveAmong, liveProcesses, processKey, readSession, requestSession, sessionLive, SESSION_POLL_MS, SESSION_TIMEOUTS } from "../session-core.js";
+import { compactSessionCore, liveAmong, liveProcesses, lookupSession, processKey, readSession, requestSession, sessionLive, SESSION_POLL_MS, SESSION_TIMEOUTS } from "../session-core.js";
 import { withSessionEnding } from "../session-ending.js";
 
 // A stop compacts the session first only when it holds more tokens than this. The threshold is rig's own; its origin is not recorded in this repo.
@@ -14,7 +14,7 @@ const STOP_COMPACT_TOKENS = 120_000;
 const STOP_TIMEOUT_MS = 15_000;
 
 type Compact = { tokensBefore: number; tokensAfter: number } | { skip: string } | { error: string };
-type StopResult = { session: string; stopped: false; reason: "not-running" } | { session: string; stopped: true; compacted: Compact | null };
+type StopResult = { session: string; stopped: false; reason: "not-running"; compacted?: Compact } | { session: string; stopped: true; compacted: Compact | null };
 const object = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 
 export const endSession = async (runtime: RuntimePorts, session: SessionRecord): Promise<ApiResult<boolean>> => {
@@ -59,9 +59,12 @@ export const stopEndingSession = async (runtime: RuntimePorts, session: SessionR
 		}
 	}
 	progress({ code: PROGRESS_CODE_SESSION_TERMINATING });
-	const stopped = await endSession(runtime, session);
+	const current = await lookupSession(runtime, session.id);
+	if (!current.ok && current.error.code !== SESSION_UNKNOWN) return current;
+	const stopped = current.ok ? await endSession(runtime, current.value) : apiOk(false);
 	if (!stopped.ok) return stopped;
-	return stopped.value ? apiOk({ session: session.id, stopped: true, compacted }) : apiOk({ session: session.id, stopped: false, reason: "not-running" });
+	if (stopped.value) return apiOk({ session: session.id, stopped: true, compacted });
+	return compacted === null ? apiOk({ session: session.id, stopped: false, reason: "not-running" }) : apiOk({ session: session.id, stopped: false, reason: "not-running", compacted });
 };
 
 export const stopSession = (runtime: RuntimePorts, session: SessionRecord, progress: (event: ProgressEvent) => void): Promise<ApiResult<StopResult>> => withSessionEnding<StopResult>(runtime, session.id,
@@ -75,8 +78,8 @@ export const stopSession = (runtime: RuntimePorts, session: SessionRecord, progr
 		// A dead owner's in-flight launch keeps the wait alive through its registration deadline.
 		for (;;) {
 			const current = await readSession(runtime, session.id);
-			if (!current.ok) return current;
-			const candidates = new Map(current.value.processes.map((process) => [processKey(process), process]));
+			if (!current.ok && current.error.code !== SESSION_UNKNOWN) return current;
+			const candidates = new Map((current.ok ? current.value.processes : []).map((process) => [processKey(process), process]));
 			for (const [key, pending] of terminating) candidates.set(key, pending.process);
 			const processes = [...candidates.values()];
 			const observed = await observe(processes.filter((process) => process.pidCreated !== null).map((process) => process.pid));
