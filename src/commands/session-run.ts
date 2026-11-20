@@ -29,6 +29,7 @@ const DEFAULT_TIMEOUT_SEC = 90;
 const MS_PER_SECOND = 1000;
 // The registration allowance used by launch polling and by stop after a launching owner dies.
 export const LAUNCH_REGISTRATION_WAIT_MS = DEFAULT_TIMEOUT_SEC * MS_PER_SECOND;
+export const launchRegistrationDeadline = (startedAt: number): number => startedAt + LAUNCH_EXIT_GRACE_MS + LAUNCH_REGISTRATION_WAIT_MS;
 const POSIX_PATH_SEPARATOR = ":";
 const WINDOWS_PATH_SEPARATOR = ";";
 // File types cmd.exe /c tries for a bare name, in its lookup order; PATH order comes first.
@@ -37,7 +38,7 @@ const MODES = ["manual", "auto", "acceptEdits", "plan", "dontAsk"] as const;
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 type LaunchResult = { session: string; pid: number; mode: string | null; account: number | null };
-type SpawnLaunch = (command: string[]) => Promise<ApiResult<null>>;
+type SpawnLaunch = (command: string[]) => Promise<ApiResult<number>>;
 const object = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 const validMode = (value: string): boolean => MODES.some((mode) => mode === value);
 const invalid = (message: string): ApiResult<never> => apiFail(LAUNCH_INVALID, message);
@@ -120,7 +121,7 @@ export const transcriptMode = async (runtime: RuntimePorts, path: string | null)
 	return null;
 };
 
-const spawnLaunch = async (runtime: RuntimePorts, command: string[], ending?: SessionEnding): Promise<ApiResult<null>> => {
+const spawnLaunch = async (runtime: RuntimePorts, command: string[], ending?: SessionEnding): Promise<ApiResult<number>> => {
 	const directory = joinPath(runtime.home, ".agent-rig", "launch-stderr");
 	const now = runtime.clock.now().getTime();
 	const path = joinPath(directory, `${now}-${runtime.ids.next()}.log`);
@@ -132,17 +133,18 @@ const spawnLaunch = async (runtime: RuntimePorts, command: string[], ending?: Se
 			if (!entry.directory && match && now - Number(match[1]) >= LAUNCH_EXIT_GRACE_MS) await runtime.fs.remove(joinPath(directory, entry.name)).catch(() => undefined);
 		}
 	} catch (error) { return apiFail(LAUNCH_FAILED, messagesFor(runtime.language).session.io(errorText(error))); }
-	const start = () => runtime.process.spawnDetached(command, LAUNCH_EXIT_GRACE_MS, STDERR_LIMIT, path);
-	const started = ending === undefined ? apiOk(start()) : await ending.startLaunch(start, LAUNCH_REGISTRATION_WAIT_MS);
+	const deadline = () => launchRegistrationDeadline(runtime.clock.now().getTime());
+	const start = (registrationDeadline: number) => ({ registrationDeadline, process: runtime.process.spawnDetached(command, LAUNCH_EXIT_GRACE_MS, STDERR_LIMIT, path) });
+	const started = ending === undefined ? apiOk(start(deadline())) : await ending.startLaunch(start, deadline);
 	if (!started.ok) {
 		await runtime.fs.remove(path).catch(() => undefined);
 		return started;
 	}
-	const result = await started.value;
+	const result = await started.value.process;
 	// On Windows the child may still hold the file; the next launch retries it.
 	await runtime.fs.remove(path).catch(() => undefined);
 	if (!result.ok) return apiFail(LAUNCH_FAILED, result.error);
-	return !result.value.exited || result.value.exitCode === 0 ? apiOk(null) : apiFail(LAUNCH_FAILED, messagesFor(runtime.language).session.launchExited(result.value.exitCode, result.value.stderr));
+	return !result.value.exited || result.value.exitCode === 0 ? apiOk(started.value.registrationDeadline) : apiFail(LAUNCH_FAILED, messagesFor(runtime.language).session.launchExited(result.value.exitCode, result.value.stderr));
 };
 
 type ResolvedLaunch = { command: string[]; account: string };
@@ -176,7 +178,7 @@ export const runSession = async (runtime: RuntimePorts, session: SessionRecord, 
 	const accountText = launch.value.account;
 	const spawned = await spawnCommand(launch.value.command);
 	if (!spawned.ok) return spawned;
-	const deadline = runtime.clock.now().getTime() + LAUNCH_REGISTRATION_WAIT_MS;
+	const deadline = spawned.value;
 	for (;;) {
 		const current = await lookupSession(runtime, session.id);
 		if (!current.ok) return current;

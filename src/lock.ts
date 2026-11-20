@@ -28,6 +28,8 @@ export type LockDependencies = {
 };
 export type LockHandle = { release(): Promise<Result<void>> };
 
+const isMissing = (error: unknown): boolean => typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
+
 const parseOwner = (text: string): LockOwner | null => {
 	let value: unknown;
 	try {
@@ -96,7 +98,7 @@ const createHandle = (fs: FileSystem, lockPath: string, owner: LockRecord, messa
 	};
 };
 
-type Recovery = { kind: "acquired" } | { kind: "wait" } | { kind: "problem"; problem: LockProbeProblem };
+type Recovery = { kind: "acquired" } | { kind: "wait" } | { kind: "read-failure"; cause: unknown } | { kind: "problem"; problem: LockProbeProblem };
 
 // Each generation can advance only after every earlier recoverer is dead. The lock is replaced atomically, never removed.
 const takeOverStale = async (fs: FileSystem, lockPath: string, stale: LockRecord, owner: LockRecord, dependencies: LockDependencies): Promise<Result<Recovery>> => {
@@ -106,9 +108,9 @@ const takeOverStale = async (fs: FileSystem, lockPath: string, stale: LockRecord
 		if (!created.ok) return created;
 		if (created.value) {
 			let current: LockRecord | null;
-			try { current = parseLock(await fs.readText(lockPath)); } catch {
+			try { current = parseLock(await fs.readText(lockPath)); } catch (error) {
 				await fs.remove(path).catch(() => undefined);
-				return ok({ kind: "wait" });
+				return isMissing(error) ? ok({ kind: "wait" }) : ok({ kind: "read-failure", cause: error });
 			}
 			if (current?.token !== stale.token) {
 				await fs.remove(path).catch(() => undefined);
@@ -122,12 +124,15 @@ const takeOverStale = async (fs: FileSystem, lockPath: string, stale: LockRecord
 			return ok({ kind: "acquired" });
 		}
 		let text: string;
-		try { text = await fs.readText(path); } catch { return ok({ kind: "wait" }); }
+		try { text = await fs.readText(path); } catch (error) {
+			return isMissing(error) ? ok({ kind: "wait" }) : ok({ kind: "read-failure", cause: error });
+		}
 		const recoverer = parseOwner(text);
 		if (recoverer === null) return err(dependencies.messages.failure.lockMalformed());
 		const running = await ownerMayBeRunning(recoverer, dependencies);
 		if (!running.ok) return ok({ kind: "problem", problem: { pid: recoverer.pid, error: running.error } });
 		if (running.value) return ok({ kind: "wait" });
+		await dependencies.clock.sleep(dependencies.pollIntervalMs);
 	}
 };
 
@@ -142,6 +147,15 @@ const acquire = async (dependencies: LockDependencies, onWait: ((problem?: LockP
 		let announced = false;
 		let lastProblem = "";
 		let consecutiveProbeFailures = 0;
+		// Read and identity failures have separate budgets: a successful lock read cannot validate a claim read.
+		let consecutiveReadFailures = 0;
+		const readFailure = async (error: string): Promise<Result<void>> => {
+			consecutiveReadFailures += 1;
+			if (onWait === null || consecutiveReadFailures >= MAX_CONSECUTIVE_PROBE_FAILURES) return err(dependencies.messages.failure.lockAcquireFailed(error));
+			if (!announced) { announced = true; onWait(); }
+			await dependencies.clock.sleep(dependencies.pollIntervalMs);
+			return ok(undefined);
+		};
 		const wait = async (problem?: LockProbeProblem): Promise<Result<void>> => {
 			if (onWait === null) return ok(undefined);
 			if (!announced) { announced = true; onWait(); }
@@ -169,13 +183,20 @@ const acquire = async (dependencies: LockDependencies, onWait: ((problem?: LockP
 			let existingText: string;
 			try {
 				existingText = await fs.readText(lockPath);
-			} catch {
+			} catch (error) {
+				if (isMissing(error)) {
+					await dependencies.clock.sleep(0);
+					continue;
+				}
+				const waited = await readFailure(errorText(error));
+				if (!waited.ok) return waited;
 				continue;
 			}
 			const existing = parseLock(existingText);
 			if (existing === null) return err(dependencies.messages.failure.lockMalformed());
 			const running = await ownerMayBeRunning(existing, dependencies);
 			if (!running.ok || running.value) {
+				consecutiveReadFailures = 0;
 				if (onWait === null) return ok(null);
 				const waited = await wait(running.ok ? undefined : { pid: existing.pid, error: running.error });
 				if (!waited.ok) return waited;
@@ -183,6 +204,12 @@ const acquire = async (dependencies: LockDependencies, onWait: ((problem?: LockP
 			}
 			const recovery = await takeOverStale(fs, lockPath, existing, owner, dependencies);
 			if (!recovery.ok) return recovery;
+			if (recovery.value.kind === "read-failure") {
+				const waited = await readFailure(errorText(recovery.value.cause));
+				if (!waited.ok) return waited;
+				continue;
+			}
+			consecutiveReadFailures = 0;
 			if (recovery.value.kind === "acquired") return await handle();
 			if (onWait === null) return ok(null);
 			const waited = await wait(recovery.value.kind === "problem" ? recovery.value.problem : undefined);

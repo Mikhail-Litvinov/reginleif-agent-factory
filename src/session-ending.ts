@@ -7,7 +7,7 @@ import { messagesFor } from "./messages.js";
 import { apiFail, apiOk, SESSION_ENDING, SESSION_IO } from "./output.js";
 import { errorText, ok } from "./result.js";
 
-type Launch = { startedAt: number; registrationWaitMs: number };
+type Launch = { registrationDeadline: number };
 type Owner = { pid: number; pidCreated: string; token: string; launch: Launch | null };
 type Marker = Owner & { takenOver: boolean; otherOwners: Owner[] };
 type EndingObservation = { created: Record<string, string | null>; waiting: boolean; registrationRemainingMs: number | null };
@@ -15,7 +15,7 @@ type ObserveEnding = (pids: readonly number[]) => Promise<ApiResult<EndingObserv
 export type SessionEnding = {
 	takenOver(): Promise<ApiResult<boolean>>;
 	// Records pending registration and starts a launch atomically with takeover; its promise is awaited outside the guard.
-	startLaunch<T>(action: () => T, registrationWaitMs: number): Promise<ApiResult<T>>;
+	startLaunch<T>(action: (deadline: number) => T, deadline: () => number): Promise<ApiResult<T>>;
 };
 
 const markerPath = (runtime: RuntimePorts, id: string): string => joinPath(runtime.home, ".agent-rig", "sessions", id, "ending.json");
@@ -29,9 +29,11 @@ const parseOwner = (value: unknown): Owner | null => {
 	const launch = "launch" in value ? value.launch : null;
 	if (launch !== null) {
 		if (typeof launch !== "object" || Array.isArray(launch)) return null;
-		if (!("startedAt" in launch) || typeof launch.startedAt !== "number" || !Number.isFinite(launch.startedAt)) return null;
-		if (!("registrationWaitMs" in launch) || typeof launch.registrationWaitMs !== "number" || !Number.isFinite(launch.registrationWaitMs) || launch.registrationWaitMs <= 0) return null;
-		return { pid: value.pid, pidCreated: value.pidCreated, token: value.token, launch: { startedAt: launch.startedAt, registrationWaitMs: launch.registrationWaitMs } };
+		let deadline: number;
+		if ("registrationDeadline" in launch && typeof launch.registrationDeadline === "number" && Number.isFinite(launch.registrationDeadline)) deadline = launch.registrationDeadline;
+		else if ("startedAt" in launch && typeof launch.startedAt === "number" && Number.isFinite(launch.startedAt) && "registrationWaitMs" in launch && typeof launch.registrationWaitMs === "number" && Number.isFinite(launch.registrationWaitMs) && launch.registrationWaitMs > 0) deadline = launch.startedAt + launch.registrationWaitMs;
+		else return null;
+		return { pid: value.pid, pidCreated: value.pidCreated, token: value.token, launch: { registrationDeadline: deadline } };
 	}
 	return { pid: value.pid, pidCreated: value.pidCreated, token: value.token, launch: null };
 };
@@ -72,7 +74,7 @@ export const sessionEndingLive = async (runtime: RuntimePorts, id: string): Prom
 	return apiOk(owners.some((owner) => created.value[String(owner.pid)] === owner.pidCreated || launchPending(runtime, owner)));
 };
 
-const launchRemaining = (runtime: RuntimePorts, owner: Owner): number => owner.launch === null ? 0 : Math.max(0, owner.launch.startedAt + owner.launch.registrationWaitMs - runtime.clock.now().getTime());
+const launchRemaining = (runtime: RuntimePorts, owner: Owner): number => owner.launch === null ? 0 : Math.max(0, owner.launch.registrationDeadline - runtime.clock.now().getTime());
 const launchPending = (runtime: RuntimePorts, owner: Owner): boolean => launchRemaining(runtime, owner) > 0;
 
 // Reuse rig's lock only around marker transitions, including stale-owner removal. Two contenders must never
@@ -263,13 +265,14 @@ export const withSessionEnding = async <T>(runtime: RuntimePorts, id: string, ac
 	});
 	const ending: SessionEnding = {
 		takenOver: () => guarded(runtime, id, takenOver),
-		startLaunch: (start, registrationWaitMs) => guarded(runtime, id, async () => {
+		startLaunch: (start, deadline) => guarded(runtime, id, async () => {
 			const interrupted = await takenOver();
 			if (!interrupted.ok) return interrupted;
 			if (interrupted.value) return apiFail(SESSION_ENDING, messagesFor(runtime.language).session.ending());
-			marker.launch = { startedAt: runtime.clock.now().getTime(), registrationWaitMs };
+			const registrationDeadline = deadline();
+			marker.launch = { registrationDeadline };
 			const recorded = await atomicWrite(runtime.fs, path, JSON.stringify(marker), messagesFor(runtime.language));
-			return recorded.ok ? apiOk(start()) : io(runtime, recorded.error);
+			return recorded.ok ? apiOk(start(registrationDeadline)) : io(runtime, recorded.error);
 		}),
 	};
 	let result: ApiResult<T>;

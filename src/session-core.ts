@@ -204,10 +204,22 @@ export const listSessions = async (r: RuntimePorts): Promise<ApiResult<{ session
 	catch (e) { return missing(e) ? apiOk({ sessions: [] }) : apiFail(SESSION_IO, messagesFor(r.language).session.io(errorText(e))); }
 	const sessions: SessionListEntry[] = [];
 	const records: SessionRecord[] = [];
+	const ids = new Set<string>();
 	for (const entry of entries) {
-		if (entry.directory || !entry.name.endsWith(REQUEST_SUFFIX)) continue;
-		const id = entry.name.slice(0, -REQUEST_SUFFIX.length);
-		const record = await readSession(r, id);
+		if (!entry.directory && entry.name.endsWith(REQUEST_SUFFIX)) { ids.add(entry.name.slice(0, -REQUEST_SUFFIX.length)); continue; }
+		const separator = entry.directory ? ".retired-" : ".json.retired-";
+		const index = entry.name.indexOf(separator);
+		if (index < 0 || index + separator.length === entry.name.length) continue;
+		const id = entry.name.slice(0, index);
+		if (ID_PATTERN.test(id)) ids.add(id);
+	}
+	for (const id of ids) {
+		let record = await readSession(r, id);
+		if (!record.ok && record.error.code === SESSION_UNKNOWN) {
+			const recovered = await recoverSessionRemoval(r, id, (folderId) => readLiveRegistration(r, folderId));
+			if (!recovered.ok) { sessions.push({ id, error: recovered.error }); continue; }
+			record = await readSession(r, id);
+		}
 		if (!record.ok) { if (record.error.code !== SESSION_UNKNOWN) sessions.push({ id, error: record.error }); continue; }
 		records.push(record.value);
 	}
@@ -215,16 +227,18 @@ export const listSessions = async (r: RuntimePorts): Promise<ApiResult<{ session
 	const pids = [...new Set(records.flatMap((record) => checkable(record.processes)))];
 	const created = pids.length === 0 ? null : await r.process.createdAt(pids);
 	for (const record of records) {
-		const { id, cwd, transcriptPath, startedAt } = record;
+		const { id } = record;
 		const live = created !== null && !created.ok && checkable(record.processes).length > 0
 			? apiFail(SESSION_IO, messagesFor(r.language).session.io(created.error))
 			: apiOk(created !== null && created.ok ? liveAmong(record.processes, created.value) : []);
 		const retained = await retainSession(r, record, async () => live);
 		if (!retained.ok) { if (retained.error.code !== SESSION_UNKNOWN) sessions.push({ id, error: retained.error }); continue; }
-		if (!live.ok) { sessions.push({ id, error: live.error }); continue; }
-		const module = await sessionModule(r, record);
+		const retainedLive = retained.value === record ? live : await liveProcesses(r, retained.value);
+		if (!retainedLive.ok) { sessions.push({ id, error: retainedLive.error }); continue; }
+		const { cwd, transcriptPath, startedAt } = retained.value;
+		const module = await sessionModule(r, retained.value);
 		if (!module.ok) { sessions.push({ id, error: module.error }); continue; }
-		sessions.push({ id, cwd, transcriptPath, pid: live.value[0]?.pid ?? null, processes: live.value.map((process) => ({ pid: process.pid, startedAt: process.startedAt })), startedAt, live: live.value.length > 0, module: module.value });
+		sessions.push({ id, cwd, transcriptPath, pid: retainedLive.value[0]?.pid ?? null, processes: retainedLive.value.map((process) => ({ pid: process.pid, startedAt: process.startedAt })), startedAt, live: retainedLive.value.length > 0, module: module.value });
 	}
 	sessions.sort((a, b) => ("startedAt" in b ? b.startedAt : "").localeCompare("startedAt" in a ? a.startedAt : ""));
 	return apiOk({ sessions });

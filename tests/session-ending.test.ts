@@ -5,7 +5,7 @@ import { describe, expect, test } from "bun:test";
 
 import { runCli } from "../src/cli.js";
 import { cleanupSession } from "../src/commands/session-cleanup.js";
-import { LAUNCH_REGISTRATION_WAIT_MS, modeCommand } from "../src/commands/session-run.js";
+import { launchRegistrationDeadline, LAUNCH_REGISTRATION_WAIT_MS, modeCommand } from "../src/commands/session-run.js";
 import { stopSession } from "../src/commands/session-stop.js";
 import { apiFail, apiOk, SESSION_IO } from "../src/output.js";
 import { err, ok } from "../src/result.js";
@@ -313,7 +313,7 @@ describe("session ending ownership", () => {
 		const h = setup();
 		h.response("event-1", { context: { tokens: TOKENS_AFTER } });
 		h.runtime.process.spawnDetached = async () => {
-			expect(JSON.parse(await h.fs.readText(MARKER))).toMatchObject({ pid: h.runtime.lock.process.pid, takenOver: false, launch: { startedAt: h.runtime.clock.now().getTime(), registrationWaitMs: LAUNCH_REGISTRATION_WAIT_MS } });
+			expect(JSON.parse(await h.fs.readText(MARKER))).toMatchObject({ pid: h.runtime.lock.process.pid, takenOver: false, launch: { registrationDeadline: launchRegistrationDeadline(h.runtime.clock.now().getTime()) } });
 			h.identities[String(LAUNCHED_PID)] = LAUNCHED_CREATED;
 			h.fs.seed(`${DIRECTORY}/processes/${LAUNCHED_PID}.json`, JSON.stringify({ pid: LAUNCHED_PID, pid_created: LAUNCHED_CREATED, started_at: "resumed" }));
 			return ok({ exited: false, exitCode: null, stderr: "", pid: LAUNCHED_PID });
@@ -450,7 +450,7 @@ describe("session ending ownership", () => {
 		stopping.clock.sleep = async (ms) => {
 			h.identities[String(h.runtime.lock.process.pid)] = null;
 			await advance(ms);
-			if (!registered && stopping.clock.now().getTime() >= LAUNCH_REGISTRATION_WAIT_MS - SESSION_POLL_MS) {
+			if (!registered && stopping.clock.now().getTime() >= LAUNCH_REGISTRATION_WAIT_MS + SESSION_POLL_MS) {
 				registered = true;
 				h.identities[String(LAUNCHED_PID)] = LAUNCHED_CREATED;
 				h.fs.seed(`${DIRECTORY}/processes/${LAUNCHED_PID}.json`, JSON.stringify({ pid: LAUNCHED_PID, pid_created: LAUNCHED_CREATED, started_at: "resumed" }));

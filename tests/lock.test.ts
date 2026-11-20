@@ -23,6 +23,9 @@ const HOLD_TURNS = 5;
 const STALE_TOKEN = `legacy-${DEAD_PID}-${DEAD_START}`;
 const CLAIM_PATH = `${LOCK_PATH}.recover-${STALE_TOKEN}.0`;
 const WAIT_POLLS_BEFORE_RELEASE = 3;
+// The lock permits one initial failed read and three retries, matching identity probes.
+const READ_FAILURE_LIMIT = 4;
+const RETRIES_BEFORE_FAILURE = READ_FAILURE_LIMIT - 1;
 const ignoreNotice = (): void => undefined;
 
 // Runs a callback right before the first destructive step on the lock file, so a test can place another process exactly
@@ -150,7 +153,8 @@ describe("lock takeover of a stale lock", () => {
 		let sleeps = 0;
 		const result = await acquireLock(dependenciesFor(fs, FIRST_PID, FIRST_START, liveOwners(alive), async () => { sleeps += 1; alive.clear(); }), ignoreNotice);
 		expect(result.ok).toBe(true);
-		expect(sleeps).toBe(1);
+		// One wait for the live recoverer, then one yield while advancing past its dead claim.
+		expect(sleeps).toBe(2);
 	});
 
 	test("a takeover is not blocked by a live lock and leaves no helper files", async () => {
@@ -268,6 +272,76 @@ describe("lock file creation failure", () => {
 		expect(result.ok).toBe(false);
 		if (!result.ok) expect(result.error).toContain("disk full");
 	});
+});
+
+describe("lock file read failure", () => {
+	test("persistent read errors end acquisition after the probe limit with sleeps between attempts", async () => {
+		const fs = new MemoryFileSystem();
+		fs.seed(LOCK_PATH, JSON.stringify({ pid: DEAD_PID, startTime: DEAD_START }));
+		let reads = 0;
+		const intervals: number[] = [];
+		const writeExclusive = fs.writeExclusive.bind(fs);
+		fs.writeExclusive = async (path, value) => reads > READ_FAILURE_LIMIT ? err("read limit exceeded") : writeExclusive(path, value);
+		fs.readText = async () => {
+			reads += 1;
+			if (reads > READ_FAILURE_LIMIT) throw new Error("read limit exceeded");
+			throw new Error("sharing violation");
+		};
+		const dependencies = dependenciesFor(fs, FIRST_PID, FIRST_START, liveOwners(new Map()));
+		dependencies.clock.sleep = async (milliseconds) => { intervals.push(milliseconds); };
+		const result = await acquireLock(dependencies, ignoreNotice);
+		expect(result.ok).toBe(false);
+		if (!result.ok) expect(result.error).toContain("sharing violation");
+		expect(reads).toBe(READ_FAILURE_LIMIT);
+		expect(intervals).toEqual([POLL_INTERVAL_MS, POLL_INTERVAL_MS, POLL_INTERVAL_MS]);
+	});
+
+	test("a vanished lock retries immediately without consuming the failure budget", async () => {
+		const fs = new MemoryFileSystem();
+		fs.seed(LOCK_PATH, JSON.stringify({ pid: DEAD_PID, startTime: DEAD_START }));
+		let reads = 0;
+		const intervals: number[] = [];
+		fs.readText = async () => {
+			reads += 1;
+			if (reads <= RETRIES_BEFORE_FAILURE) throw new Error("sharing violation");
+			if (reads === READ_FAILURE_LIMIT) {
+				fs.files.delete(LOCK_PATH);
+				return await MemoryFileSystem.prototype.readText.call(fs, LOCK_PATH);
+			}
+			throw new Error("unexpected read");
+		};
+		const dependencies = dependenciesFor(fs, FIRST_PID, FIRST_START, liveOwners(new Map()));
+		dependencies.clock.sleep = async (milliseconds) => { intervals.push(milliseconds); };
+		const result = await acquireLock(dependencies, ignoreNotice);
+		expect(result.ok).toBe(true);
+		expect(reads).toBe(READ_FAILURE_LIMIT);
+		expect(intervals).toEqual([POLL_INTERVAL_MS, POLL_INTERVAL_MS, POLL_INTERVAL_MS, 0]);
+	});
+
+	for (const failedPath of [LOCK_PATH, CLAIM_PATH]) {
+		test(`persistent recovery reads fail for ${failedPath}`, async () => {
+			const fs = new MemoryFileSystem();
+			fs.seed(LOCK_PATH, JSON.stringify({ pid: DEAD_PID, startTime: DEAD_START }));
+			if (failedPath === CLAIM_PATH) fs.seed(CLAIM_PATH, JSON.stringify({ pid: SECOND_PID, startTime: SECOND_START }));
+			const readText = fs.readText.bind(fs);
+			let failures = 0;
+			let sleeps = 0;
+			fs.readText = async (path) => {
+				if (path === failedPath && (path === CLAIM_PATH || fs.files.has(CLAIM_PATH))) {
+					failures += 1;
+					throw new Error("recovery read failed");
+				}
+				return readText(path);
+			};
+			const writeExclusive = fs.writeExclusive.bind(fs);
+			fs.writeExclusive = async (path, value) => failures > READ_FAILURE_LIMIT ? err("read limit exceeded") : writeExclusive(path, value);
+			const result = await acquireLock(dependenciesFor(fs, FIRST_PID, FIRST_START, liveOwners(new Map()), async () => { sleeps += 1; }), ignoreNotice);
+			expect(result.ok).toBe(false);
+			if (!result.ok) expect(result.error).toContain("recovery read failed");
+			expect(failures).toBe(READ_FAILURE_LIMIT);
+			expect(sleeps).toBe(RETRIES_BEFORE_FAILURE);
+		});
+	}
 });
 
 describe("lock wait notice", () => {

@@ -4,7 +4,7 @@ import type { SessionRecord } from "../src/session-core.js";
 import { describe, expect, test } from "bun:test";
 
 import { runCli } from "../src/cli.js";
-import { findCswap, modeCommand, prepareLaunch, resolveLaunch, runSession, transcriptMode } from "../src/commands/session-run.js";
+import { findCswap, launchRegistrationDeadline, modeCommand, prepareLaunch, resolveLaunch, runSession, transcriptMode } from "../src/commands/session-run.js";
 import { buildLaunchCommand } from "../src/launch-command.js";
 import { messagesFor } from "../src/messages.js";
 import { lookupSession } from "../src/session-core.js";
@@ -77,7 +77,7 @@ describe("session run and mode", () => {
 		h.fs.seed(`${ROOT}/state.json`, JSON.stringify({ mode: "dev", paths: { repo: "/repo", hub: "/hub" }, features: {}, records: {}, badPairs: [], pendingHubRestart: null }));
 		const calls: string[][] = [];
 		h.runtime.process.run = async (_command, args) => { calls.push([...args]); return ok({ stdout: '{"accounts":{"/cfg/1-test":{"present":true,"account":12}},"categories":{}}', stderr: "", exitCode: 0 }); };
-		await runSession(h.runtime, session, "plan", null, async () => apiOk(null));
+		await runSession(h.runtime, session, "plan", null, async () => apiOk(launchRegistrationDeadline(h.runtime.clock.now().getTime())));
 		expect(calls.length).toBe(1);
 		expect(calls[0]).toContain("batch");
 		expect(calls[0]).toContain("/cfg/1-test");
@@ -89,12 +89,12 @@ describe("session run and mode", () => {
 		for (const output of [ok({ stdout: "", stderr: "broken", exitCode: 2 }), ok({ stdout: "garbage", stderr: "", exitCode: 0 })]) {
 			h.runtime.process.run = async () => output;
 			let launched = false;
-			const result = await runSession(h.runtime, session, "plan", null, async () => { launched = true; return apiOk(null); });
+			const result = await runSession(h.runtime, session, "plan", null, async () => { launched = true; return apiOk(launchRegistrationDeadline(h.runtime.clock.now().getTime())); });
 			expect(code(result)).toBe("launch-account-lookup");
 			expect(launched).toBe(false);
 		}
 		h.runtime.process.run = async () => ok({ stdout: "", stderr: "broken", exitCode: 2 });
-		const failed = await runSession(h.runtime, session, "plan", null, async () => apiOk(null));
+		const failed = await runSession(h.runtime, session, "plan", null, async () => apiOk(launchRegistrationDeadline(h.runtime.clock.now().getTime())));
 		expect(failed.ok ? "ok" : failed.error.message).toContain("broken");
 	});
 	test("account helper failure with cswap absent still launches without an account", async () => {
@@ -103,7 +103,7 @@ describe("session run and mode", () => {
 		h.runtime.process.run = async () => ok({ stdout: "", stderr: "broken", exitCode: 2 });
 		let launched = false;
 		h.runtime.process.createdAt = async () => ok({ "43": CREATED });
-		const result = await runSession(h.runtime, session, "plan", null, async () => { launched = true; h.fs.seed(`${ROOT}/sessions/${ID}.json`, JSON.stringify({ ...raw, pid: 43, ended_at: null })); return apiOk(null); });
+		const result = await runSession(h.runtime, session, "plan", null, async () => { launched = true; h.fs.seed(`${ROOT}/sessions/${ID}.json`, JSON.stringify({ ...raw, pid: 43, ended_at: null })); return apiOk(launchRegistrationDeadline(h.runtime.clock.now().getTime())); });
 		expect(launched).toBe(true);
 		expect(result).toEqual(apiOk({ session: ID, pid: 43, mode: "plan", account: null }));
 	});
@@ -112,7 +112,7 @@ describe("session run and mode", () => {
 		h.fs.seed("/usr/bin/tmux", "");
 		h.runtime.process.run = async () => ok({ stdout: '{"accounts":{"/cfg/1-test":{"present":true,"account":12}},"categories":{}}', stderr: "", exitCode: 0 });
 		let launched = false;
-		const result = await runSession(h.runtime, session, "plan", null, async () => { launched = true; return apiOk(null); });
+		const result = await runSession(h.runtime, session, "plan", null, async () => { launched = true; return apiOk(launchRegistrationDeadline(h.runtime.clock.now().getTime())); });
 		expect(code(result)).toBe("launch-invalid");
 		expect(result.ok ? "" : result.error.message).toBe(messagesFor("en").session.launchNoCswap());
 		expect(launched).toBe(false);
@@ -233,7 +233,7 @@ describe("session run and mode", () => {
 		const h = setup();
 		seedLaunchers(h);
 		expect(code(await runSession(h.runtime, session, "plan", "1", async () => apiFail("launch-failed", "stderr")))).toBe("launch-failed");
-		expect(code(await runSession(h.runtime, session, "plan", "1", async () => apiOk(null)))).toBe("launch-timeout");
+		expect(code(await runSession(h.runtime, session, "plan", "1", async () => apiOk(launchRegistrationDeadline(h.runtime.clock.now().getTime()))))).toBe("launch-timeout");
 	});
 	test("reports stderr from detached launch failure", async () => {
 		const h = setup();
@@ -287,7 +287,7 @@ describe("session run and mode", () => {
 		seedLaunchers(h);
 		h.runtime.process.createdAt = async () => ok({ "42": CREATED, "43": CREATED });
 		expect(code(await runSession(h.runtime, { ...session, processes: [{ pid: 42, pidCreated: CREATED, startedAt: CREATED }] }, "plan", "1"))).toBe("session-running");
-		const answer = await runSession(h.runtime, session, "plan", "1", async () => { h.fs.seed(`${ROOT}/sessions/${ID}.json`, JSON.stringify({ ...raw, pid: 43, ended_at: null })); return apiOk(null); });
+		const answer = await runSession(h.runtime, session, "plan", "1", async () => { h.fs.seed(`${ROOT}/sessions/${ID}.json`, JSON.stringify({ ...raw, pid: 43, ended_at: null })); return apiOk(launchRegistrationDeadline(h.runtime.clock.now().getTime())); });
 		expect(answer).toEqual(apiOk({ session: ID, pid: 43, mode: "plan", account: 1 }));
 	});
 	test("CLI writes one JSON object on a mode success and run failure", async () => {

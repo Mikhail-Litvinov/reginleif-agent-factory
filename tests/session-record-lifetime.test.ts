@@ -50,6 +50,42 @@ const setup = () => {
 };
 
 describe("session record lifetime", () => {
+	for (const boundary of ["record-detached", "folder-retired", "record-discarded"] as const) test(`listing sweeps leftovers after ${boundary}`, async () => {
+		const h = setup();
+		const detached = `${ROOT}/${ID}.json.retired-killed`;
+		await h.fs.rename(`${ROOT}/${ID}.json`, detached);
+		if (boundary !== "record-detached") await h.fs.rename(`${ROOT}/${ID}`, `${ROOT}/${ID}.retired-killed`);
+		if (boundary === "record-discarded") await h.fs.remove(detached);
+		const result = await listSessions(h.runtime);
+		expect(result.ok && result.value.sessions).toEqual([]);
+		expect((await h.fs.listDirectory(ROOT)).some((entry) => entry.name.includes(".retired-"))).toBe(false);
+	});
+
+	test("listing reports the record and live registration recovered during retention", async () => {
+		const h = setup();
+		let registered = false;
+		const rename = h.fs.rename.bind(h.fs);
+		h.fs.rename = async (from, to) => {
+			await rename(from, to);
+			if (from === `${ROOT}/${ID}.json`) {
+				registered = true;
+				h.fs.seed(from, JSON.stringify({ session_id: ID, cwd: "/registered", transcript_path: NAMED, started_at: "registered" }));
+			}
+		};
+		h.runtime.process.createdAt = async () => ok({ "42": registered ? CREATED : null });
+		const result = await listSessions(h.runtime);
+		expect(result.ok && result.value.sessions[0]).toMatchObject({ cwd: "/registered", live: true, pid: SESSION_PID });
+	});
+
+	test("listing recovers a detached record and its retired live registration", async () => {
+		const h = setup();
+		await h.fs.rename(`${ROOT}/${ID}.json`, `${ROOT}/${ID}.json.retired-killed`);
+		await h.fs.rename(`${ROOT}/${ID}`, `${ROOT}/${ID}.retired-killed`);
+		h.runtime.process.createdAt = async () => ok({ "42": CREATED });
+		const result = await listSessions(h.runtime);
+		expect(result.ok && result.value.sessions[0]).toMatchObject({ id: ID, live: true, pid: SESSION_PID });
+		expect((await h.fs.listDirectory(ROOT)).some((entry) => entry.name.includes(".retired-"))).toBe(false);
+	});
 	test("removal waits for marker creation under the shared guard and keeps the live marker", async () => {
 		const h = setup();
 		h.runtime.process.createdAt = async (pids) => ok(Object.fromEntries(pids.map((pid) => [String(pid), pid === h.runtime.lock.process.pid ? CREATED : null])));
