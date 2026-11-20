@@ -42,6 +42,10 @@ export const EXEC_IO = "exec-io";
 export const EXEC_UNAVAILABLE = "exec-unavailable";
 export const EXEC_LAUNCH = "exec-launch";
 export const PROGRESS_CODE_SESSION_WAITING = "session-waiting";
+// An ending operation is starting its compaction step; no data.
+export const PROGRESS_CODE_SESSION_COMPACTING = "session-compacting";
+// An ending operation is starting to terminate the session's processes; no data.
+export const PROGRESS_CODE_SESSION_TERMINATING = "session-terminating";
 export const PROGRESS_CODE_SESSION_RUNNING = "session-running";
 export const LAUNCH_UNAVAILABLE = "launch-unavailable";
 

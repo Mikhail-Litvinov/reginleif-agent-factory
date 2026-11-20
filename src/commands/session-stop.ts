@@ -3,7 +3,7 @@ import type { RuntimePorts } from "../ports.js";
 import type { SessionRecord } from "../session-core.js";
 import type { SessionEnding } from "../session-ending.js";
 
-import { apiFail, apiOk, SESSION_IO, SESSION_STOP_TIMEOUT } from "../output.js";
+import { apiFail, apiOk, PROGRESS_CODE_SESSION_COMPACTING, PROGRESS_CODE_SESSION_TERMINATING, SESSION_IO, SESSION_STOP_TIMEOUT } from "../output.js";
 import { messagesFor } from "../messages.js";
 import { compactSessionCore, liveProcesses, requestSession, sessionLive, SESSION_POLL_MS, SESSION_TIMEOUTS } from "../session-core.js";
 import { withSessionEnding } from "../session-ending.js";
@@ -52,11 +52,13 @@ export const stopEndingSession = async (runtime: RuntimePorts, session: SessionR
 			if (!takenOver.ok) return takenOver;
 			if (takenOver.value) compacted = { error: messagesFor(runtime.language).session.ended() };
 			else {
+				progress({ code: PROGRESS_CODE_SESSION_COMPACTING });
 				const compact = await compactSessionCore(runtime, session, undefined, progress);
 				compacted = compact.ok ? compact.value : { error: compact.error.message };
 			}
 		}
 	}
+	progress({ code: PROGRESS_CODE_SESSION_TERMINATING });
 	const stopped = await endSession(runtime, session);
 	if (!stopped.ok) return stopped;
 	return stopped.value ? apiOk({ session: session.id, stopped: true, compacted }) : apiOk({ session: session.id, stopped: false, reason: "not-running" });
@@ -65,6 +67,10 @@ export const stopEndingSession = async (runtime: RuntimePorts, session: SessionR
 export const stopSession = (runtime: RuntimePorts, session: SessionRecord, progress: (event: ProgressEvent) => void): Promise<ApiResult<StopResult>> => withSessionEnding<StopResult>(runtime, session.id,
 	(ending) => stopEndingSession(runtime, session, progress, ending),
 	async () => {
+		const live = await sessionLive(runtime, session);
+		if (!live.ok) return live;
+		if (!live.value) return apiOk({ session: session.id, stopped: false, reason: "not-running" });
+		progress({ code: PROGRESS_CODE_SESSION_TERMINATING });
 		const stopped = await endSession(runtime, session);
 		if (!stopped.ok) return stopped;
 		return stopped.value ? apiOk({ session: session.id, stopped: true, compacted: null }) : apiOk({ session: session.id, stopped: false, reason: "not-running" });

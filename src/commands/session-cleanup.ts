@@ -2,7 +2,7 @@ import type { ApiResult, ProgressEvent } from "../output.js";
 import type { RuntimePorts } from "../ports.js";
 import type { SessionRecord } from "../session-core.js";
 
-import { apiFail, apiOk, SESSION_CLEANUP_NOT_COMPACTED, SESSION_ENDED, SESSION_IO } from "../output.js";
+import { apiFail, apiOk, PROGRESS_CODE_SESSION_COMPACTING, PROGRESS_CODE_SESSION_TERMINATING, SESSION_CLEANUP_NOT_COMPACTED, SESSION_ENDED, SESSION_IO } from "../output.js";
 import { messagesFor } from "../messages.js";
 import { compactSessionCore, sessionLive } from "../session-core.js";
 import { withSessionEnding } from "../session-ending.js";
@@ -13,12 +13,14 @@ export const cleanupSession = (runtime: RuntimePorts, session: SessionRecord, pr
 	const live = await sessionLive(runtime, session);
 	if (!live.ok) return live;
 	if (!live.value) return apiFail(SESSION_ENDED, messagesFor(runtime.language).session.ended());
+	progress({ code: PROGRESS_CODE_SESSION_COMPACTING });
 	const compact = await compactSessionCore(runtime, session, undefined, progress);
 	if (!compact.ok) return compact;
 	const takenOver = await ending.takenOver();
 	if (!takenOver.ok) return takenOver;
 	if (takenOver.value) return apiFail(SESSION_ENDED, messagesFor(runtime.language).session.ended());
 	if (!("tokensBefore" in compact.value) || compact.value.tokensAfter >= compact.value.tokensBefore) return apiFail(SESSION_CLEANUP_NOT_COMPACTED, messagesFor(runtime.language).session.cleanupNotCompacted());
+	progress({ code: PROGRESS_CODE_SESSION_TERMINATING });
 	const stopped = await endSession(runtime, session);
 	if (!stopped.ok) return stopped;
 	const stoppedUnderneath = await ending.takenOver();

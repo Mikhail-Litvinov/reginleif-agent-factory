@@ -55,12 +55,44 @@ describe("session stop and cleanup", () => {
 			response(h, "event-1", { context: { tokens } });
 			response(h, "event-2", { tokensBefore: tokens, tokensAfter: 1 });
 			let killed = false;
+			const events: string[] = [];
 			h.runtime.process.killTree = async () => { killed = true; return ok(undefined); };
 			h.runtime.process.createdAt = async () => ok({ [String(h.runtime.lock.process.pid)]: FAKE_OWNER_CREATED, "42": killed ? null : CREATED });
-			const result = await stopSession(h.runtime, SESSION, () => {});
+			const result = await stopSession(h.runtime, SESSION, (event) => events.push(event.code));
 			expect(result.ok && result.value.stopped && result.value.compacted).toEqual(tokens > 120_000 ? { tokensBefore: tokens, tokensAfter: 1 } : null);
+			expect(events).toEqual(tokens > 120_000 ? ["session-compacting", "session-terminating"] : ["session-terminating"]);
 			expect(killed).toBe(true);
 		}
+	});
+	test("an interrupting stop emits only terminating", async () => {
+		const h = setup();
+		const marker = { pid: 99, pidCreated: "owner", token: "owner-token", takenOver: false, otherOwners: [] };
+		h.fs.seed(`${ROOT}/abc/ending.json`, JSON.stringify(marker));
+		let killed = false;
+		const events: string[] = [];
+		h.runtime.process.killTree = async () => { killed = true; return ok(undefined); };
+		h.runtime.process.createdAt = async () => ok({ [String(h.runtime.lock.process.pid)]: FAKE_OWNER_CREATED, "42": killed ? null : CREATED, "99": "owner" });
+		const result = await stopSession(h.runtime, SESSION, (event) => events.push(event.code));
+		expect(result.ok && result.value.stopped).toBe(true);
+		expect(events).toEqual(["session-terminating"]);
+	});
+	test("cleanup reports compaction before termination", async () => {
+		const h = setup();
+		response(h, "event-1", { tokensBefore: 10, tokensAfter: 1 });
+		let killed = false;
+		const events: string[] = [];
+		h.runtime.process.killTree = async () => { killed = true; return ok(undefined); };
+		h.runtime.process.createdAt = async () => ok({ [String(h.runtime.lock.process.pid)]: FAKE_OWNER_CREATED, "42": killed ? null : CREATED });
+		await cleanupSession(h.runtime, SESSION, (event) => events.push(event.code));
+		expect(events).toEqual(["session-compacting", "session-terminating"]);
+	});
+	test("a stop with no live process emits no progress", async () => {
+		const h = setup();
+		const events: string[] = [];
+		h.runtime.process.createdAt = async () => ok({ [String(h.runtime.lock.process.pid)]: FAKE_OWNER_CREATED, "42": null });
+		const result = await stopSession(h.runtime, SESSION, (event) => events.push(event.code));
+		expect(result.ok && result.value).toEqual({ session: "abc", stopped: false, reason: "not-running" });
+		expect(events).toEqual([]);
 	});
 	test("does not kill a reused PID and reports exit timeout", async () => {
 		const h = setup();
