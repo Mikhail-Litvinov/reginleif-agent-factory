@@ -54,6 +54,7 @@ export class Window {
   private working = false;
   private turnRuns = false;
   private rateLimits: Usage["rateLimits"] | undefined;
+  private snapshotWrites: Promise<void> = Promise.resolve();
 
   constructor(
     private dir: string,
@@ -61,13 +62,14 @@ export class Window {
   ) {}
 
   // Called at session start and from the session.measure hook; `rateLimits` is the measure event's reading.
-  async measured(rateLimits?: Usage["rateLimits"]): Promise<void> {
+  measured(rateLimits?: Usage["rateLimits"]): Promise<void> {
     if (rateLimits !== undefined) this.rateLimits = rateLimits;
-    try {
+    this.snapshotWrites = this.snapshotWrites.then(async () => {
       await this.deps.writeAtomic(`${this.dir}/${USAGE_FILE}`, JSON.stringify(await this.snapshot()));
-    } catch {
+    }).catch(() => {
       // The files are not writable now: the next measurement tries again.
-    }
+    });
+    return this.snapshotWrites;
   }
 
   // Rewrites usage only after a completed compaction of the main conversation; precompute does not change it.

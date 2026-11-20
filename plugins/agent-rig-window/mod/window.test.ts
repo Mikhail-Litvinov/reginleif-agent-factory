@@ -91,6 +91,43 @@ test("only a completed main conversation compaction rewrites usage with its live
   expect(s.writes.filter(path => path === `${DIR}/usage.json`)).toHaveLength(1);
 });
 
+test("a queued post-compaction snapshot reads after an earlier measurement and stays newest", async () => {
+  const s = shared();
+  const deps = process(s, []);
+  let release: (() => void) | undefined;
+  const earlierRead = new Promise<void>(resolve => {
+    release = resolve;
+  });
+  let reads = 0;
+  let compacted = false;
+  deps.usage = async () => {
+    reads++;
+    if (reads === 1) {
+      await earlierRead;
+      return { context: { window: 10, breakdown: { totalTokens: 20_000 } }, rateLimits: [] };
+    }
+    return {
+      context: compacted ? { window: 10, breakdown: { totalTokens: 13_000 } } : { window: 10 },
+      rateLimits: [],
+    };
+  };
+  const w = new Window(DIR, deps);
+  const earlier = w.measured();
+  compacted = true;
+  const later = w.compacted("manual", undefined, false);
+
+  await Promise.resolve();
+  expect(reads).toBe(1);
+  release?.();
+  await Promise.all([earlier, later]);
+
+  expect(reads).toBe(2);
+  expect(JSON.parse(s.files.get(`${DIR}/usage.json`) ?? "null").context).toEqual({
+    window: 10,
+    breakdown: { totalTokens: 13_000 },
+  });
+});
+
 test("a compact request rewrites usage after compaction and before its response, but skip does not", async () => {
   const s = shared();
   const deps = process(s, []);
