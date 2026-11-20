@@ -260,12 +260,12 @@ export const requestSession = async (r: RuntimePorts, session: SessionRecord, op
 			}
 			const current = await lookupSession(r, session.id);
 			if (!current.ok) return current;
-			if (current.value.processes.length === 0) return apiFail(SESSION_ENDED, m.ended());
+			const live = await sessionLive(r, current.value);
+			if (!live.ok) return live;
+			if (!live.value) return apiFail(SESSION_ENDED, m.ended());
 			const remaining = deadline - r.clock.now().getTime();
 			if (remaining <= 0) {
-				const live = await sessionLive(r, current.value);
-				if (!live.ok) return live;
-				return live.value ? apiFail(SESSION_TIMEOUT, m.timeout()) : apiFail(SESSION_ENDED, m.ended());
+				return apiFail(SESSION_TIMEOUT, m.timeout());
 			}
 			await r.clock.sleep(Math.min(SESSION_POLL_MS, remaining));
 		}

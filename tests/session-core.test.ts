@@ -198,6 +198,26 @@ describe("session core", () => {
 		expect(answer.ok ? "ok" : answer.error.code).toBe("session-ended");
 		expect(calls).toBe(1);
 	});
+	test("a dead claimed session ends after one poll when its process file remains", async () => {
+		const h = setup();
+		let alive = true;
+		let polls = 0;
+		let now = 0;
+		h.runtime.clock.now = () => new Date(now);
+		h.runtime.process.createdAt = async () => ok({ "42": alive ? CREATED : null });
+		h.fs.seed(`${ROOT}/abc/claims/event-1/state`, "running");
+		h.runtime.clock.sleep = async (ms) => {
+			now += ms;
+			polls++;
+			alive = false;
+		};
+		const answer = await requestSession(h.runtime, record, "compact", {}, COMPACT_TIMEOUT_MS);
+		expect(answer.ok ? "ok" : answer.error.code).toBe("session-ended");
+		expect(polls).toBe(1);
+		expect(now).toBe(SESSION_POLL_MS);
+		expect(h.fs.files.has(`${ROOT}/abc/processes/42.json`)).toBe(true);
+		expect(h.fs.files.has(`${ROOT}/abc/claims/event-1/pid`)).toBe(false);
+	});
 	test("list batches distinct live pids and isolates invalid records", async () => {
 		const h = setup();
 		h.fs.seed(`${ROOT}/second.json`, JSON.stringify({ ...raw, session_id: "second" }));
