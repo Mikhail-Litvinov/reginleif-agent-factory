@@ -220,9 +220,6 @@ export const modeCommand = async (runtime: RuntimePorts, args: readonly string[]
 		const launch = await resolveLaunch(runtime, session.value, mode, null);
 		if (!launch.ok) return launch;
 		const stopped = await stopEndingSession(runtime, session.value, progress, ending);
-		const takenOver = await ending.takenOver();
-		if (!takenOver.ok) return takenOver;
-		if (takenOver.value) return apiFail(SESSION_ENDING, messagesFor(runtime.language).session.ending());
 		if (!stopped.ok) return stopped;
 		const result = await runSession(runtime, session.value, mode, launch.value.account, (command) => spawnLaunch(runtime, command, ending));
 		const interrupted = await ending.takenOver();
@@ -235,5 +232,5 @@ export const modeCommand = async (runtime: RuntimePorts, args: readonly string[]
 			return apiFail(SESSION_ENDING, messagesFor(runtime.language).session.ending());
 		}
 		return result.ok ? apiOk({ session: id, mode, pid: result.value.pid }) : result;
-	});
+	}, undefined, (result, takenOver) => takenOver ? apiFail(SESSION_ENDING, messagesFor(runtime.language).session.ending()) : result);
 };

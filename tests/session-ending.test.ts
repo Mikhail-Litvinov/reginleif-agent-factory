@@ -4,6 +4,7 @@ import type { SessionRecord } from "../src/session-core.js";
 import { describe, expect, test } from "bun:test";
 
 import { runCli } from "../src/cli.js";
+import { TAKEOVER_STALE_MS } from "../src/lock.js";
 import { cleanupSession } from "../src/commands/session-cleanup.js";
 import { modeCommand } from "../src/commands/session-run.js";
 import { stopSession } from "../src/commands/session-stop.js";
@@ -16,6 +17,7 @@ const ID = "11111111-1111-1111-1111-111111111111";
 const ROOT = "/home/test/.agent-rig";
 const DIRECTORY = `${ROOT}/sessions/${ID}`;
 const MARKER = `${DIRECTORY}/ending.json`;
+const GUARD = `${ROOT}/sessions/${ID}.ending.lock`;
 const TRANSCRIPT = `/transcripts/${ID}.jsonl`;
 // Invented identities for the session's two process trees and independent rig callers.
 const CLAUDE_PID = 42;
@@ -88,36 +90,46 @@ const setup = () => {
 		h.runtime.clock.sleep = async (ms) => { waiting.open(); await resume.promise; await advance(ms); };
 		return { waiting: waiting.promise, resume: resume.open };
 	};
-	return { ...h, identities, killed, markersAtKill, requests, caller, response, pause };
+	const pauseCaller = (pid = OTHER_OWNER_PID) => {
+		const runtime = caller(pid);
+		const waiting = gate();
+		const resume = gate();
+		const advance = runtime.clock.sleep;
+		runtime.clock.sleep = async (ms) => { waiting.open(); await resume.promise; await advance(ms); };
+		return { runtime, waiting: waiting.promise, resume: resume.open };
+	};
+	return { ...h, identities, killed, markersAtKill, requests, caller, response, pause, pauseCaller };
 };
 
 describe("session ending ownership", () => {
 	for (const operation of ["stop", "cleanup", "mode"] as const) {
 		test(`a second stop kills both process trees during ${operation}, without usage or compaction`, async () => {
 			const h = setup();
+			let launches = 0;
+			h.runtime.process.spawnDetached = async () => { launches += 1; return ok({ exited: false, exitCode: null, stderr: "" }); };
 			if (operation !== "cleanup") h.response("event-1", { context: { tokens: TOKENS_BEFORE } });
 			const paused = h.pause();
 			const first = operation === "stop" ? stopSession(h.runtime, SESSION, () => {}) : operation === "cleanup" ? cleanupSession(h.runtime, SESSION, () => {}) : modeCommand(h.runtime, [ID, "auto"], () => {});
+			await paused.waiting;
+			const before = [...h.requests];
+			const second = h.pauseCaller();
+			const stopping = stopSession(second.runtime, SESSION, () => {});
 			try {
-				await paused.waiting;
-				const before = [...h.requests];
-				let sleeps = 0;
-				const second = h.caller();
-				const advance = second.clock.sleep;
-				second.clock.sleep = async (ms) => { sleeps += 1; await advance(ms); };
-				const result = await stopSession(second, SESSION, () => {});
-				expect(result).toEqual(apiOk({ session: ID, stopped: true, compacted: null }));
+				expect(await Promise.race([second.waiting.then(() => "waiting"), stopping.then(() => "finished")])).toBe("waiting");
 				expect(h.requests).toEqual(before);
 				expect(h.killed).toEqual([CLAUDE_PID, WINDOW_PID]);
-				expect(sleeps).toBe(0);
 				expect(h.markersAtKill[0]).toMatchObject({ pid: OTHER_OWNER_PID, pidCreated: OTHER_OWNER_CREATED, takenOver: true });
-			} finally { paused.resume(); }
+				paused.resume();
+				await first;
+				expect(await h.fs.stat(MARKER)).not.toBeNull();
+			} finally { paused.resume(); second.resume(); await Promise.allSettled([first, stopping]); }
+			expect(await stopping).toEqual(apiOk({ session: ID, stopped: true, compacted: null }));
 			const result = await first;
 			expect(code(result)).toBe(operation === "cleanup" ? "session-ended" : operation === "mode" ? "session-ending" : "ok");
 			if (operation === "stop") expect(result).toEqual(apiOk({ session: ID, stopped: false, reason: "not-running" } as const));
 			expect(await h.fs.readText(TRANSCRIPT)).toBe(SKILLS);
 			expect((await h.fs.listDirectory("/transcripts")).map((entry) => entry.name)).toEqual([`${ID}.jsonl`]);
-			expect(h.fs.operations.some((operation) => operation.includes("launch-stderr"))).toBe(false);
+			expect(launches).toBe(0);
 			expect(await h.fs.stat(MARKER)).toBeNull();
 		});
 	}
@@ -135,16 +147,80 @@ describe("session ending ownership", () => {
 		let launches = 0;
 		h.runtime.process.spawnDetached = async () => { launches += 1; return ok({ exited: false, exitCode: null, stderr: "" }); };
 		const first = modeCommand(h.runtime, [ID, "auto"], () => {});
+		const second = h.pauseCaller();
+		let stopping: Promise<Awaited<ReturnType<typeof stopSession>>> | undefined;
 		try {
 			await entered.promise;
-			expect(await stopSession(h.caller(), SESSION, () => {})).toEqual(apiOk({ session: ID, stopped: false, reason: "not-running" }));
-		} finally { resume.open(); }
+			stopping = stopSession(second.runtime, SESSION, () => {});
+			expect(await Promise.race([second.waiting.then(() => "waiting"), stopping.then(() => "finished")])).toBe("waiting");
+			resume.open();
+			await first;
+		} finally { resume.open(); second.resume(); await Promise.allSettled([first, stopping]); }
+		expect(await stopping).toEqual(apiOk({ session: ID, stopped: false, reason: "not-running" }));
 		expect(code(await first)).toBe("session-ending");
 		expect(launches).toBe(0);
 		expect(await h.fs.stat(MARKER)).toBeNull();
 	});
 
-	for (const launchFails of [false, true]) test(`a takeover after spawn stops a later registration when launch ${launchFails ? "fails" : "succeeds"}`, async () => {
+	test("a takeover polls fresh records and kills a window registered during mode's launch", async () => {
+		const h = setup();
+		h.response("event-1", { context: { tokens: TOKENS_AFTER } });
+		const paused = h.pause();
+		h.runtime.process.spawnDetached = async () => ok({ exited: false, exitCode: null, stderr: "" });
+		const killed = gate();
+		const kill = h.runtime.process.killTree;
+		h.runtime.process.killTree = async (pid) => { const result = await kill(pid); if (pid === LAUNCHED_PID) killed.open(); return result; };
+		const first = modeCommand(h.runtime, [ID, "auto"], () => {});
+		await paused.waiting;
+		const second = h.pauseCaller();
+		const events: string[] = [];
+		const stopping = stopSession(second.runtime, SESSION, (event) => events.push(event.code));
+		try {
+			expect(await Promise.race([second.waiting.then(() => "waiting"), stopping.then(() => "finished")])).toBe("waiting");
+			expect(events).toEqual([]);
+			h.identities[String(LAUNCHED_PID)] = LAUNCHED_CREATED;
+			h.fs.seed(`${DIRECTORY}/processes/${LAUNCHED_PID}.json`, JSON.stringify({ pid: LAUNCHED_PID, pid_created: LAUNCHED_CREATED, started_at: "resumed" }));
+			second.resume();
+			await killed.promise;
+			expect(events).toEqual(["session-terminating"]);
+		} finally { paused.resume(); second.resume(); await Promise.allSettled([first, stopping]); }
+		expect(code(await first)).toBe("session-ending");
+		expect(await stopping).toEqual(apiOk({ session: ID, stopped: true, compacted: null }));
+		expect(h.identities[String(LAUNCHED_PID)]).toBeNull();
+		expect(await h.fs.stat(MARKER)).toBeNull();
+	});
+
+	test("a takeover's final kill looks up processes registered while observing the owner's release", async () => {
+		const h = setup();
+		const entered = gate();
+		const resume = gate();
+		const owner = withSessionEnding(h.runtime, ID, async () => { entered.open(); await resume.promise; return apiOk(null); });
+		await entered.promise;
+		const second = h.pauseCaller();
+		const stopping = stopSession(second.runtime, SESSION, () => {});
+		try {
+			expect(await Promise.race([second.waiting.then(() => "waiting"), stopping.then(() => "finished")])).toBe("waiting");
+			resume.open();
+			await owner;
+			const read = h.fs.readText.bind(h.fs);
+			let registered = false;
+			h.fs.readText = async (path) => {
+				const text = await read(path);
+				if (path === MARKER && !registered) {
+					registered = true;
+					h.identities[String(LAUNCHED_PID)] = LAUNCHED_CREATED;
+					h.fs.seed(`${DIRECTORY}/processes/${LAUNCHED_PID}.json`, JSON.stringify({ pid: LAUNCHED_PID, pid_created: LAUNCHED_CREATED, started_at: "resumed" }));
+				}
+				return text;
+			};
+			second.resume();
+			expect(await stopping).toEqual(apiOk({ session: ID, stopped: true, compacted: null }));
+			expect(h.killed).toEqual([CLAUDE_PID, WINDOW_PID, LAUNCHED_PID]);
+			expect(h.identities[String(LAUNCHED_PID)]).toBeNull();
+		} finally { resume.open(); second.resume(); await Promise.allSettled([owner, stopping]); }
+	});
+
+	test("mode kills a window registered before its interrupted launch reports failure", async () => {
 		const h = setup();
 		h.response("event-1", { context: { tokens: TOKENS_AFTER } });
 		const entered = gate();
@@ -154,43 +230,46 @@ describe("session ending ownership", () => {
 			await resume.promise;
 			h.identities[String(LAUNCHED_PID)] = LAUNCHED_CREATED;
 			h.fs.seed(`${DIRECTORY}/processes/${LAUNCHED_PID}.json`, JSON.stringify({ pid: LAUNCHED_PID, pid_created: LAUNCHED_CREATED, started_at: "resumed" }));
-			return launchFails ? err("launch failed") : ok({ exited: false, exitCode: null, stderr: "", pid: LAUNCHED_PID });
+			return err("launch failed");
 		};
 		const first = modeCommand(h.runtime, [ID, "auto"], () => {});
-		try {
-			await entered.promise;
-			expect(await stopSession(h.caller(), SESSION, () => {})).toEqual(apiOk({ session: ID, stopped: false, reason: "not-running" }));
-		} finally { resume.open(); }
-		expect(code(await first)).toBe("session-ending");
-		expect(h.identities[String(LAUNCHED_PID)]).toBeNull();
-	});
-
-	test("a stop waits for an authorized transcript edit to finish", async () => {
-		const h = setup();
-		h.response("event-1", { tokensBefore: TOKENS_BEFORE, tokensAfter: TOKENS_AFTER });
-		const entered = gate();
-		const resume = gate();
-		const waiting = gate();
-		const retry = gate();
-		const readRange = h.fs.readRange.bind(h.fs);
-		h.fs.readRange = async (path, offset, length) => {
-			if (path === TRANSCRIPT) { entered.open(); await resume.promise; }
-			return readRange(path, offset, length);
-		};
-		const first = cleanupSession(h.runtime, SESSION, () => {});
+		const second = h.pauseCaller();
 		let stopping: Promise<Awaited<ReturnType<typeof stopSession>>> | undefined;
 		try {
 			await entered.promise;
-			const second = h.caller();
-			second.lock.clock = { ...second.lock.clock, sleep: async () => { waiting.open(); await retry.promise; } };
-			stopping = stopSession(second, SESSION, () => {});
-			const state = await Promise.race([waiting.promise.then(() => "waiting"), stopping.then(() => "finished")]);
-			expect(state).toBe("waiting");
-			expect(JSON.parse(await h.fs.readText(MARKER))).toMatchObject({ takenOver: false });
-			expect(await h.fs.readText(TRANSCRIPT)).toBe(SKILLS);
+			stopping = stopSession(second.runtime, SESSION, () => {});
+			expect(await Promise.race([second.waiting.then(() => "waiting"), stopping.then(() => "finished")])).toBe("waiting");
 			resume.open();
+			expect(code(await first)).toBe("session-ending");
+			expect(h.identities[String(LAUNCHED_PID)]).toBeNull();
+		} finally { resume.open(); second.resume(); await Promise.allSettled([first, stopping]); }
+		expect(await stopping).toEqual(apiOk({ session: ID, stopped: false, reason: "not-running" }));
+	});
+
+	test("cleanup retries its edit without a guard, while a takeover waits for its release", async () => {
+		const h = setup();
+		h.response("event-1", { tokensBefore: TOKENS_BEFORE, tokensAfter: TOKENS_AFTER });
+		const paused = h.pause();
+		const rename = h.fs.rename.bind(h.fs);
+		let locked = true;
+		h.fs.rename = async (from, to) => {
+			if (to === TRANSCRIPT && locked) { locked = false; throw Object.assign(new Error("locked transcript"), { code: "EBUSY" }); }
+			await rename(from, to);
+		};
+		const first = cleanupSession(h.runtime, SESSION, () => {});
+		const second = h.pauseCaller();
+		let stopping: Promise<Awaited<ReturnType<typeof stopSession>>> | undefined;
+		try {
+			await paused.waiting;
+			expect(await h.fs.stat(GUARD)).toBeNull();
+			expect(await h.fs.stat(`${MARKER}.lock`)).toBeNull();
+			stopping = stopSession(second.runtime, SESSION, () => {});
+			expect(await Promise.race([second.waiting.then(() => "waiting"), stopping.then(() => "finished")])).toBe("waiting");
+			expect(JSON.parse(await h.fs.readText(MARKER))).toMatchObject({ takenOver: true });
+			expect(await h.fs.readText(TRANSCRIPT)).toBe(SKILLS);
+			paused.resume();
 			expect(code(await first)).toBe("ok");
-		} finally { resume.open(); retry.open(); }
+		} finally { paused.resume(); second.resume(); await Promise.allSettled([first, stopping]); }
 		expect(await stopping).toEqual(apiOk({ session: ID, stopped: false, reason: "not-running" }));
 		expect(await h.fs.readText(TRANSCRIPT)).not.toBe(SKILLS);
 	});
@@ -216,7 +295,14 @@ describe("session ending ownership", () => {
 			expect(code(await cleanupSession(h.caller(THIRD_OWNER_PID), SESSION, () => {}))).toBe("session-ending");
 			expect(code(await modeCommand(h.caller(THIRD_OWNER_PID), [ID, "auto"], () => {}))).toBe("session-ending");
 			h.runtime.process.killTree = kill;
-			expect(await stopSession(h.caller(THIRD_OWNER_PID), SESSION, () => {})).toEqual(apiOk({ session: ID, stopped: true, compacted: null }));
+			const third = h.pauseCaller(THIRD_OWNER_PID);
+			const last = stopSession(third.runtime, SESSION, () => {});
+			try {
+				expect(await Promise.race([third.waiting.then(() => "waiting"), last.then(() => "finished")])).toBe("waiting");
+				resumeStop.open();
+				await stopping;
+			} finally { third.resume(); resumeStop.open(); await last; }
+			expect(await last).toEqual(apiOk({ session: ID, stopped: true, compacted: null }));
 			expect(h.requests).toEqual([]);
 		} finally { resumeOwner.open(); resumeStop.open(); }
 		expect(code(await stopping)).toBe("ok");
@@ -234,6 +320,109 @@ describe("session ending ownership", () => {
 		};
 		expect(await modeCommand(h.runtime, [ID, "auto"], () => {})).toEqual(apiOk({ session: ID, mode: "auto", pid: LAUNCHED_PID }));
 		expect(await h.fs.stat(MARKER)).toBeNull();
+	});
+
+	test("a takeover after mode's last check is reported atomically at release", async () => {
+		const h = setup();
+		h.response("event-1", { context: { tokens: TOKENS_AFTER } });
+		const checked = gate();
+		const resume = gate();
+		let launched = false;
+		let lastCheck = false;
+		let paused = false;
+		const read = h.fs.readText.bind(h.fs);
+		h.fs.readText = async (path) => {
+			const value = await read(path);
+			if (path === MARKER && launched) lastCheck = true;
+			return value;
+		};
+		const remove = h.fs.remove.bind(h.fs);
+		h.fs.remove = async (path) => {
+			await remove(path);
+			// Pause after unlocking the last check, before its result reaches mode and release starts.
+			if ((path === GUARD || path === `${MARKER}.lock`) && lastCheck && !paused) { paused = true; checked.open(); await resume.promise; }
+		};
+		h.runtime.process.spawnDetached = async () => {
+			launched = true;
+			h.identities[String(LAUNCHED_PID)] = LAUNCHED_CREATED;
+			h.fs.seed(`${DIRECTORY}/processes/${LAUNCHED_PID}.json`, JSON.stringify({ pid: LAUNCHED_PID, pid_created: LAUNCHED_CREATED, started_at: "resumed" }));
+			return ok({ exited: false, exitCode: null, stderr: "", pid: LAUNCHED_PID });
+		};
+		const first = modeCommand(h.runtime, [ID, "auto"], () => {});
+		const second = h.pauseCaller();
+		let stopping: Promise<Awaited<ReturnType<typeof stopSession>>> | undefined;
+		try {
+			await checked.promise;
+			stopping = stopSession(second.runtime, SESSION, () => {});
+			await Promise.race([second.waiting, stopping]);
+			expect(h.identities[String(LAUNCHED_PID)]).toBeNull();
+			resume.open();
+			expect(code(await first)).toBe("session-ending");
+		} finally { resume.open(); second.resume(); await Promise.allSettled([first, stopping]); }
+		expect(await stopping).toEqual(apiOk({ session: ID, stopped: true, compacted: null }));
+		expect(await h.fs.stat(MARKER)).toBeNull();
+	});
+
+	for (const identity of [null, "reused-owner-creation"]) test(`a waiting stop finishes when the interrupted owner's identity becomes ${identity}`, async () => {
+		const h = setup();
+		const entered = gate();
+		const resume = gate();
+		const owner = withSessionEnding(h.runtime, ID, async () => { entered.open(); await resume.promise; return apiOk(null); });
+		await entered.promise;
+		const second = h.pauseCaller();
+		const stopping = stopSession(second.runtime, SESSION, () => {});
+		try {
+			expect(await Promise.race([second.waiting.then(() => "waiting"), stopping.then(() => "finished")])).toBe("waiting");
+			h.identities[String(h.runtime.lock.process.pid)] = identity;
+			second.resume();
+			expect(await stopping).toEqual(apiOk({ session: ID, stopped: true, compacted: null }));
+			// A later ending discards the dead identity without waiting for its abandoned action.
+			expect(code(await withSessionEnding(h.caller(THIRD_OWNER_PID), ID, async () => apiOk(null)))).toBe("ok");
+		} finally { resume.open(); second.resume(); await Promise.allSettled([owner, stopping]); }
+		expect(await h.fs.stat(MARKER)).toBeNull();
+	});
+
+	test("the relocated guard recovers a dead lock and abandoned takeover and removes both on release", async () => {
+		const h = setup();
+		h.fs.seed(GUARD, JSON.stringify({ pid: OTHER_OWNER_PID, startTime: h.runtime.lock.process.startTime }));
+		h.fs.seed(`${GUARD}.takeover`, "0");
+		h.runtime.lock.process.ownerStartTime = async (pid) => ok(pid === OTHER_OWNER_PID ? null : h.runtime.lock.process.startTime);
+		// The first millisecond beyond lock.ts's stale takeover boundary.
+		h.runtime.lock.clock.now = () => TAKEOVER_STALE_MS + 1;
+		expect(code(await withSessionEnding(h.runtime, ID, async () => apiOk(null)))).toBe("ok");
+		expect(await h.fs.stat(GUARD)).toBeNull();
+		expect(await h.fs.stat(`${GUARD}.takeover`)).toBeNull();
+		expect(await h.fs.stat(MARKER)).toBeNull();
+	});
+
+	for (const takeover of [false, true]) test(`cleanup leaves the transcript untouched when its kill finds nothing live${takeover ? " after takeover" : " after another termination"}`, async () => {
+		const h = setup();
+		h.response("event-1", { tokensBefore: TOKENS_BEFORE, tokensAfter: TOKENS_AFTER });
+		const entered = gate();
+		const resume = gate();
+		let terminating = false;
+		let paused = false;
+		const createdAt = h.runtime.process.createdAt;
+		h.runtime.process.createdAt = async (pids) => {
+			if (terminating && !paused) { paused = true; entered.open(); await resume.promise; }
+			return createdAt(pids);
+		};
+		const first = cleanupSession(h.runtime, SESSION, (event) => { if (event.code === "session-terminating") terminating = true; });
+		const second = h.pauseCaller();
+		let stopping: Promise<Awaited<ReturnType<typeof stopSession>>> | undefined;
+		try {
+			await entered.promise;
+			if (takeover) {
+				stopping = stopSession(second.runtime, SESSION, () => {});
+				await Promise.race([second.waiting, stopping]);
+			} else {
+				for (const process of SESSION.processes) await h.runtime.process.killTree(process.pid);
+			}
+			resume.open();
+			expect(code(await first)).toBe("session-ended");
+			expect(await h.fs.readText(TRANSCRIPT)).toBe(SKILLS);
+			expect((await h.fs.listDirectory("/transcripts")).map((entry) => entry.name)).toEqual([`${ID}.jsonl`]);
+		} finally { resume.open(); second.resume(); await Promise.allSettled([first, stopping]); }
 	});
 
 	test("a failed interrupting kill cannot release the still-compacting owner's marker", async () => {
@@ -260,11 +449,16 @@ describe("session ending ownership", () => {
 		const h = setup();
 		const paused = h.pause();
 		const first = cleanupSession(h.runtime, SESSION, () => {});
+		const second = h.pauseCaller();
+		let stopping: Promise<Awaited<ReturnType<typeof stopSession>>> | undefined;
 		try {
 			await paused.waiting;
-			await stopSession(h.caller(), SESSION, () => {});
+			stopping = stopSession(second.runtime, SESSION, () => {});
+			expect(await Promise.race([second.waiting.then(() => "waiting"), stopping.then(() => "finished")])).toBe("waiting");
 			h.response("event-1", { tokensBefore: TOKENS_BEFORE, tokensAfter: TOKENS_AFTER });
-		} finally { paused.resume(); }
+			paused.resume();
+			await first;
+		} finally { paused.resume(); second.resume(); await Promise.allSettled([first, stopping]); }
 		expect(code(await first)).toBe("session-ended");
 		expect(await h.fs.readText(TRANSCRIPT)).toBe(SKILLS);
 		expect((await h.fs.listDirectory("/transcripts")).map((entry) => entry.name)).toEqual([`${ID}.jsonl`]);

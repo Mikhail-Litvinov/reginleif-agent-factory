@@ -71,7 +71,8 @@ describe("session stop and cleanup", () => {
 		let killed = false;
 		const events: string[] = [];
 		h.runtime.process.killTree = async () => { killed = true; return ok(undefined); };
-		h.runtime.process.createdAt = async () => ok({ [String(h.runtime.lock.process.pid)]: FAKE_OWNER_CREATED, "42": killed ? null : CREATED, "99": "owner" });
+		// The interrupted rig exits after the first kill, so its abandoned marker cannot hold up this stop.
+		h.runtime.process.createdAt = async () => ok({ [String(h.runtime.lock.process.pid)]: FAKE_OWNER_CREATED, "42": killed ? null : CREATED, "99": killed ? null : "owner" });
 		const result = await stopSession(h.runtime, SESSION, (event) => events.push(event.code));
 		expect(result.ok && result.value.stopped).toBe(true);
 		expect(events).toEqual(["session-terminating"]);

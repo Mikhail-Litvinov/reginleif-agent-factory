@@ -13,8 +13,6 @@ export type SessionEnding = {
 	takenOver(): Promise<ApiResult<boolean>>;
 	// Authorizes and initiates a side effect atomically with takeover. A returned promise is awaited outside the guard.
 	start<T>(action: () => T): Promise<ApiResult<T>>;
-	// Keep the guard until the action finishes, so takeover cannot interrupt it.
-	exclusive<T>(action: () => Promise<ApiResult<T>>): Promise<ApiResult<T>>;
 };
 
 const markerPath = (runtime: RuntimePorts, id: string): string => joinPath(runtime.home, ".agent-rig", "sessions", id, "ending.json");
@@ -66,8 +64,10 @@ export const sessionEndingLive = async (runtime: RuntimePorts, id: string): Prom
 
 // Reuse rig's lock only around marker transitions, including stale-owner removal. Two contenders must never
 // both delete a stale marker: the second could otherwise delete the first contender's new, live ownership.
-const guarded = async <T>(runtime: RuntimePorts, path: string, action: () => Promise<ApiResult<T>>): Promise<ApiResult<T>> => {
-	const locked = await acquireLock({ ...runtime.lock, lockPath: `${path}.lock`, messages: messagesFor(runtime.language) }, () => {});
+const guarded = async <T>(runtime: RuntimePorts, id: string, action: () => Promise<ApiResult<T>>): Promise<ApiResult<T>> => {
+	const directory = joinPath(runtime.home, ".agent-rig", "sessions");
+	try { await runtime.fs.ensureDirectory(directory); } catch (error) { return io(runtime, errorText(error)); }
+	const locked = await acquireLock({ ...runtime.lock, lockPath: joinPath(directory, `${id}.ending.lock`), messages: messagesFor(runtime.language) }, () => {});
 	if (!locked.ok) return io(runtime, locked.error);
 	let result: ApiResult<T>;
 	try { result = await action(); } catch (error) { result = io(runtime, errorText(error)); }
@@ -75,15 +75,25 @@ const guarded = async <T>(runtime: RuntimePorts, path: string, action: () => Pro
 	return !released.ok && result.ok ? io(runtime, released.error) : result;
 };
 
+// Record deletion and marker creation share a guard outside the removable directory.
+export const removeSessionUnlessEnding = (runtime: RuntimePorts, id: string): Promise<ApiResult<boolean>> => guarded(runtime, id, async () => {
+	const live = await sessionEndingLive(runtime, id);
+	if (!live.ok) return live;
+	if (live.value) return apiOk(false);
+	try { await runtime.fs.remove(joinPath(runtime.home, ".agent-rig", "sessions", `${id}.json`)); }
+	catch (error) { if (!missing(error)) return io(runtime, errorText(error)); }
+	try { await runtime.fs.removeDirectoryTree(joinPath(runtime.home, ".agent-rig", "sessions", id)); }
+	catch (error) { if (!missing(error)) return io(runtime, errorText(error)); }
+	return apiOk(true);
+});
+
 type Entered = { marker: Marker; interrupted: boolean };
 
 // Only stop may interrupt a live owner. All still-running operations retain an ownership token, so completion
 // of either the interrupted operation or its interrupting stop cannot release the other's marker prematurely.
-export const withSessionEnding = async <T>(runtime: RuntimePorts, id: string, action: (ending: SessionEnding) => Promise<ApiResult<T>>, onBusy?: () => Promise<ApiResult<T>>): Promise<ApiResult<T>> => {
+export const withSessionEnding = async <T>(runtime: RuntimePorts, id: string, action: (ending: SessionEnding) => Promise<ApiResult<T>>, onBusy?: (ownersLive: () => Promise<ApiResult<boolean>>) => Promise<ApiResult<T>>, onReleased?: (result: ApiResult<T>, takenOver: boolean) => ApiResult<T>): Promise<ApiResult<T>> => {
 	const path = markerPath(runtime, id);
-	try { await runtime.fs.ensureDirectory(joinPath(runtime.home, ".agent-rig", "sessions", id)); }
-	catch (error) { return io(runtime, errorText(error)); }
-	const entered = await guarded<Entered>(runtime, path, async () => {
+	const entered = await guarded<Entered>(runtime, id, async () => {
 		const existing = await readMarker(runtime, path);
 		if (!existing.ok) return existing;
 		const pid = runtime.lock.process.pid;
@@ -97,6 +107,7 @@ export const withSessionEnding = async <T>(runtime: RuntimePorts, id: string, ac
 		const pidCreated = created.value[String(pid)];
 		if (pidCreated === undefined || pidCreated === null || pidCreated === "") return io(runtime, messagesFor(runtime.language).runtime.processNotFound());
 		const marker: Marker = { pid, pidCreated, token: runtime.fs.uniqueSuffix(), takenOver: interrupted, otherOwners };
+		await runtime.fs.ensureDirectory(joinPath(runtime.home, ".agent-rig", "sessions", id));
 		if (interrupted) {
 			const recorded = await atomicWrite(runtime.fs, path, JSON.stringify(marker), messagesFor(runtime.language));
 			return recorded.ok ? apiOk({ marker, interrupted }) : io(runtime, recorded.error);
@@ -112,36 +123,43 @@ export const withSessionEnding = async <T>(runtime: RuntimePorts, id: string, ac
 		const current = await readMarker(runtime, path);
 		return current.ok ? apiOk(current.value === null || current.value.token !== marker.token || current.value.takenOver) : current;
 	};
+	const ownersLive = () => guarded(runtime, id, async () => {
+		const current = await readMarker(runtime, path);
+		if (!current.ok) return current;
+		const tokens = new Set(current.value === null ? [] : [current.value, ...current.value.otherOwners].map((owner) => owner.token));
+		const owners = marker.otherOwners.filter((owner) => tokens.has(owner.token));
+		if (owners.length === 0) return apiOk(false);
+		const created = await runtime.process.createdAt([...new Set(owners.map((owner) => owner.pid))]);
+		if (!created.ok) return io(runtime, created.error);
+		if (owners.some((owner) => created.value[String(owner.pid)] === undefined)) return io(runtime, messagesFor(runtime.language).failure.processTableIncomplete());
+		return apiOk(owners.some((owner) => created.value[String(owner.pid)] === owner.pidCreated));
+	});
 	const ending: SessionEnding = {
-		takenOver: () => guarded(runtime, path, takenOver),
-		start: (start) => guarded(runtime, path, async () => {
+		takenOver: () => guarded(runtime, id, takenOver),
+		start: (start) => guarded(runtime, id, async () => {
 			const interrupted = await takenOver();
 			if (!interrupted.ok) return interrupted;
 			return interrupted.value ? apiFail(SESSION_ENDING, messagesFor(runtime.language).session.ending()) : apiOk(start());
 		}),
-		exclusive: (action) => guarded(runtime, path, async () => {
-			const interrupted = await takenOver();
-			if (!interrupted.ok) return interrupted;
-			return interrupted.value ? apiFail(SESSION_ENDING, messagesFor(runtime.language).session.ending()) : await action();
-		}),
 	};
 	let result: ApiResult<T>;
-	try { result = entered.value.interrupted && onBusy !== undefined ? await onBusy() : await action(ending); }
+	try { result = entered.value.interrupted && onBusy !== undefined ? await onBusy(ownersLive) : await action(ending); }
 	catch (error) { result = io(runtime, errorText(error)); }
-	const released = await guarded(runtime, path, async () => {
+	const released = await guarded(runtime, id, async () => {
 		const current = await readMarker(runtime, path);
 		if (!current.ok) return current;
-		if (current.value === null) return apiOk(null);
+		if (current.value === null) return apiOk(true);
 		const owners = [current.value, ...current.value.otherOwners];
 		const remaining = owners.filter((owner) => owner.token !== marker.token);
-		if (remaining.length === owners.length) return apiOk(null);
+		if (remaining.length === owners.length) return apiOk(true);
 		const [owner, ...otherOwners] = remaining;
 		if (owner === undefined) await runtime.fs.remove(path);
 		else {
 			const recorded = await atomicWrite(runtime.fs, path, JSON.stringify({ pid: owner.pid, pidCreated: owner.pidCreated, token: owner.token, takenOver: current.value.takenOver, otherOwners }), messagesFor(runtime.language));
 			if (!recorded.ok) return io(runtime, recorded.error);
 		}
-		return apiOk(null);
+		return apiOk(current.value.takenOver);
 	});
-	return !released.ok && result.ok ? released : result;
+	if (!released.ok) return result.ok ? released : result;
+	return onReleased === undefined ? result : onReleased(result, released.value);
 };

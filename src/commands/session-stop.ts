@@ -5,7 +5,7 @@ import type { SessionEnding } from "../session-ending.js";
 
 import { apiFail, apiOk, PROGRESS_CODE_SESSION_COMPACTING, PROGRESS_CODE_SESSION_TERMINATING, SESSION_IO, SESSION_STOP_TIMEOUT } from "../output.js";
 import { messagesFor } from "../messages.js";
-import { compactSessionCore, liveProcesses, requestSession, sessionLive, SESSION_POLL_MS, SESSION_TIMEOUTS } from "../session-core.js";
+import { compactSessionCore, liveProcesses, lookupSession, requestSession, sessionLive, SESSION_POLL_MS, SESSION_TIMEOUTS } from "../session-core.js";
 import { withSessionEnding } from "../session-ending.js";
 
 // A stop compacts the session first only when it holds more tokens than this. The threshold is rig's own; its origin is not recorded in this repo.
@@ -66,13 +66,30 @@ export const stopEndingSession = async (runtime: RuntimePorts, session: SessionR
 
 export const stopSession = (runtime: RuntimePorts, session: SessionRecord, progress: (event: ProgressEvent) => void): Promise<ApiResult<StopResult>> => withSessionEnding<StopResult>(runtime, session.id,
 	(ending) => stopEndingSession(runtime, session, progress, ending),
-	async () => {
-		const live = await sessionLive(runtime, session);
-		if (!live.ok) return live;
-		if (!live.value) return apiOk({ session: session.id, stopped: false, reason: "not-running" });
-		progress({ code: PROGRESS_CODE_SESSION_TERMINATING });
-		const stopped = await endSession(runtime, session);
-		if (!stopped.ok) return stopped;
-		return stopped.value ? apiOk({ session: session.id, stopped: true, compacted: null }) : apiOk({ session: session.id, stopped: false, reason: "not-running" });
+	async (ownersLive) => {
+		let stopped = false;
+		let announced = false;
+		const killCurrent = async (): Promise<ApiResult<boolean>> => {
+			const current = await lookupSession(runtime, session.id);
+			if (!current.ok) return current;
+			const live = await sessionLive(runtime, current.value);
+			if (!live.ok) return live;
+			if (live.value && !announced) { announced = true; progress({ code: PROGRESS_CODE_SESSION_TERMINATING }); }
+			return endSession(runtime, current.value);
+		};
+		// No elapsed-time limit: release or owner death ends this wait. The owner's steps are bounded:
+		// compaction notices the kill within a poll; mode's registration wait is bounded to 90 seconds.
+		for (;;) {
+			const ended = await killCurrent();
+			if (!ended.ok) return ended;
+			stopped = ended.value || stopped;
+			const live = await ownersLive();
+			if (!live.ok) return live;
+			if (!live.value) break;
+			await runtime.clock.sleep(SESSION_POLL_MS);
+		}
+		const final = await killCurrent();
+		if (!final.ok) return final;
+		return stopped || final.value ? apiOk({ session: session.id, stopped: true, compacted: null }) : apiOk({ session: session.id, stopped: false, reason: "not-running" });
 	},
 );

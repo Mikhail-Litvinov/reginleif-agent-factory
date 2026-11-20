@@ -7,7 +7,7 @@ import { joinPath } from "./file-system.js";
 import { messagesFor } from "./messages.js";
 import { apiFail, apiOk, PROGRESS_CODE_SESSION_RUNNING, PROGRESS_CODE_SESSION_WAITING, SESSION_BAD_ID, SESSION_BAD_RESPONSE, SESSION_CLAIM_LOST, SESSION_ENDED, SESSION_INVALID, SESSION_IO, SESSION_MODULE_ERROR, SESSION_NO_MODULE, SESSION_TIMEOUT, SESSION_UNKNOWN } from "./output.js";
 import { errorText } from "./result.js";
-import { sessionEndingLive } from "./session-ending.js";
+import { removeSessionUnlessEnding } from "./session-ending.js";
 import { resolveTranscriptPath } from "./transcript-path.js";
 
 // A pid file holds a positive decimal integer (the module validates the same shape before writing it).
@@ -122,11 +122,9 @@ const retainSession = async (r: RuntimePorts, session: SessionRecord, getLive: (
 		const live = await getLive();
 		if (!live.ok) return live;
 		if (live.value.length > 0) return apiOk(session);
-		const ending = await sessionEndingLive(r, session.id);
-		if (!ending.ok) return ending;
-		if (ending.value) return apiOk(session);
-		try { await r.fs.remove(joinPath(root(r), `${session.id}.json`)); } catch (e) { if (!missing(e)) throw e; }
-		try { await r.fs.removeDirectoryTree(folder(r, session.id)); } catch (e) { if (!missing(e)) throw e; }
+		const removed = await removeSessionUnlessEnding(r, session.id);
+		if (!removed.ok) return removed;
+		if (!removed.value) return apiOk(session);
 		return apiFail(SESSION_UNKNOWN, m.unknown(session.id));
 	} catch (e) { return apiFail(SESSION_IO, m.io(errorText(e))); }
 };
