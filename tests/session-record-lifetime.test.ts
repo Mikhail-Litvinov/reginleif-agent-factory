@@ -19,6 +19,30 @@ const setup = () => {
 };
 
 describe("session record lifetime", () => {
+	test("a live ending owner keeps the record and marker for lookup and list", async () => {
+		const h = setup();
+		const marker = `${ROOT}/${ID}/ending.json`;
+		h.fs.seed(marker, JSON.stringify({ pid: 51, pidCreated: CREATED, token: "first", takenOver: true, otherOwners: [{ pid: 52, pidCreated: CREATED, token: "second" }] }));
+		h.runtime.process.createdAt = async (pids) => ok(Object.fromEntries(pids.map((pid) => [String(pid), pid === 52 ? CREATED : null])));
+		expect((await lookupSession(h.runtime, ID)).ok).toBe(true);
+		const list = await listSessions(h.runtime);
+		expect(list.ok && list.value.sessions.length).toBe(1);
+		expect(h.fs.files.has(marker)).toBe(true);
+	});
+	test("a stale ending owner does not keep the record", async () => {
+		const h = setup();
+		h.fs.seed(`${ROOT}/${ID}/ending.json`, JSON.stringify({ pid: 51, pidCreated: CREATED, token: "first", takenOver: false, otherOwners: [] }));
+		h.runtime.process.createdAt = async (pids) => ok(Object.fromEntries(pids.map((pid) => [String(pid), pid === 51 ? "reused" : null])));
+		const lookup = await lookupSession(h.runtime, ID);
+		expect(lookup.ok ? "ok" : lookup.error.code).toBe("session-unknown");
+		expect(h.fs.directories.has(`${ROOT}/${ID}`)).toBe(false);
+	});
+	test("an incomplete ending owner query preserves the record", async () => {
+		const h = setup();
+		h.fs.seed(`${ROOT}/${ID}/ending.json`, JSON.stringify({ pid: 51, pidCreated: CREATED, token: "first", takenOver: false, otherOwners: [] }));
+		expect((await lookupSession(h.runtime, ID)).ok).toBe(false);
+		expect(h.fs.files.has(`${ROOT}/${ID}.json`)).toBe(true);
+	});
 	test("list removes an expired record and lookup reports it missing", async () => {
 		const h = setup();
 		const list = await listSessions(h.runtime);

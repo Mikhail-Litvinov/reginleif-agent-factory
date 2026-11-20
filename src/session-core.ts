@@ -7,6 +7,7 @@ import { joinPath } from "./file-system.js";
 import { messagesFor } from "./messages.js";
 import { apiFail, apiOk, PROGRESS_CODE_SESSION_RUNNING, PROGRESS_CODE_SESSION_WAITING, SESSION_BAD_ID, SESSION_BAD_RESPONSE, SESSION_CLAIM_LOST, SESSION_ENDED, SESSION_INVALID, SESSION_IO, SESSION_MODULE_ERROR, SESSION_NO_MODULE, SESSION_TIMEOUT, SESSION_UNKNOWN } from "./output.js";
 import { errorText } from "./result.js";
+import { sessionEndingLive } from "./session-ending.js";
 import { resolveTranscriptPath } from "./transcript-path.js";
 
 // A pid file holds a positive decimal integer (the module validates the same shape before writing it).
@@ -113,7 +114,7 @@ export const sessionLive = async (r: RuntimePorts, session: SessionRecord): Prom
 	return live.ok ? apiOk(live.value.length > 0) : live;
 };
 
-// A record without a transcript is useful only while a process is still running.
+// A record without a transcript remains while a session process or ending owner is live.
 const retainSession = async (r: RuntimePorts, session: SessionRecord, getLive: () => Promise<ApiResult<SessionProcess[]>>): Promise<ApiResult<SessionRecord>> => {
 	const m = messagesFor(r.language).session;
 	try {
@@ -121,6 +122,9 @@ const retainSession = async (r: RuntimePorts, session: SessionRecord, getLive: (
 		const live = await getLive();
 		if (!live.ok) return live;
 		if (live.value.length > 0) return apiOk(session);
+		const ending = await sessionEndingLive(r, session.id);
+		if (!ending.ok) return ending;
+		if (ending.value) return apiOk(session);
 		try { await r.fs.remove(joinPath(root(r), `${session.id}.json`)); } catch (e) { if (!missing(e)) throw e; }
 		try { await r.fs.removeDirectoryTree(folder(r, session.id)); } catch (e) { if (!missing(e)) throw e; }
 		return apiFail(SESSION_UNKNOWN, m.unknown(session.id));
@@ -252,7 +256,7 @@ export const requestSession = async (r: RuntimePorts, session: SessionRecord, op
 				try { pidText = (await r.fs.readText(joinPath(claimDir, CLAIM_PID_FILE))).trim(); } catch (e) { if (!missing(e)) throw e; }
 				if (pidText !== null && PID_PATTERN.test(pidText) && Number.isSafeInteger(Number(pidText))) claimant = { pid: Number(pidText), created: null };
 			}
-			const current = await lookupSession(r, session.id);
+			const current = await readSession(r, session.id);
 			if (!current.ok) return current;
 			const sessionPids = checkable(current.value.processes);
 			const pollPids = firstPoll
@@ -265,6 +269,7 @@ export const requestSession = async (r: RuntimePorts, session: SessionRecord, op
 				created = firstPoll ? { ...created, ...queried.value } : queried.value;
 			}
 			firstPoll = false;
+			if (liveAmong(current.value.processes, created).length === 0) return apiFail(SESSION_ENDED, m.ended());
 			if (claimant !== null) {
 				const now = created[String(claimant.pid)] ?? null;
 				if (claimant.created === null && now !== null) {
@@ -275,7 +280,6 @@ export const requestSession = async (r: RuntimePorts, session: SessionRecord, op
 				claimant.created ??= now;
 				if (now === null || now !== claimant.created) return apiFail(SESSION_CLAIM_LOST, m.claimLost());
 			}
-			if (liveAmong(current.value.processes, created).length === 0) return apiFail(SESSION_ENDED, m.ended());
 			const remaining = deadline - r.clock.now().getTime();
 			if (remaining <= 0) {
 				return apiFail(SESSION_TIMEOUT, m.timeout());

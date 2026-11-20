@@ -13,6 +13,8 @@ export type SessionEnding = {
 	takenOver(): Promise<ApiResult<boolean>>;
 	// Authorizes and initiates a side effect atomically with takeover. A returned promise is awaited outside the guard.
 	start<T>(action: () => T): Promise<ApiResult<T>>;
+	// Keep the guard until the action finishes, so takeover cannot interrupt it.
+	exclusive<T>(action: () => Promise<ApiResult<T>>): Promise<ApiResult<T>>;
 };
 
 const markerPath = (runtime: RuntimePorts, id: string): string => joinPath(runtime.home, ".agent-rig", "sessions", id, "ending.json");
@@ -49,6 +51,17 @@ const readMarker = async (runtime: RuntimePorts, path: string): Promise<ApiResul
 		const marker = parseMarker(await runtime.fs.readText(path));
 		return marker === null ? io(runtime, messagesFor(runtime.language).failure.lockMalformed()) : apiOk(marker);
 	} catch (error) { return missing(error) ? apiOk(null) : io(runtime, errorText(error)); }
+};
+
+export const sessionEndingLive = async (runtime: RuntimePorts, id: string): Promise<ApiResult<boolean>> => {
+	const marker = await readMarker(runtime, markerPath(runtime, id));
+	if (!marker.ok) return marker;
+	if (marker.value === null) return apiOk(false);
+	const owners = [marker.value, ...marker.value.otherOwners];
+	const created = await runtime.process.createdAt([...new Set(owners.map((owner) => owner.pid))]);
+	if (!created.ok) return io(runtime, created.error);
+	if (owners.some((owner) => created.value[String(owner.pid)] === undefined)) return io(runtime, messagesFor(runtime.language).failure.processTableIncomplete());
+	return apiOk(owners.some((owner) => created.value[String(owner.pid)] === owner.pidCreated));
 };
 
 // Reuse rig's lock only around marker transitions, including stale-owner removal. Two contenders must never
@@ -105,6 +118,11 @@ export const withSessionEnding = async <T>(runtime: RuntimePorts, id: string, ac
 			const interrupted = await takenOver();
 			if (!interrupted.ok) return interrupted;
 			return interrupted.value ? apiFail(SESSION_ENDING, messagesFor(runtime.language).session.ending()) : apiOk(start());
+		}),
+		exclusive: (action) => guarded(runtime, path, async () => {
+			const interrupted = await takenOver();
+			if (!interrupted.ok) return interrupted;
+			return interrupted.value ? apiFail(SESSION_ENDING, messagesFor(runtime.language).session.ending()) : await action();
 		}),
 	};
 	let result: ApiResult<T>;

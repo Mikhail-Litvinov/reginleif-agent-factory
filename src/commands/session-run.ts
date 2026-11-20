@@ -16,7 +16,7 @@ import { liveProcesses, lookupSession, lookupSessionForCommand, processKey, sess
 import { withSessionEnding } from "../session-ending.js";
 import { accountOf, INFO_ERROR_STATE_UNREADABLE } from "./info.js";
 import { readRigState } from "./shared.js";
-import { stopEndingSession } from "./session-stop.js";
+import { endSession, stopEndingSession } from "./session-stop.js";
 
 // How long a launch waits to see whether its process exits at once (ms); the launch file is removed only once older than this.
 const LAUNCH_EXIT_GRACE_MS = 2000;
@@ -225,6 +225,15 @@ export const modeCommand = async (runtime: RuntimePorts, args: readonly string[]
 		if (takenOver.value) return apiFail(SESSION_ENDING, messagesFor(runtime.language).session.ending());
 		if (!stopped.ok) return stopped;
 		const result = await runSession(runtime, session.value, mode, launch.value.account, (command) => spawnLaunch(runtime, command, ending));
+		const interrupted = await ending.takenOver();
+		if (!interrupted.ok) return interrupted;
+		if (interrupted.value) {
+			const current = await lookupSession(runtime, id);
+			if (!current.ok) return current;
+			const ended = await endSession(runtime, current.value);
+			if (!ended.ok) return ended;
+			return apiFail(SESSION_ENDING, messagesFor(runtime.language).session.ending());
+		}
 		return result.ok ? apiOk({ session: id, mode, pid: result.value.pid }) : result;
 	});
 };

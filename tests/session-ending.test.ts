@@ -144,6 +144,57 @@ describe("session ending ownership", () => {
 		expect(await h.fs.stat(MARKER)).toBeNull();
 	});
 
+	for (const launchFails of [false, true]) test(`a takeover after spawn stops a later registration when launch ${launchFails ? "fails" : "succeeds"}`, async () => {
+		const h = setup();
+		h.response("event-1", { context: { tokens: TOKENS_AFTER } });
+		const entered = gate();
+		const resume = gate();
+		h.runtime.process.spawnDetached = async () => {
+			entered.open();
+			await resume.promise;
+			h.identities[String(LAUNCHED_PID)] = LAUNCHED_CREATED;
+			h.fs.seed(`${DIRECTORY}/processes/${LAUNCHED_PID}.json`, JSON.stringify({ pid: LAUNCHED_PID, pid_created: LAUNCHED_CREATED, started_at: "resumed" }));
+			return launchFails ? err("launch failed") : ok({ exited: false, exitCode: null, stderr: "", pid: LAUNCHED_PID });
+		};
+		const first = modeCommand(h.runtime, [ID, "auto"], () => {});
+		try {
+			await entered.promise;
+			expect(await stopSession(h.caller(), SESSION, () => {})).toEqual(apiOk({ session: ID, stopped: false, reason: "not-running" }));
+		} finally { resume.open(); }
+		expect(code(await first)).toBe("session-ending");
+		expect(h.identities[String(LAUNCHED_PID)]).toBeNull();
+	});
+
+	test("a stop waits for an authorized transcript edit to finish", async () => {
+		const h = setup();
+		h.response("event-1", { tokensBefore: TOKENS_BEFORE, tokensAfter: TOKENS_AFTER });
+		const entered = gate();
+		const resume = gate();
+		const waiting = gate();
+		const retry = gate();
+		const readRange = h.fs.readRange.bind(h.fs);
+		h.fs.readRange = async (path, offset, length) => {
+			if (path === TRANSCRIPT) { entered.open(); await resume.promise; }
+			return readRange(path, offset, length);
+		};
+		const first = cleanupSession(h.runtime, SESSION, () => {});
+		let stopping: Promise<Awaited<ReturnType<typeof stopSession>>> | undefined;
+		try {
+			await entered.promise;
+			const second = h.caller();
+			second.lock.clock = { ...second.lock.clock, sleep: async () => { waiting.open(); await retry.promise; } };
+			stopping = stopSession(second, SESSION, () => {});
+			const state = await Promise.race([waiting.promise.then(() => "waiting"), stopping.then(() => "finished")]);
+			expect(state).toBe("waiting");
+			expect(JSON.parse(await h.fs.readText(MARKER))).toMatchObject({ takenOver: false });
+			expect(await h.fs.readText(TRANSCRIPT)).toBe(SKILLS);
+			resume.open();
+			expect(code(await first)).toBe("ok");
+		} finally { resume.open(); retry.open(); }
+		expect(await stopping).toEqual(apiOk({ session: ID, stopped: false, reason: "not-running" }));
+		expect(await h.fs.readText(TRANSCRIPT)).not.toBe(SKILLS);
+	});
+
 	test("a stop waiting for process exit leaves cleanup, mode and another stop responsive", async () => {
 		const h = setup();
 		const entered = gate();

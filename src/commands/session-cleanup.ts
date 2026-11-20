@@ -2,7 +2,7 @@ import type { ApiResult, ProgressEvent } from "../output.js";
 import type { RuntimePorts } from "../ports.js";
 import type { SessionRecord } from "../session-core.js";
 
-import { apiFail, apiOk, PROGRESS_CODE_SESSION_COMPACTING, PROGRESS_CODE_SESSION_TERMINATING, SESSION_CLEANUP_NOT_COMPACTED, SESSION_ENDED, SESSION_IO } from "../output.js";
+import { apiFail, apiOk, PROGRESS_CODE_SESSION_COMPACTING, PROGRESS_CODE_SESSION_TERMINATING, SESSION_CLEANUP_NOT_COMPACTED, SESSION_ENDED, SESSION_ENDING, SESSION_IO } from "../output.js";
 import { messagesFor } from "../messages.js";
 import { compactSessionCore, sessionLive } from "../session-core.js";
 import { withSessionEnding } from "../session-ending.js";
@@ -23,11 +23,12 @@ export const cleanupSession = (runtime: RuntimePorts, session: SessionRecord, pr
 	progress({ code: PROGRESS_CODE_SESSION_TERMINATING });
 	const stopped = await endSession(runtime, session);
 	if (!stopped.ok) return stopped;
-	const stoppedUnderneath = await ending.takenOver();
-	if (!stoppedUnderneath.ok) return stoppedUnderneath;
-	if (stoppedUnderneath.value) return apiFail(SESSION_ENDED, messagesFor(runtime.language).session.ended());
 	if (session.transcriptPath === null || session.transcriptPath.replaceAll("\\", "/").split("/").at(-1) !== `${session.id}.jsonl`) return apiFail(SESSION_IO, messagesFor(runtime.language).session.io(messagesFor(runtime.language).session.transcriptPath()));
-	const cleaned = await cleanTranscript(runtime, session.transcriptPath);
-	if (!cleaned.ok) return apiFail(SESSION_IO, cleaned.error);
+	const path = session.transcriptPath;
+	const cleaned = await ending.exclusive(async () => {
+		const result = await cleanTranscript(runtime, path);
+		return result.ok ? apiOk(result.value) : apiFail(SESSION_IO, result.error);
+	});
+	if (!cleaned.ok) return cleaned.error.code === SESSION_ENDING ? apiFail(SESSION_ENDED, messagesFor(runtime.language).session.ended()) : cleaned;
 	return apiOk({ session: session.id, compacted: compact.value, ...cleaned.value });
 });

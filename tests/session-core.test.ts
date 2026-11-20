@@ -119,6 +119,18 @@ describe("session core", () => {
 		expect(h.fs.files.has(`${ROOT}/abc/requests/event-1.json`)).toBe(false);
 		expect(events).toEqual([]);
 	});
+	test("a live session without a transcript makes at most one query per poll", async () => {
+		const h = setup();
+		h.fs.files.delete("/transcript");
+		let now = 0;
+		const calls: number[] = [];
+		h.runtime.clock.now = () => new Date(now);
+		h.runtime.clock.sleep = async (ms) => { now += ms; };
+		h.runtime.process.createdAt = async () => { calls.push(now); return ok({ "42": CREATED }); };
+		const answer = await requestSession(h.runtime, record, "usage", {}, SESSION_POLL_MS * 3);
+		expect(answer.ok ? "ok" : answer.error.code).toBe("session-timeout");
+		expect(calls).toEqual([0, SESSION_POLL_MS, SESSION_POLL_MS * 2, SESSION_POLL_MS * 3]);
+	});
 	// Guards session-ended at the first poll after process death rather than waiting for the deadline.
 	test("process exit removes the published request at the first dead-process poll", async () => {
 		const h = setup();
@@ -250,6 +262,18 @@ describe("session core", () => {
 		expect(now).toBe(SESSION_POLL_MS);
 		expect(h.fs.files.has(`${ROOT}/abc/processes/42.json`)).toBe(true);
 		expect(h.fs.files.has(`${ROOT}/abc/claims/event-1/pid`)).toBe(false);
+	});
+	test("a dead window that claimed the request ends the session", async () => {
+		const h = setup();
+		let alive = true;
+		let polls = 0;
+		h.fs.seed(`${ROOT}/abc/claims/event-1/pid`, "42");
+		h.fs.mtimes.set(`${ROOT}/abc/claims/event-1`, Date.parse(CREATED) + CLAIM_AFTER_CLAIMANT_MS);
+		h.runtime.process.createdAt = async () => ok({ "42": alive ? CREATED : null });
+		h.runtime.clock.sleep = async () => { polls++; alive = false; };
+		const answer = await requestSession(h.runtime, record, "compact", {}, COMPACT_TIMEOUT_MS);
+		expect(answer.ok ? "ok" : answer.error.code).toBe("session-ended");
+		expect(polls).toBe(1);
 	});
 	test("list batches distinct live pids and isolates invalid records", async () => {
 		const h = setup();
