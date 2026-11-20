@@ -59,6 +59,7 @@ export const ru: Messages = {
 		usageStop: (): string => "Использование: rig session stop <id>",
 		usageCleanup: (): string => "Использование: rig session cleanup <id>",
 		stopTimeout: (): string => "Процесс сессии не завершился вовремя.",
+		ending: (): string => "Сессия уже завершается.",
 		cleanupNotCompacted: (): string => "Контекст сессии не уменьшился после сжатия.",
 		usageRun: (): string => "Использование: rig session run <id> [--mode <mode>] [--account <n>]",
 		usageMode: (): string => "Использование: rig session mode <id> <mode>",

@@ -1,10 +1,12 @@
 import type { ApiResult, ProgressEvent } from "../output.js";
 import type { RuntimePorts } from "../ports.js";
 import type { SessionRecord } from "../session-core.js";
+import type { SessionEnding } from "../session-ending.js";
 
 import { apiFail, apiOk, SESSION_IO, SESSION_STOP_TIMEOUT } from "../output.js";
 import { messagesFor } from "../messages.js";
 import { compactSessionCore, liveProcesses, requestSession, sessionLive, SESSION_POLL_MS, SESSION_TIMEOUTS } from "../session-core.js";
+import { withSessionEnding } from "../session-ending.js";
 
 // A stop compacts the session first only when it holds more tokens than this. The threshold is rig's own; its origin is not recorded in this repo.
 const STOP_COMPACT_TOKENS = 120_000;
@@ -35,7 +37,8 @@ export const endSession = async (runtime: RuntimePorts, session: SessionRecord):
 	}
 };
 
-export const stopSession = async (runtime: RuntimePorts, session: SessionRecord, progress: (event: ProgressEvent) => void): Promise<ApiResult<StopResult>> => {
+// Used by mode while it holds ownership through both this stop and its following launch.
+export const stopEndingSession = async (runtime: RuntimePorts, session: SessionRecord, progress: (event: ProgressEvent) => void, ending: SessionEnding): Promise<ApiResult<StopResult>> => {
 	const live = await sessionLive(runtime, session);
 	if (!live.ok) return live;
 	if (!live.value) return apiOk({ session: session.id, stopped: false, reason: "not-running" });
@@ -45,11 +48,25 @@ export const stopSession = async (runtime: RuntimePorts, session: SessionRecord,
 		const context = usage.value.context;
 		const tokens = typeof context.tokens === "number" ? context.tokens : object(context.breakdown) && typeof context.breakdown.totalTokens === "number" ? context.breakdown.totalTokens : null;
 		if (tokens !== null && tokens > STOP_COMPACT_TOKENS) {
-			const compact = await compactSessionCore(runtime, session, undefined, progress);
-			compacted = compact.ok ? compact.value : { error: compact.error.message };
+			const takenOver = await ending.takenOver();
+			if (!takenOver.ok) return takenOver;
+			if (takenOver.value) compacted = { error: messagesFor(runtime.language).session.ended() };
+			else {
+				const compact = await compactSessionCore(runtime, session, undefined, progress);
+				compacted = compact.ok ? compact.value : { error: compact.error.message };
+			}
 		}
 	}
 	const stopped = await endSession(runtime, session);
 	if (!stopped.ok) return stopped;
 	return stopped.value ? apiOk({ session: session.id, stopped: true, compacted }) : apiOk({ session: session.id, stopped: false, reason: "not-running" });
 };
+
+export const stopSession = (runtime: RuntimePorts, session: SessionRecord, progress: (event: ProgressEvent) => void): Promise<ApiResult<StopResult>> => withSessionEnding<StopResult>(runtime, session.id,
+	(ending) => stopEndingSession(runtime, session, progress, ending),
+	async () => {
+		const stopped = await endSession(runtime, session);
+		if (!stopped.ok) return stopped;
+		return stopped.value ? apiOk({ session: session.id, stopped: true, compacted: null }) : apiOk({ session: session.id, stopped: false, reason: "not-running" });
+	},
+);

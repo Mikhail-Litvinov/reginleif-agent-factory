@@ -10,7 +10,7 @@ import { messagesFor } from "../src/messages.js";
 import { lookupSession } from "../src/session-core.js";
 import { apiFail, apiOk } from "../src/output.js";
 import { ok } from "../src/result.js";
-import { baseManifest, createMemoryRuntime, seedFeature, seedHubManifest } from "./fakes/memory-runtime.js";
+import { baseManifest, createMemoryRuntime, FAKE_OWNER_CREATED, seedFeature, seedHubManifest } from "./fakes/memory-runtime.js";
 
 const ID = "11111111-1111-1111-1111-111111111111";
 const ROOT = "/home/test/.agent-rig";
@@ -122,7 +122,7 @@ describe("session run and mode", () => {
 		h.fs.seed("/usr/bin/cswap", "");
 		h.fs.seed("/transcript", JSON.stringify({ type: "permission-mode", permissionMode: "plan" }));
 		h.fs.seed(`${ROOT}/sessions/${ID}.json`, JSON.stringify({ ...raw, ended_at: null }));
-		h.runtime.process.createdAt = async () => ok({ "42": CREATED });
+		h.runtime.process.createdAt = async () => ok({ [String(h.runtime.lock.process.pid)]: FAKE_OWNER_CREATED, "42": CREATED });
 		h.runtime.process.run = async () => ok({ stdout: "", stderr: "broken", exitCode: 2 });
 		const killed: number[] = [];
 		h.runtime.process.killTree = async (pid) => { killed.push(pid); return ok(undefined); };

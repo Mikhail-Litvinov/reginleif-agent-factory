@@ -28,6 +28,7 @@ export const SESSION_CLAIM_LOST = "session-claim-lost";
 export const SESSION_MODULE_ERROR = "session-module-error";
 export const SESSION_BAD_RESPONSE = "session-bad-response";
 export const SESSION_STOP_TIMEOUT = "session-stop-timeout";
+export const SESSION_ENDING = "session-ending";
 export const SESSION_CLEANUP_NOT_COMPACTED = "session-cleanup-not-compacted";
 export const LAUNCH_INVALID = "launch-invalid";
 export const LAUNCH_ACCOUNT_LOOKUP = "launch-account-lookup";

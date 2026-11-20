@@ -4,7 +4,7 @@ import { cleanupSession } from "../src/commands/session-cleanup.js";
 import { transcriptMode } from "../src/commands/session-run.js";
 import { listSessions, lookupSession, TRANSCRIPT_HEAD_BYTES, transcriptHeadCwd } from "../src/session-core.js";
 import { ok } from "../src/result.js";
-import { createMemoryRuntime } from "./fakes/memory-runtime.js";
+import { createMemoryRuntime, FAKE_OWNER_CREATED } from "./fakes/memory-runtime.js";
 
 const HOME = "/home/test";
 const ROOT = `${HOME}/.agent-rig/sessions`;
@@ -26,7 +26,7 @@ const setup = (named: string | null, configDir = "") => {
 	h.runtime.clock.sleep = async (ms) => { now += ms; };
 	let killed = false;
 	h.runtime.process.killTree = async () => { killed = true; return ok(undefined); };
-	h.runtime.process.createdAt = async () => ok({ "42": killed ? null : CREATED });
+	h.runtime.process.createdAt = async () => ok({ [String(h.runtime.lock.process.pid)]: FAKE_OWNER_CREATED, "42": killed ? null : CREATED });
 	return h;
 };
 const loaded = async (h: ReturnType<typeof setup>) => {

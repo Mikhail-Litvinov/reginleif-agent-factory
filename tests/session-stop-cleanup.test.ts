@@ -9,7 +9,7 @@ import { runCli } from "../src/cli.js";
 import { messagesFor } from "../src/messages.js";
 import { apiOk } from "../src/output.js";
 import { ok } from "../src/result.js";
-import { createMemoryRuntime } from "./fakes/memory-runtime.js";
+import { createMemoryRuntime, FAKE_OWNER_CREATED } from "./fakes/memory-runtime.js";
 
 const ROOT = "/home/test/.agent-rig/sessions";
 const CREATED = "creation";
@@ -24,7 +24,7 @@ const setup = () => {
 	let now = 0;
 	h.runtime.clock.now = () => new Date(now);
 	h.runtime.clock.sleep = async (ms) => { now += ms; };
-	h.runtime.process.createdAt = async () => ok({ "42": CREATED });
+	h.runtime.process.createdAt = async () => ok({ [String(h.runtime.lock.process.pid)]: FAKE_OWNER_CREATED, "42": CREATED });
 	return h;
 };
 const response = (h: ReturnType<typeof setup>, id: string, result: unknown) => h.fs.seed(`${ROOT}/abc/responses/${id}.json`, JSON.stringify({ id, ok: true, result }));
@@ -56,7 +56,7 @@ describe("session stop and cleanup", () => {
 			response(h, "event-2", { tokensBefore: tokens, tokensAfter: 1 });
 			let killed = false;
 			h.runtime.process.killTree = async () => { killed = true; return ok(undefined); };
-			h.runtime.process.createdAt = async () => ok({ "42": killed ? null : CREATED });
+			h.runtime.process.createdAt = async () => ok({ [String(h.runtime.lock.process.pid)]: FAKE_OWNER_CREATED, "42": killed ? null : CREATED });
 			const result = await stopSession(h.runtime, SESSION, () => {});
 			expect(result.ok && result.value.stopped && result.value.compacted).toEqual(tokens > 120_000 ? { tokensBefore: tokens, tokensAfter: 1 } : null);
 			expect(killed).toBe(true);

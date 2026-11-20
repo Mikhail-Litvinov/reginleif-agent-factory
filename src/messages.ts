@@ -74,6 +74,7 @@ export const en = {
 		usageStop: (): string => "Usage: rig session stop <id>",
 		usageCleanup: (): string => "Usage: rig session cleanup <id>",
 		stopTimeout: (): string => "The session process did not exit in time.",
+		ending: (): string => "The session is already ending.",
 		cleanupNotCompacted: (): string => "The session did not shrink after compaction.",
 		usageRun: (): string => "Usage: rig session run <id> [--mode <mode>] [--account <n>]",
 		usageMode: (): string => "Usage: rig session mode <id> <mode>",

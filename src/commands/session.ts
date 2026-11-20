@@ -20,7 +20,7 @@ export const SESSION_COMMANDS: Record<string, SessionHandler> = { list: (runtime
 	return session.ok ? stopSession(runtime, session.value, progress) : session;
 }, cleanup: async (runtime, args, progress) => {
 	if (args.length !== 1) return apiFail(ERROR_CODE_USAGE, messagesFor(runtime.language).session.usageCleanup());
-	const session = await lookupSessionForCommand(runtime, args[0], true);
+	const session = await lookupSessionForCommand(runtime, args[0], false);
 	return session.ok ? cleanupSession(runtime, session.value, progress) : session;
 }, compact: compactSession, rename: renameSession, autocompact: autocompactSession, run: runCommand, mode: modeCommand };
 export const isSessionCommand = (name: string): boolean => Object.hasOwn(SESSION_COMMANDS, name);

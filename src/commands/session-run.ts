@@ -1,6 +1,7 @@
 import type { ApiResult, ProgressEvent } from "../output.js";
 import type { RuntimePorts } from "../ports.js";
 import type { SessionRecord } from "../session-core.js";
+import type { SessionEnding } from "../session-ending.js";
 
 import { localPluginOrigin, readMarketplaceManifest } from "../apply.js";
 import { findOnPath } from "../executable-path.js";
@@ -9,12 +10,13 @@ import { joinPath } from "../file-system.js";
 import { buildLaunchCommand } from "../launch-command.js";
 import { launchPath, LAUNCH_TOKEN } from "../launch-safety.js";
 import { messagesFor } from "../messages.js";
-import { apiFail, apiOk, ERROR_CODE_USAGE, LAUNCH_FAILED, LAUNCH_ACCOUNT_LOOKUP, LAUNCH_INVALID, LAUNCH_UNAVAILABLE, LAUNCH_TIMEOUT, SESSION_RUNNING } from "../output.js";
+import { apiFail, apiOk, ERROR_CODE_USAGE, LAUNCH_FAILED, LAUNCH_ACCOUNT_LOOKUP, LAUNCH_INVALID, LAUNCH_UNAVAILABLE, LAUNCH_TIMEOUT, SESSION_ENDING, SESSION_RUNNING } from "../output.js";
 import { errorText } from "../result.js";
 import { liveProcesses, lookupSession, lookupSessionForCommand, processKey, sessionLive, SESSION_POLL_MS } from "../session-core.js";
+import { withSessionEnding } from "../session-ending.js";
 import { accountOf, INFO_ERROR_STATE_UNREADABLE } from "./info.js";
 import { readRigState } from "./shared.js";
-import { stopSession } from "./session-stop.js";
+import { stopEndingSession } from "./session-stop.js";
 
 // How long a launch waits to see whether its process exits at once (ms); the launch file is removed only once older than this.
 const LAUNCH_EXIT_GRACE_MS = 2000;
@@ -116,7 +118,7 @@ export const transcriptMode = async (runtime: RuntimePorts, path: string | null)
 	return null;
 };
 
-const spawnLaunch = async (runtime: RuntimePorts, command: string[]): Promise<ApiResult<null>> => {
+const spawnLaunch = async (runtime: RuntimePorts, command: string[], ending?: SessionEnding): Promise<ApiResult<null>> => {
 	const directory = joinPath(runtime.home, ".agent-rig", "launch-stderr");
 	const now = runtime.clock.now().getTime();
 	const path = joinPath(directory, `${now}-${runtime.ids.next()}.log`);
@@ -128,7 +130,13 @@ const spawnLaunch = async (runtime: RuntimePorts, command: string[]): Promise<Ap
 			if (!entry.directory && match && now - Number(match[1]) >= LAUNCH_EXIT_GRACE_MS) await runtime.fs.remove(joinPath(directory, entry.name)).catch(() => undefined);
 		}
 	} catch (error) { return apiFail(LAUNCH_FAILED, messagesFor(runtime.language).session.io(errorText(error))); }
-	const result = await runtime.process.spawnDetached(command, LAUNCH_EXIT_GRACE_MS, STDERR_LIMIT, path);
+	const start = () => runtime.process.spawnDetached(command, LAUNCH_EXIT_GRACE_MS, STDERR_LIMIT, path);
+	const started = ending === undefined ? apiOk(start()) : await ending.start(start);
+	if (!started.ok) {
+		await runtime.fs.remove(path).catch(() => undefined);
+		return started;
+	}
+	const result = await started.value;
 	// On Windows the child may still hold the file; the next launch retries it.
 	await runtime.fs.remove(path).catch(() => undefined);
 	if (!result.ok) return apiFail(LAUNCH_FAILED, result.error);
@@ -207,11 +215,16 @@ export const modeCommand = async (runtime: RuntimePorts, args: readonly string[]
 	if (!validMode(mode)) return invalid(messagesFor(runtime.language).session.launchMode());
 	const session = await lookupSessionForCommand(runtime, id, false);
 	if (!session.ok) return session;
-	if (await transcriptMode(runtime, session.value.transcriptPath) === mode) return apiOk({ session: id, mode, changed: false });
-	const launch = await resolveLaunch(runtime, session.value, mode, null);
-	if (!launch.ok) return launch;
-	const stopped = await stopSession(runtime, session.value, progress);
-	if (!stopped.ok) return stopped;
-	const result = await runSession(runtime, session.value, mode, launch.value.account);
-	return result.ok ? apiOk({ session: id, mode, pid: result.value.pid }) : result;
+	return withSessionEnding<{ session: string; mode: string; changed: false } | { session: string; mode: string; pid: number }>(runtime, id, async (ending) => {
+		if (await transcriptMode(runtime, session.value.transcriptPath) === mode) return apiOk({ session: id, mode, changed: false });
+		const launch = await resolveLaunch(runtime, session.value, mode, null);
+		if (!launch.ok) return launch;
+		const stopped = await stopEndingSession(runtime, session.value, progress, ending);
+		const takenOver = await ending.takenOver();
+		if (!takenOver.ok) return takenOver;
+		if (takenOver.value) return apiFail(SESSION_ENDING, messagesFor(runtime.language).session.ending());
+		if (!stopped.ok) return stopped;
+		const result = await runSession(runtime, session.value, mode, launch.value.account, (command) => spawnLaunch(runtime, command, ending));
+		return result.ok ? apiOk({ session: id, mode, pid: result.value.pid }) : result;
+	});
 };

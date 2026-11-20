@@ -11,6 +11,7 @@ import { PROCESS_SUCCESS_EXIT_CODE } from "../../src/ports.js";
 const INITIAL_SUFFIX_COUNT = 0;
 const INITIAL_EVENT_ID = 0;
 const FAKE_OWNER_PID = 10;
+export const FAKE_OWNER_CREATED = "fake-rig-creation";
 const FAKE_OWNER_START_TIME = 20;
 const FAKE_LOCK_POLL_INTERVAL_MS = 1;
 const FAKE_TEMP_DIRECTORY = "/virtual-temp/rig-check";
@@ -324,7 +325,7 @@ export const createMemoryRuntime = (platform: RuntimePorts["platform"] = "linux"
 			runStreaming: async () => streamed(0),
 			runMembers: async () => ok(0),
 			killRunMembers: async () => ok(undefined),
-			createdAt: async () => ok({}),
+			createdAt: async () => ok({ [String(FAKE_OWNER_PID)]: FAKE_OWNER_CREATED }),
 			killTree: async () => ok(undefined),
 			killGroup: async () => ok(undefined),
 			run: async (command, args, options) => {
