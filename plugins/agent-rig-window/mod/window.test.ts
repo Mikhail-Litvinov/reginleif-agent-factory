@@ -74,6 +74,57 @@ test("one request is run once and answered once by two windows on one folder", a
   expect(answers(s)).toHaveLength(3);
 });
 
+test("only a completed main conversation compaction rewrites usage with its live breakdown", async () => {
+  const s = shared();
+  const deps = process(s, []);
+  deps.usage = async () => ({ context: { window: 10, breakdown: { totalTokens: 13_000 } }, rateLimits: [] });
+  const w = new Window(DIR, deps);
+
+  await w.compacted("manual", undefined, false);
+  const snapshot = JSON.parse(s.files.get(`${DIR}/usage.json`) ?? "null");
+  expect(snapshot.context).toEqual({ window: 10, breakdown: { totalTokens: 13_000 } });
+  expect(s.writes.filter(path => path === `${DIR}/usage.json`)).toHaveLength(1);
+
+  await w.compacted("auto", "agent-1", false);
+  await w.compacted("precompute", undefined, false);
+  await w.compacted("plugin", undefined, true);
+  expect(s.writes.filter(path => path === `${DIR}/usage.json`)).toHaveLength(1);
+});
+
+test("a compact request rewrites usage after compaction and before its response, but skip does not", async () => {
+  const s = shared();
+  const deps = process(s, []);
+  let compacted = false;
+  deps.usage = async () => ({
+    context: compacted ? { window: 10, breakdown: { totalTokens: 13_000 } } : { tokens: TOKENS, window: 10 },
+    rateLimits: [],
+  });
+  deps.compact = async () => {
+    compacted = true;
+    return { tokensBefore: 20_000, tokensAfter: 13_000 };
+  };
+  const w = new Window(DIR, deps);
+  put(s, "c1", { id: "c1", op: "compact" });
+  await w.poll();
+  await flush();
+
+  const usagePath = `${DIR}/usage.json`;
+  const responsePath = `${DIR}/responses/c1.json`;
+  expect(JSON.parse(s.files.get(usagePath) ?? "null").context).toEqual({ window: 10, breakdown: { totalTokens: 13_000 } });
+  expect(s.writes.indexOf(usagePath)).toBeLessThan(s.writes.indexOf(responsePath));
+  expect(s.writes.filter(path => path === usagePath)).toHaveLength(1);
+
+  const skipped = shared();
+  const skippedDeps = process(skipped, []);
+  skippedDeps.compact = async () => ({ skip: "vetoed" });
+  const skippedWindow = new Window(DIR, skippedDeps);
+  put(skipped, "c2", { id: "c2", op: "compact" });
+  await skippedWindow.poll();
+  await flush();
+  expect(skipped.writes.filter(path => path === usagePath)).toHaveLength(0);
+  expect(skipped.writes.indexOf(`${DIR}/responses/c2.json`)).toBeGreaterThanOrEqual(0);
+});
+
 test("a claimed request records the claimant pid, and a window forgets ids answered by the other", async () => {
   const s = shared();
   const a = new Window(DIR, process(s, []));

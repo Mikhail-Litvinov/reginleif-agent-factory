@@ -102,6 +102,12 @@ export const register: Register = on => {
     return next(e);
   });
 
+  on("session.compact", async (_, e, next) => {
+    const result = await next(e);
+    await window?.compacted(e.trigger, e.agentId, result.skip !== undefined);
+    return result;
+  });
+
   // The main loop's turns: a compaction or a rename waits for none to run.
   on("turn.start", async ($, e, next) => {
     if (e.agentId === undefined) window?.turn(true);

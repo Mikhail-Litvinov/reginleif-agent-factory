@@ -21,6 +21,8 @@ type World = {
   dirs: Set<string>;
   pidText: string;
   compactions: (string | undefined)[];
+  snapshotWrites: number;
+  context: { tokens?: number; window: number; breakdown?: { totalTokens: number } };
   renames: string[];
   autocompacts: string[];
   compactResult: { skip?: string };
@@ -30,13 +32,14 @@ type World = {
 
 // Every `$` call the module makes, answered by the test; `session.start` is the engine's own echo.
 function world(on: On): World {
-  const w: World = { files: new Map(), dirs: new Set(), pidText: CLAUDE_PID, compactions: [], renames: [], autocompacts: [], compactResult: {}, clock: mock.clock(on) };
+  const w: World = { files: new Map(), dirs: new Set(), pidText: CLAUDE_PID, compactions: [], snapshotWrites: 0, context: { tokens: TOKENS, window: WINDOW }, renames: [], autocompacts: [], compactResult: {}, clock: mock.clock(on) };
   on("session.start", (_, e) => ({ cwd: e.cwd }));
   on("env.get", (_, e) => ({ value: e.name === "HOME" ? HOME : undefined }));
   on("session.id", () => ({ value: SESSION }));
-  on("session.usage", () => ({ value: { startedAt: 0, context: { tokens: TOKENS, window: WINDOW }, rateLimits: [{ kind: "five_hour", percentUsed: 5 }] } }));
+  on("session.usage", () => ({ value: { startedAt: 0, context: w.context, rateLimits: [{ kind: "five_hour", percentUsed: 5 }] } }));
   on("fs.write", (_, e) => {
     w.files.set(norm(e.path), e.text);
+    if (norm(e.path).includes("/usage.json")) w.snapshotWrites++;
     return { value: undefined };
   });
   on("fs.read", (_, e) => {
@@ -75,7 +78,9 @@ function world(on: On): World {
   });
   on("session.compact", (_, e) => {
     w.compactions.push(e.instructions);
-    return w.compactResult.skip === undefined ? { messages: [{ role: "user" as const, text: "summary", toolUses: [] }], tokensBefore: 10, tokensAfter: 5 } : { skip: w.compactResult.skip };
+    if (w.compactResult.skip !== undefined) return { skip: w.compactResult.skip };
+    w.context = { window: WINDOW, breakdown: { totalTokens: 13_000 } };
+    return { messages: [{ role: "user" as const, text: "summary", toolUses: [] }], tokensBefore: 163_000, tokensAfter: 13_000 };
   });
   on("session.measure", (_, e) => ({ changed: e.changed }));
   on("command.run", (_, e) => {
@@ -141,6 +146,17 @@ test("compact and rename run when no turn runs", async ($, on) => {
   expect(response(w, "c1")?.ok).toBe(true);
   expect(response(w, "r1")?.result).toEqual({ name: "new name" });
   expect(w.files.has(`${DIR}/requests/c1.json`)).toBe(false);
+});
+
+test("a rig compact request rewrites usage once after compaction with the engine's post-compaction context", async ($, on) => {
+  const w = world(on);
+  await start($);
+  expect(w.snapshotWrites).toBe(1);
+  request(w, "c1", { id: "c1", op: "compact" });
+  await w.clock.advance(POLL_MS);
+  const snapshot = JSON.parse(w.files.get(`${DIR}/usage.json`) ?? "null");
+  expect(snapshot.context).toEqual({ window: WINDOW, breakdown: { totalTokens: 13_000 } });
+  expect(w.snapshotWrites).toBe(2);
 });
 
 test("a request whose claim directory another process made is neither run nor answered here", async ($, on) => {

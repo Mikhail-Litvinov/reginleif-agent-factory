@@ -48,7 +48,10 @@ Failures use `session-bad-id`, `session-unknown`, `session-invalid`, `session-io
 
 ## Snapshot: `usage.json`
 
-Written once when the session starts and again on every `session.measure`.
+Written once when the session starts, again on every `session.measure`, and after every completed compaction of the main
+conversation (manual, automatic, or plugin requested; not precompute, subagent compaction, or a skipped compaction). The
+window rewrites it immediately after its own compaction for a rig `compact` request, before writing the answer; other
+compactions rewrite it through the `session.compact` hook.
 
 | Field | Meaning |
 | --- | --- |

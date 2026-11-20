@@ -70,6 +70,11 @@ export class Window {
     }
   }
 
+  // Rewrites usage only after a completed compaction of the main conversation; precompute does not change it.
+  async compacted(trigger: "manual" | "auto" | "plugin" | "precompute", agentId: string | undefined, skipped: boolean): Promise<void> {
+    if (agentId === undefined && trigger !== "precompute" && !skipped) await this.measured();
+  }
+
   // Called from the turn hooks of the main loop.
   turn(runs: boolean): void {
     this.turnRuns = runs;
@@ -216,6 +221,7 @@ export class Window {
       }
       const instructions = typeof request.args.instructions === "string" ? request.args.instructions : undefined;
       const compaction = await this.deps.compact(instructions);
+      if (compaction.skip === undefined) await this.measured();
       return { id: request.id, ok: true, result: compaction };
     } catch (e) {
       // Rejected with a turn running, or one just starting: tried again.
