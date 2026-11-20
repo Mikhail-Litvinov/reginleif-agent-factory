@@ -7,7 +7,7 @@ import { joinPath } from "./file-system.js";
 import { messagesFor } from "./messages.js";
 import { apiFail, apiOk, PROGRESS_CODE_SESSION_RUNNING, PROGRESS_CODE_SESSION_WAITING, SESSION_BAD_ID, SESSION_BAD_RESPONSE, SESSION_CLAIM_LOST, SESSION_ENDED, SESSION_INVALID, SESSION_IO, SESSION_MODULE_ERROR, SESSION_NO_MODULE, SESSION_TIMEOUT, SESSION_UNKNOWN } from "./output.js";
 import { errorText } from "./result.js";
-import { removeSessionUnlessEnding } from "./session-ending.js";
+import { recoverSessionRemoval, removeSessionUnlessEnding } from "./session-ending.js";
 import { resolveTranscriptPath } from "./transcript-path.js";
 
 // A pid file holds a positive decimal integer (the module validates the same shape before writing it).
@@ -71,7 +71,8 @@ const readProcesses = async (r: RuntimePorts, id: string, legacy: SessionProcess
 	return apiOk(processes);
 };
 
-const readSession = async (r: RuntimePorts, id: string): Promise<ApiResult<SessionRecord>> => {
+// Reads registration facts without retention or a process-table query; ending polls batch identity checks themselves.
+export const readSession = async (r: RuntimePorts, id: string): Promise<ApiResult<SessionRecord>> => {
 	const m = messagesFor(r.language).session;
 	if (!ID_PATTERN.test(id)) return apiFail(SESSION_BAD_ID, m.badId(id));
 	let value: unknown;
@@ -97,7 +98,7 @@ const readSession = async (r: RuntimePorts, id: string): Promise<ApiResult<Sessi
 };
 
 // The processes among `candidates` whose creation time matches the recorded one, earliest started first.
-const liveAmong = (candidates: readonly SessionProcess[], created: Record<string, string | null>): SessionProcess[] =>
+export const liveAmong = (candidates: readonly SessionProcess[], created: Record<string, string | null>): SessionProcess[] =>
 	candidates.filter((process) => process.pidCreated !== null && created[String(process.pid)] === process.pidCreated).sort((a, b) => (a.pidCreated ?? "").localeCompare(b.pidCreated ?? ""));
 const checkable = (processes: readonly SessionProcess[]): number[] => [...new Set(processes.filter((process) => process.pidCreated !== null).map((process) => process.pid))];
 
@@ -114,23 +115,60 @@ export const sessionLive = async (r: RuntimePorts, session: SessionRecord): Prom
 	return live.ok ? apiOk(live.value.length > 0) : live;
 };
 
+// Read a retired folder by its sibling name, with one identity query for all of its process files.
+const readLiveRegistration = async (r: RuntimePorts, folderId: string): Promise<ApiResult<number[]>> => {
+	const processes = await readProcesses(r, folderId, null);
+	if (!processes.ok) return processes;
+	const pids = checkable(processes.value);
+	if (pids.length === 0) return apiOk([]);
+	const created = await r.process.createdAt(pids);
+	if (!created.ok) return apiFail(SESSION_IO, messagesFor(r.language).session.io(created.error));
+	if (pids.some((pid) => created.value[String(pid)] === undefined)) return apiFail(SESSION_IO, messagesFor(r.language).session.io(messagesFor(r.language).failure.processTableIncomplete()));
+	return apiOk(liveAmong(processes.value, created.value).map((process) => process.pid));
+};
+
 // A record without a transcript remains while a session process or ending owner is live.
 const retainSession = async (r: RuntimePorts, session: SessionRecord, getLive: () => Promise<ApiResult<SessionProcess[]>>): Promise<ApiResult<SessionRecord>> => {
 	const m = messagesFor(r.language).session;
 	try {
+		const recovered = await recoverSessionRemoval(r, session.id, (folderId) => readLiveRegistration(r, folderId));
+		if (!recovered.ok) return recovered;
+		if (recovered.value) {
+			const current = await readSession(r, session.id);
+			if (!current.ok) return current;
+			session = current.value;
+		}
 		if (session.transcriptPath !== null && await r.fs.stat(session.transcriptPath) !== null) return apiOk(session);
-		const live = await getLive();
+		const live = recovered.value ? await liveProcesses(r, session) : await getLive();
 		if (!live.ok) return live;
 		if (live.value.length > 0) return apiOk(session);
-		const removed = await removeSessionUnlessEnding(r, session.id);
+		const removed = await removeSessionUnlessEnding(r, session.id, async () => {
+			const processes = await readProcesses(r, session.id, null);
+			if (!processes.ok) return processes;
+			const current = await liveProcesses(r, { ...session, processes: processes.value });
+			if (!current.ok) return current;
+			if (current.value.length > 0) return apiOk(true);
+			const transcript = await resolveTranscriptPath(r, session.id, session.transcriptPath, "");
+			if (!transcript.ok) return transcript;
+			return apiOk(transcript.value !== null && await r.fs.stat(transcript.value) !== null);
+		}, (folderId) => readLiveRegistration(r, folderId));
 		if (!removed.ok) return removed;
-		if (!removed.value) return apiOk(session);
+		if (!removed.value) {
+			const current = await readSession(r, session.id);
+			return current.ok || current.error.code === SESSION_INVALID ? current : apiOk(session);
+		}
 		return apiFail(SESSION_UNKNOWN, m.unknown(session.id));
 	} catch (e) { return apiFail(SESSION_IO, m.io(errorText(e))); }
 };
 
 export const lookupSession = async (r: RuntimePorts, id: string): Promise<ApiResult<SessionRecord>> => {
-	const session = await readSession(r, id);
+	let session = await readSession(r, id);
+	if (!session.ok && session.error.code === SESSION_UNKNOWN) {
+		const recovered = await recoverSessionRemoval(r, id, (folderId) => readLiveRegistration(r, folderId));
+		if (!recovered.ok) return recovered;
+		// A postponed sweep may already have restored the record before encountering contention.
+		session = await readSession(r, id);
+	}
 	if (!session.ok) return session;
 	return retainSession(r, session.value, () => liveProcesses(r, session.value));
 };

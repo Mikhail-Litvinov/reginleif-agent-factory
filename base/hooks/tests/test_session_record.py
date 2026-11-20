@@ -234,6 +234,62 @@ def multi_table(claudes, hook_under):
     return table(*rows)
 
 
+class AtomicWriteTests(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.home = Path(temp.name)
+        self.target = self.home / "session" / "processes" / "42.json"
+
+    def test_write_retries_with_new_parents_and_temp_after_folder_retirement(self):
+        replace = os.replace
+        retired = self.home / "session.retired-remover"
+        temps = []
+
+        def retire_once(source, target):
+            temps.append(source)
+            if len(temps) == 1:
+                self.target.parents[1].rename(retired)
+            replace(source, target)
+
+        with mock.patch.object(RECORD.os, "replace", side_effect=retire_once):
+            RECORD.write_json_atomic(self.target, {"pid": 42})
+        self.assertEqual(json.loads(self.target.read_text(encoding="utf-8")), {"pid": 42})
+        self.assertEqual(len(temps), 2)
+        self.assertNotEqual(temps[0], temps[1])
+        self.assertEqual(list(self.target.parent.glob("*.tmp")), [])
+
+    def test_write_retries_when_parent_vanishes_before_temp_creation(self):
+        mkstemp = tempfile.mkstemp
+        retired = self.home / "session.retired-remover"
+        creations = []
+
+        def create_after_retirement(**options):
+            creations.append(options)
+            if len(creations) == 1:
+                self.target.parents[1].rename(retired)
+            return mkstemp(**options)
+
+        with mock.patch.object(RECORD.tempfile, "mkstemp", side_effect=create_after_retirement):
+            RECORD.write_json_atomic(self.target, {"pid": 42})
+        self.assertEqual(json.loads(self.target.read_text(encoding="utf-8")), {"pid": 42})
+        self.assertEqual(len(creations), 2)
+
+    def test_write_retries_only_once_and_cleans_failed_temps(self):
+        with mock.patch.object(RECORD.os, "replace", side_effect=FileNotFoundError) as replace:
+            with self.assertRaises(FileNotFoundError):
+                RECORD.write_json_atomic(self.target, {"pid": 42})
+        self.assertEqual(replace.call_count, 2)
+        self.assertEqual(list(self.target.parent.iterdir()), [])
+
+    def test_write_does_not_retry_other_errors(self):
+        with mock.patch.object(RECORD.os, "replace", side_effect=PermissionError) as replace:
+            with self.assertRaises(PermissionError):
+                RECORD.write_json_atomic(self.target, {"pid": 42})
+        replace.assert_called_once()
+        self.assertEqual(list(self.target.parent.iterdir()), [])
+
+
 class SessionRecordTests(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
@@ -286,6 +342,25 @@ class SessionRecordTests(unittest.TestCase):
         self.run_hook("start", self.start_data())
         self.assertEqual(self.process_pids(), [CLAUDE_INNER])
         self.assertEqual(self.read_process(CLAUDE_INNER), {"pid": CLAUDE_INNER, "pid_created": "2023-11-14T22:18:20.000000Z", "started_at": "2026-11-15T10:00:00Z", "source": "startup", "config_dir": "C:/cfg/2"})
+
+    def test_start_publishes_registration_before_replacing_the_record(self):
+        self.run_hook("start", self.start_data())
+        record_path = self.sessions / f"{SESSION}.json"
+        write = RECORD.write_json_atomic
+        publications = []
+
+        def publish(path, data):
+            if path == record_path:
+                self.assertEqual(self.process_pids(), [CLAUDE_INNER])
+                self.assertEqual(self.read_process(CLAUDE_INNER)["pid_created"], RECORD.iso_micro_from_us(TREE[CLAUDE_INNER].created_us))
+                publications.append("record")
+            else:
+                publications.append("process")
+            write(path, data)
+
+        with mock.patch.object(RECORD, "write_json_atomic", side_effect=publish):
+            self.run_hook("start", self.start_data(source="resume"))
+        self.assertEqual(publications, ["process", "record"])
 
     def test_config_dir_is_empty_for_the_main_login(self):
         self.run_hook("start", self.start_data(), env={})

@@ -4,13 +4,13 @@ import type { SessionRecord } from "../src/session-core.js";
 import { describe, expect, test } from "bun:test";
 
 import { runCli } from "../src/cli.js";
-import { TAKEOVER_STALE_MS } from "../src/lock.js";
 import { cleanupSession } from "../src/commands/session-cleanup.js";
-import { modeCommand } from "../src/commands/session-run.js";
+import { LAUNCH_REGISTRATION_WAIT_MS, modeCommand } from "../src/commands/session-run.js";
 import { stopSession } from "../src/commands/session-stop.js";
 import { apiFail, apiOk, SESSION_IO } from "../src/output.js";
 import { err, ok } from "../src/result.js";
 import { withSessionEnding } from "../src/session-ending.js";
+import { SESSION_POLL_MS } from "../src/session-core.js";
 import { createMemoryRuntime, FAKE_OWNER_CREATED } from "./fakes/memory-runtime.js";
 
 const ID = "11111111-1111-1111-1111-111111111111";
@@ -313,7 +313,7 @@ describe("session ending ownership", () => {
 		const h = setup();
 		h.response("event-1", { context: { tokens: TOKENS_AFTER } });
 		h.runtime.process.spawnDetached = async () => {
-			expect(JSON.parse(await h.fs.readText(MARKER))).toMatchObject({ pid: h.runtime.lock.process.pid, takenOver: false });
+			expect(JSON.parse(await h.fs.readText(MARKER))).toMatchObject({ pid: h.runtime.lock.process.pid, takenOver: false, launch: { startedAt: h.runtime.clock.now().getTime(), registrationWaitMs: LAUNCH_REGISTRATION_WAIT_MS } });
 			h.identities[String(LAUNCHED_PID)] = LAUNCHED_CREATED;
 			h.fs.seed(`${DIRECTORY}/processes/${LAUNCHED_PID}.json`, JSON.stringify({ pid: LAUNCHED_PID, pid_created: LAUNCHED_CREATED, started_at: "resumed" }));
 			return ok({ exited: false, exitCode: null, stderr: "", pid: LAUNCHED_PID });
@@ -382,16 +382,98 @@ describe("session ending ownership", () => {
 		expect(await h.fs.stat(MARKER)).toBeNull();
 	});
 
-	test("the relocated guard recovers a dead lock and abandoned takeover and removes both on release", async () => {
+	test("the relocated guard recovers a dead lock and removes it on release", async () => {
 		const h = setup();
 		h.fs.seed(GUARD, JSON.stringify({ pid: OTHER_OWNER_PID, startTime: h.runtime.lock.process.startTime }));
-		h.fs.seed(`${GUARD}.takeover`, "0");
 		h.runtime.lock.process.ownerStartTime = async (pid) => ok(pid === OTHER_OWNER_PID ? null : h.runtime.lock.process.startTime);
-		// The first millisecond beyond lock.ts's stale takeover boundary.
-		h.runtime.lock.clock.now = () => TAKEOVER_STALE_MS + 1;
 		expect(code(await withSessionEnding(h.runtime, ID, async () => apiOk(null)))).toBe("ok");
 		expect(await h.fs.stat(GUARD)).toBeNull();
-		expect(await h.fs.stat(`${GUARD}.takeover`)).toBeNull();
+		expect(await h.fs.stat(MARKER)).toBeNull();
+	});
+
+	for (const identity of [null, "reused-launch-owner"]) {
+		for (const registration of ["before-deadline", "at-deadline", "absent"] as const) {
+			test(`a stop covers an in-flight launch with owner identity ${identity} and registration ${registration}`, async () => {
+				const h = setup();
+				h.fs.files.delete(TRANSCRIPT);
+				h.identities[String(h.runtime.lock.process.pid)] = identity;
+				h.fs.seed(MARKER, JSON.stringify({ pid: h.runtime.lock.process.pid, pidCreated: FAKE_OWNER_CREATED, token: "launching", launch: { startedAt: 0, registrationWaitMs: LAUNCH_REGISTRATION_WAIT_MS }, takenOver: false, otherOwners: [] }));
+				const stopping = h.caller();
+				const advance = stopping.clock.sleep;
+				const registrationAt = registration === "before-deadline" ? LAUNCH_REGISTRATION_WAIT_MS - SESSION_POLL_MS : LAUNCH_REGISTRATION_WAIT_MS;
+				let registered = false;
+				const queries = { count: 0 };
+				let polls = 0;
+				const read = h.fs.readText.bind(h.fs);
+				h.fs.readText = async (path) => {
+					if (path === `${ROOT}/sessions/${ID}.json`) {
+						if (polls > 0) expect(queries.count).toBe(1);
+						queries.count = 0;
+						polls += 1;
+					}
+					return read(path);
+				};
+				const createdAt = h.runtime.process.createdAt;
+				h.runtime.process.createdAt = async (pids) => {
+					if (polls > 0) queries.count += 1;
+					return createdAt(pids);
+				};
+				stopping.clock.sleep = async (ms) => {
+					await advance(ms);
+					if (!registered && registration !== "absent" && stopping.clock.now().getTime() >= registrationAt) {
+						registered = true;
+						h.identities[String(LAUNCHED_PID)] = LAUNCHED_CREATED;
+						h.fs.seed(`${DIRECTORY}/processes/${LAUNCHED_PID}.json`, JSON.stringify({ pid: LAUNCHED_PID, pid_created: LAUNCHED_CREATED, started_at: "resumed" }));
+					}
+				};
+				expect(await stopSession(stopping, SESSION, () => {})).toEqual(apiOk({ session: ID, stopped: true, compacted: null }));
+				expect(queries.count).toBe(1);
+				expect(polls).toBeGreaterThan(LAUNCH_REGISTRATION_WAIT_MS / SESSION_POLL_MS);
+				expect(stopping.clock.now().getTime()).toBeGreaterThanOrEqual(LAUNCH_REGISTRATION_WAIT_MS);
+				expect(stopping.clock.now().getTime()).toBeLessThanOrEqual(LAUNCH_REGISTRATION_WAIT_MS + SESSION_POLL_MS);
+				expect(h.killed).toEqual(registration === "absent" ? [CLAUDE_PID, WINDOW_PID] : [CLAUDE_PID, WINDOW_PID, LAUNCHED_PID]);
+				expect(h.requests).toEqual([]);
+			});
+		}
+	}
+
+	test("a mode owner dying after spawn cannot release a waiting stop before late registration", async () => {
+		const h = setup();
+		h.response("event-1", { context: { tokens: TOKENS_AFTER } });
+		const paused = h.pause();
+		h.runtime.process.spawnDetached = async () => ok({ exited: false, exitCode: null, stderr: "" });
+		const mode = modeCommand(h.runtime, [ID, "auto"], () => {});
+		await paused.waiting;
+		const stopping = h.caller();
+		const advance = stopping.clock.sleep;
+		let registered = false;
+		stopping.clock.sleep = async (ms) => {
+			h.identities[String(h.runtime.lock.process.pid)] = null;
+			await advance(ms);
+			if (!registered && stopping.clock.now().getTime() >= LAUNCH_REGISTRATION_WAIT_MS - SESSION_POLL_MS) {
+				registered = true;
+				h.identities[String(LAUNCHED_PID)] = LAUNCHED_CREATED;
+				h.fs.seed(`${DIRECTORY}/processes/${LAUNCHED_PID}.json`, JSON.stringify({ pid: LAUNCHED_PID, pid_created: LAUNCHED_CREATED, started_at: "resumed" }));
+			}
+		};
+		try {
+			expect(await stopSession(stopping, SESSION, () => {})).toEqual(apiOk({ session: ID, stopped: true, compacted: null }));
+			expect(registered).toBe(true);
+			expect(h.identities[String(LAUNCHED_PID)]).toBeNull();
+		} finally { paused.resume(); await mode; }
+		expect(code(await mode)).toBe("session-ending");
+		expect(await h.fs.stat(MARKER)).toBeNull();
+	});
+
+	test("a failed launch-marker publication prevents spawn", async () => {
+		const h = setup();
+		h.response("event-1", { context: { tokens: TOKENS_AFTER } });
+		const rename = h.fs.rename.bind(h.fs);
+		h.fs.rename = async (from, to) => { if (to === MARKER) throw new Error("marker write failed"); await rename(from, to); };
+		let launches = 0;
+		h.runtime.process.spawnDetached = async () => { launches += 1; return ok({ exited: false, exitCode: null, stderr: "" }); };
+		expect(code(await modeCommand(h.runtime, [ID, "auto"], () => {}))).toBe("session-io");
+		expect(launches).toBe(0);
 		expect(await h.fs.stat(MARKER)).toBeNull();
 	});
 

@@ -305,9 +305,12 @@ Claude Code update channel only at install, if the key is absent, and does not o
 
 Commands that change something take one lock. If it is taken, the command waits until it is free. The lock is released
 also when the process holding it crashes, otherwise the wait would be eternal (`src/lock.ts`). The lock file is created
-exclusively, with the owner's PID and start time. A stale lock is taken over by whoever exclusively created the file
-`<lock>.takeover`: under it the lock is read again and deleted. If the owner's start time cannot be found out, the lock is
-considered taken. When a command starts waiting for the lock, it immediately, before waiting, reports the progress event `lock-waiting` on standard error (see "API output"), at once, not at the end of the command. It is reported by `rig update` (without `--pending`), `rig apply`, `rig feature <name> enable|disable`, `rig language en|ru` and `rig install`. If the lock is free or a stale one is taken at once, there is no event. `rig update --pending` does not wait for the lock: if it is taken it exits at once and reports no waiting event. Exit code 0 is success, 1 is failure. The output contract is in "API output": rig is an API for the hub, and every command prints only JSON.
+exclusively, with the owner's PID, start time and unique token. To recover a stale token, contenders claim numbered files
+`<lock>.recover-<token>.<generation>` exclusively, advancing past a generation only after its recoverer is dead by identity.
+The winner checks the token again and atomically replaces the lock without deleting it; a holder cleans claims for older tokens.
+Legacy locks without a token use their owner identity as a recovery token. A holder removes the lock only if its token still matches.
+If an owner or recoverer's start time cannot be found out, it is considered live; four consecutive failed identity probes end a
+waiting acquisition with an error after reporting the probe problem. A successful wait resets the failure count. When a command starts waiting for the lock, it immediately, before waiting, reports the progress event `lock-waiting` on standard error (see "API output"), at once, not at the end of the command. It is reported by `rig update` (without `--pending`), `rig apply`, `rig feature <name> enable|disable`, `rig language en|ru` and `rig install`. If the lock is free or a stale one is taken at once, there is no event. `rig update --pending` does not wait for the lock: if it is taken it exits at once and reports no waiting event. Exit code 0 is success, 1 is failure. The output contract is in "API output": rig is an API for the hub, and every command prints only JSON.
 
 External commands (`git`, `claude plugin`, `systemctl`) go through the common process runner
 (`src/commands/process-runner.ts`): after 15 minutes they are stopped together with the whole process tree and counted as

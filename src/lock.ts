@@ -2,10 +2,16 @@ import type { FileSystem } from "./file-system.js";
 import type { Messages } from "./messages.js";
 import type { Result } from "./result.js";
 
-import { joinPath } from "./file-system.js";
+import { atomicWrite, joinPath } from "./file-system.js";
 import { err, errorText, ok } from "./result.js";
 
+// One initial probe and three retries allow transient process-query failures to clear without hanging callers indefinitely.
+const MAX_CONSECUTIVE_PROBE_FAILURES = 4;
+// Kept for callers checking the age of legacy takeover files during migration.
+export const TAKEOVER_STALE_MS = 30_000;
+
 export type LockOwner = { pid: number; startTime: number };
+type LockRecord = LockOwner & { token: string };
 export type LockDependencies = {
 	fs: FileSystem;
 	home: string;
@@ -34,6 +40,18 @@ const parseOwner = (text: string): LockOwner | null => {
 	return { pid: value.pid, startTime: value.startTime };
 };
 
+// Old lock files have no token; their identity supplies a stable, separate legacy token during migration.
+const parseLock = (text: string): LockRecord | null => {
+	const owner = parseOwner(text);
+	if (owner === null) return null;
+	let value: unknown;
+	try { value = JSON.parse(text); } catch { return null; }
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+	if ("token" in value && (typeof value.token !== "string" || !/^[a-zA-Z0-9-]+$/.test(value.token))) return null;
+	const token = "token" in value && typeof value.token === "string" ? value.token : `legacy-${owner.pid}-${owner.startTime}`;
+	return { ...owner, token };
+};
+
 // Unknown counts as running: taking a live lock is worse than waiting a little longer.
 const ownerMayBeRunning = async (owner: LockOwner, dependencies: LockDependencies): Promise<Result<boolean>> => {
 	if (!Number.isInteger(owner.pid) || !Number.isFinite(owner.startTime)) return ok(false);
@@ -46,14 +64,29 @@ const ownerMayBeRunning = async (owner: LockOwner, dependencies: LockDependencie
 	}
 };
 
-const createHandle = (fs: FileSystem, lockPath: string, owner: LockOwner, messages: Messages): LockHandle => {
+const cleanClaims = async (fs: FileSystem, lockPath: string, token: string): Promise<void> => {
+	const separator = lockPath.lastIndexOf("/");
+	const directory = separator < 0 ? "." : lockPath.slice(0, separator) || "/";
+	const prefix = `${lockPath.slice(separator + 1)}.recover-`;
+	for (const entry of await fs.listDirectory(directory)) {
+		if (!entry.directory && entry.name === `${lockPath.slice(separator + 1)}.takeover`) {
+			await fs.remove(joinPath(directory, entry.name)).catch(() => undefined);
+		}
+		if (!entry.directory && entry.name.startsWith(prefix) && !entry.name.startsWith(`${prefix}${token}.`)) {
+			await fs.remove(joinPath(directory, entry.name)).catch(() => undefined);
+		}
+	}
+};
+
+const createHandle = (fs: FileSystem, lockPath: string, owner: LockRecord, messages: Messages): LockHandle => {
 	let released = false;
 	return {
 		release: async () => {
 			if (released) return ok(undefined);
 			try {
-				const current = parseOwner(await fs.readText(lockPath));
-				if (current?.pid === owner.pid && current.startTime === owner.startTime) await fs.remove(lockPath);
+				await cleanClaims(fs, lockPath, owner.token).catch(() => undefined);
+				const current = parseLock(await fs.readText(lockPath));
+				if (current?.token === owner.token) await fs.remove(lockPath);
 				released = true;
 				return ok(undefined);
 			} catch (error) {
@@ -63,49 +96,38 @@ const createHandle = (fs: FileSystem, lockPath: string, owner: LockOwner, messag
 	};
 };
 
-// A takeover takes milliseconds (one read and one delete). A takeover file older than this belongs to a process that was
-// killed in the middle of it; 30 seconds is far above any real takeover and still unblocks waiters quickly.
-export const TAKEOVER_STALE_MS = 30_000;
+type Recovery = { kind: "acquired" } | { kind: "wait" } | { kind: "problem"; problem: LockProbeProblem };
 
-const takeoverPathOf = (lockPath: string): string => `${lockPath}.takeover`;
-
-// Only the holder of the exclusively created takeover file may delete a stale lock. Under it the lock is read again and
-// deleted only if its owner is still dead. Nobody else deletes a lock (a live owner releases its own, which a dead one
-// cannot), and normal acquire only creates, so the lock cannot change between the check and the delete.
-const takeOverStale = async (fs: FileSystem, lockPath: string, dependencies: LockDependencies): Promise<void> => {
-	const takeoverPath = takeoverPathOf(lockPath);
-	const stamp = String(dependencies.clock.now());
-	const created = await fs.writeExclusive(takeoverPath, stamp);
-	if (!created.ok || !created.value) {
-		await clearDeadTakeover(fs, takeoverPath, dependencies);
-		await dependencies.clock.sleep(dependencies.pollIntervalMs);
-		return;
-	}
-	try {
-		let current: LockOwner | null;
-		try {
-			current = parseOwner(await fs.readText(lockPath));
-		} catch {
-			return;
+// Each generation can advance only after every earlier recoverer is dead. The lock is replaced atomically, never removed.
+const takeOverStale = async (fs: FileSystem, lockPath: string, stale: LockRecord, owner: LockRecord, dependencies: LockDependencies): Promise<Result<Recovery>> => {
+	for (let generation = 0; ; generation += 1) {
+		const path = `${lockPath}.recover-${stale.token}.${generation}`;
+		const created = await fs.writeExclusive(path, `${JSON.stringify(owner)}\n`);
+		if (!created.ok) return created;
+		if (created.value) {
+			let current: LockRecord | null;
+			try { current = parseLock(await fs.readText(lockPath)); } catch {
+				await fs.remove(path).catch(() => undefined);
+				return ok({ kind: "wait" });
+			}
+			if (current?.token !== stale.token) {
+				await fs.remove(path).catch(() => undefined);
+				return ok({ kind: "wait" });
+			}
+			const replaced = await atomicWrite(fs, lockPath, `${JSON.stringify(owner)}\n`, dependencies.messages);
+			if (!replaced.ok) {
+				await fs.remove(path).catch(() => undefined);
+				return replaced;
+			}
+			return ok({ kind: "acquired" });
 		}
-		if (current !== null) {
-			const running = await ownerMayBeRunning(current, dependencies);
-			if (running.ok && !running.value) await fs.remove(lockPath);
-		}
-	} finally {
-		await fs.remove(takeoverPath).catch(() => undefined);
-	}
-};
-
-const clearDeadTakeover = async (fs: FileSystem, takeoverPath: string, dependencies: LockDependencies): Promise<void> => {
-	try {
-		const text = await fs.readText(takeoverPath);
-		const startedAt = Number(text);
-		const dead = !Number.isFinite(startedAt) || dependencies.clock.now() - startedAt > TAKEOVER_STALE_MS;
-		// Only the file we judged dead is removed: a fresh one made by someone else in the meantime has other text.
-		if (dead && (await fs.readText(takeoverPath)) === text) await fs.remove(takeoverPath);
-	} catch {
-		// Already gone or unreadable: the next round decides.
+		let text: string;
+		try { text = await fs.readText(path); } catch { return ok({ kind: "wait" }); }
+		const recoverer = parseOwner(text);
+		if (recoverer === null) return err(dependencies.messages.failure.lockMalformed());
+		const running = await ownerMayBeRunning(recoverer, dependencies);
+		if (!running.ok) return ok({ kind: "problem", problem: { pid: recoverer.pid, error: running.error } });
+		if (running.value) return ok({ kind: "wait" });
 	}
 };
 
@@ -116,38 +138,55 @@ const acquire = async (dependencies: LockDependencies, onWait: ((problem?: LockP
 	const lockPath = dependencies.lockPath ?? joinPath(dependencies.home, ".agent-rig", "rig.lock");
 	try {
 		await fs.ensureDirectory(joinPath(dependencies.home, ".agent-rig"));
+		const owner: LockRecord = { pid: dependencies.process.pid, startTime: dependencies.process.startTime, token: `new-${fs.uniqueSuffix()}` };
 		let announced = false;
 		let lastProblem = "";
+		let consecutiveProbeFailures = 0;
+		const wait = async (problem?: LockProbeProblem): Promise<Result<void>> => {
+			if (onWait === null) return ok(undefined);
+			if (!announced) { announced = true; onWait(); }
+			if (problem === undefined) {
+				lastProblem = "";
+				consecutiveProbeFailures = 0;
+			} else {
+				consecutiveProbeFailures += 1;
+				const key = JSON.stringify(problem);
+				if (key !== lastProblem) onWait(problem);
+				lastProblem = key;
+				if (consecutiveProbeFailures >= MAX_CONSECUTIVE_PROBE_FAILURES) return err(dependencies.messages.failure.lockAcquireFailed(dependencies.messages.lock.probeFailed(problem.pid, problem.error)));
+			}
+			await dependencies.clock.sleep(dependencies.pollIntervalMs);
+			return ok(undefined);
+		};
+		const handle = async (): Promise<Result<LockHandle | null>> => {
+			await cleanClaims(fs, lockPath, owner.token).catch(() => undefined);
+			return ok(createHandle(fs, lockPath, owner, dependencies.messages));
+		};
 		while (true) {
-			const owner: LockOwner = { pid: dependencies.process.pid, startTime: dependencies.process.startTime };
 			const created = await fs.writeExclusive(lockPath, `${JSON.stringify(owner)}\n`);
 			if (!created.ok) return err(created.error);
-			if (created.value) return ok(createHandle(fs, lockPath, owner, dependencies.messages));
+			if (created.value) return await handle();
 			let existingText: string;
 			try {
 				existingText = await fs.readText(lockPath);
 			} catch {
 				continue;
 			}
-			const existing = parseOwner(existingText);
+			const existing = parseLock(existingText);
 			if (existing === null) return err(dependencies.messages.failure.lockMalformed());
 			const running = await ownerMayBeRunning(existing, dependencies);
 			if (!running.ok || running.value) {
 				if (onWait === null) return ok(null);
-				if (!announced) {
-					announced = true;
-					onWait();
-				}
-				if (!running.ok) {
-					const problem = { pid: existing.pid, error: running.error };
-					const key = JSON.stringify(problem);
-					if (key !== lastProblem) onWait(problem);
-					lastProblem = key;
-				} else lastProblem = "";
-				await dependencies.clock.sleep(dependencies.pollIntervalMs);
+				const waited = await wait(running.ok ? undefined : { pid: existing.pid, error: running.error });
+				if (!waited.ok) return waited;
 				continue;
 			}
-			await takeOverStale(fs, lockPath, dependencies);
+			const recovery = await takeOverStale(fs, lockPath, existing, owner, dependencies);
+			if (!recovery.ok) return recovery;
+			if (recovery.value.kind === "acquired") return await handle();
+			if (onWait === null) return ok(null);
+			const waited = await wait(recovery.value.kind === "problem" ? recovery.value.problem : undefined);
+			if (!waited.ok) return waited;
 		}
 	} catch (error) {
 		return err(dependencies.messages.failure.lockAcquireFailed(errorText(error)));

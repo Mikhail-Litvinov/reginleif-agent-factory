@@ -2,7 +2,7 @@ import type { LockDependencies, LockHandle } from "../src/lock.js";
 import type { Result } from "../src/result.js";
 
 import { describe, expect, test } from "bun:test";
-import { TAKEOVER_STALE_MS, acquireLock, tryAcquireLock } from "../src/lock.js";
+import { acquireLock, tryAcquireLock } from "../src/lock.js";
 import { err, ok } from "../src/result.js";
 import { MemoryFileSystem } from "./fakes/memory-runtime.js";
 import { messagesFor } from "../src/messages";
@@ -20,7 +20,8 @@ const SECOND_PID = 22;
 const SECOND_START = 202;
 const UNKNOWN_ANSWERS_BEFORE_DEAD = 2;
 const HOLD_TURNS = 5;
-const TAKEOVER_PATH = `${LOCK_PATH}.takeover`;
+const STALE_TOKEN = `legacy-${DEAD_PID}-${DEAD_START}`;
+const CLAIM_PATH = `${LOCK_PATH}.recover-${STALE_TOKEN}.0`;
 const WAIT_POLLS_BEFORE_RELEASE = 3;
 const ignoreNotice = (): void => undefined;
 
@@ -28,9 +29,19 @@ const ignoreNotice = (): void => undefined;
 // between "this process decided the lock is stale" and "this process removes it".
 class InterleavingFileSystem extends MemoryFileSystem {
 	interleave: (() => Promise<void>) | null = null;
+	beforeClaim: (() => Promise<void>) | null = null;
+
+	override async writeExclusive(path: string, value: string): Promise<Result<boolean>> {
+		if (path === CLAIM_PATH && this.beforeClaim !== null) {
+			const run = this.beforeClaim;
+			this.beforeClaim = null;
+			await run();
+		}
+		return super.writeExclusive(path, value);
+	}
 
 	override async rename(from: string, to: string): Promise<void> {
-		await this.fire(from);
+		await this.fire(to);
 		return super.rename(from, to);
 	}
 
@@ -66,6 +77,34 @@ const dependenciesFor = (
 const liveOwners = (alive: Map<number, number>) => async (pid: number): Promise<Result<number | null>> => ok(alive.get(pid) ?? null);
 
 describe("lock takeover of a stale lock", () => {
+	test("a delayed stale observer does not replace a newly acquired lock", async () => {
+		const fs = new InterleavingFileSystem();
+		fs.seed(LOCK_PATH, JSON.stringify({ pid: DEAD_PID, startTime: DEAD_START }));
+		const alive = new Map([[FIRST_PID, FIRST_START], [SECOND_PID, SECOND_START]]);
+		const captured: { second: Result<LockHandle> | null } = { second: null };
+		fs.beforeClaim = async () => {
+			captured.second = await acquireLock(dependenciesFor(fs, SECOND_PID, SECOND_START, liveOwners(alive)), ignoreNotice);
+		};
+		const first = await acquireLock(dependenciesFor(fs, FIRST_PID, FIRST_START, liveOwners(alive), async () => { throw new Error("lock held"); }), ignoreNotice);
+		expect(captured.second?.ok).toBe(true);
+		expect(first.ok).toBe(false);
+		expect(fs.files.get(LOCK_PATH)).toContain(`"pid":${SECOND_PID}`);
+	});
+
+	test("a delayed stale takeover cannot remove a newer owner's lock", async () => {
+		const fs = new InterleavingFileSystem();
+		fs.seed(LOCK_PATH, JSON.stringify({ pid: DEAD_PID, startTime: DEAD_START }));
+		const alive = new Map([[FIRST_PID, FIRST_START], [SECOND_PID, SECOND_START]]);
+		const captured: { second: Result<LockHandle> | null } = { second: null };
+		fs.interleave = async () => {
+			captured.second = await acquireLock(dependenciesFor(fs, SECOND_PID, SECOND_START, liveOwners(alive), async () => { throw new Error("claim held"); }), ignoreNotice);
+		};
+		const first = await acquireLock(dependenciesFor(fs, FIRST_PID, FIRST_START, liveOwners(alive)), ignoreNotice);
+		expect(captured.second?.ok).toBe(false);
+		expect(first.ok).toBe(true);
+		expect(fs.files.get(LOCK_PATH)).toContain(`"pid":${FIRST_PID}`);
+	});
+
 	test("two waiters on one stale lock produce exactly one owner at a time", async () => {
 		const fs = new MemoryFileSystem();
 		fs.seed(LOCK_PATH, JSON.stringify({ pid: DEAD_PID, startTime: DEAD_START }));
@@ -90,49 +129,28 @@ describe("lock takeover of a stale lock", () => {
 		expect(acquiredCount).toBe(2);
 		expect(maxHolders).toBe(1);
 		expect(fs.files.has(LOCK_PATH)).toBe(false);
-		expect(fs.files.has(TAKEOVER_PATH)).toBe(false);
+		expect([...fs.files.keys()].some((path) => path.includes(".recover-"))).toBe(false);
 	});
 
-	test("while one process is deleting the stale lock another cannot touch the lock", async () => {
-		const fs = new InterleavingFileSystem();
+	test("a claim left by a killed recoverer does not block recovery", async () => {
+		const fs = new MemoryFileSystem();
 		fs.seed(LOCK_PATH, JSON.stringify({ pid: DEAD_PID, startTime: DEAD_START }));
+		fs.seed(CLAIM_PATH, JSON.stringify({ pid: SECOND_PID, startTime: SECOND_START }));
+		const result = await acquireLock(dependenciesFor(fs, FIRST_PID, FIRST_START, liveOwners(new Map())), ignoreNotice);
+
+		expect(result.ok).toBe(true);
+		expect(fs.files.has(CLAIM_PATH)).toBe(false);
+	});
+
+	test("a live recoverer makes the waiter wait until it dies", async () => {
+		const fs = new MemoryFileSystem();
+		fs.seed(LOCK_PATH, JSON.stringify({ pid: DEAD_PID, startTime: DEAD_START }));
+		fs.seed(CLAIM_PATH, JSON.stringify({ pid: SECOND_PID, startTime: SECOND_START }));
 		const alive = new Map([[SECOND_PID, SECOND_START]]);
-		const captured: { second: Result<LockHandle> | null } = { second: null };
-		fs.interleave = async () => {
-			captured.second = await acquireLock(dependenciesFor(fs, SECOND_PID, SECOND_START, liveOwners(alive), async () => { throw new Error("blocked by takeover"); }), ignoreNotice);
-			expect(fs.files.has(TAKEOVER_PATH)).toBe(true);
-		};
-
-		const first = await acquireLock(dependenciesFor(fs, FIRST_PID, FIRST_START, liveOwners(alive)), ignoreNotice);
-
-		expect(first.ok).toBe(true);
-		expect(captured.second !== null && !captured.second.ok).toBe(true);
-		expect(fs.files.get(LOCK_PATH)).toBe(`${JSON.stringify({ pid: FIRST_PID, startTime: FIRST_START })}\n`);
-		expect(fs.files.has(TAKEOVER_PATH)).toBe(false);
-	});
-
-	test("a takeover file left by a killed process does not block forever", async () => {
-		const fs = new MemoryFileSystem();
-		fs.seed(LOCK_PATH, JSON.stringify({ pid: DEAD_PID, startTime: DEAD_START }));
-		fs.seed(TAKEOVER_PATH, "0");
-		const now = TAKEOVER_STALE_MS + 1;
-
-		const result = await acquireLock(dependenciesFor(fs, FIRST_PID, FIRST_START, liveOwners(new Map()), async () => undefined, () => now), ignoreNotice);
-
-		expect(result.ok).toBe(true);
-	});
-
-	test("a fresh takeover file makes the waiter wait until it grows old", async () => {
-		const fs = new MemoryFileSystem();
-		fs.seed(LOCK_PATH, JSON.stringify({ pid: DEAD_PID, startTime: DEAD_START }));
-		let now = 0;
-		fs.seed(TAKEOVER_PATH, String(now));
 		let sleeps = 0;
-
-		const result = await acquireLock(dependenciesFor(fs, FIRST_PID, FIRST_START, liveOwners(new Map()), async () => { sleeps += 1; now += TAKEOVER_STALE_MS / 2; }, () => now), ignoreNotice);
-
+		const result = await acquireLock(dependenciesFor(fs, FIRST_PID, FIRST_START, liveOwners(alive), async () => { sleeps += 1; alive.clear(); }), ignoreNotice);
 		expect(result.ok).toBe(true);
-		expect(sleeps).toBeGreaterThanOrEqual(2);
+		expect(sleeps).toBe(1);
 	});
 
 	test("a takeover is not blocked by a live lock and leaves no helper files", async () => {
@@ -145,6 +163,54 @@ describe("lock takeover of a stale lock", () => {
 });
 
 describe("lock when the owner cannot be inspected", () => {
+	test("persistent recoverer probe failures report the recoverer and end acquisition", async () => {
+		const fs = new MemoryFileSystem();
+		fs.seed(LOCK_PATH, JSON.stringify({ pid: DEAD_PID, startTime: DEAD_START }));
+		fs.seed(CLAIM_PATH, JSON.stringify({ pid: SECOND_PID, startTime: SECOND_START }));
+		let failures = 0;
+		const notices: Array<{ pid: number; error: string } | undefined> = [];
+		const result = await acquireLock(dependenciesFor(fs, FIRST_PID, FIRST_START, async (pid) => {
+			if (pid === DEAD_PID) return ok(null);
+			failures += 1;
+			if (failures > 4) throw new Error("probe limit exceeded");
+			return err("recoverer probe failed");
+		}, async () => { if (failures >= 4) throw new Error("probe limit exceeded"); }), (problem) => { notices.push(problem); });
+		expect(result.ok).toBe(false);
+		if (!result.ok) expect(result.error).toContain("recoverer probe failed");
+		expect(failures).toBe(4);
+		expect(notices).toContainEqual({ pid: SECOND_PID, error: "recoverer probe failed" });
+	});
+
+	test("persistent probe failures report the problem and return an error", async () => {
+		const fs = new MemoryFileSystem();
+		fs.seed(LOCK_PATH, JSON.stringify({ pid: DEAD_PID, startTime: DEAD_START }));
+		let probes = 0;
+		const notices: Array<{ pid: number; error: string } | undefined> = [];
+		const result = await acquireLock(dependenciesFor(fs, FIRST_PID, FIRST_START, async () => {
+			probes += 1;
+			if (probes > 4) throw new Error("probe limit exceeded");
+			return err("probe failed");
+		}, async () => { if (probes >= 4) throw new Error("probe limit exceeded"); }), (problem) => { notices.push(problem); });
+		expect(result.ok).toBe(false);
+		if (!result.ok) expect(result.error).toContain("probe failed");
+		expect(probes).toBe(4);
+		expect(notices).toContainEqual({ pid: DEAD_PID, error: "probe failed" });
+		expect(fs.files.has(LOCK_PATH)).toBe(true);
+	});
+
+	test("a successful probe resets the consecutive failure count", async () => {
+		const fs = new MemoryFileSystem();
+		fs.seed(LOCK_PATH, JSON.stringify({ pid: DEAD_PID, startTime: DEAD_START }));
+		let probes = 0;
+		const result = await acquireLock(dependenciesFor(fs, FIRST_PID, FIRST_START, async () => {
+			probes += 1;
+			if (probes === 4) return ok(DEAD_START);
+			if (probes >= 8) return ok(null);
+			return err("probe failed");
+		}), ignoreNotice);
+		expect(result.ok).toBe(true);
+		expect(probes).toBeGreaterThanOrEqual(8);
+	});
 	test("an unknown answer counts as running: the lock is kept and the caller waits", async () => {
 		const fs = new MemoryFileSystem();
 		fs.seed(LOCK_PATH, JSON.stringify({ pid: DEAD_PID, startTime: DEAD_START }));

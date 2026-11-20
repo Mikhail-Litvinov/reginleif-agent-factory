@@ -26,11 +26,13 @@ const STDERR_LIMIT = 1000;
 const MODE_BLOCK_BYTES = 1024 * 1024;
 // Seconds a session run waits when the command gives no timeout of its own.
 const DEFAULT_TIMEOUT_SEC = 90;
+const MS_PER_SECOND = 1000;
+// The registration allowance used by launch polling and by stop after a launching owner dies.
+export const LAUNCH_REGISTRATION_WAIT_MS = DEFAULT_TIMEOUT_SEC * MS_PER_SECOND;
 const POSIX_PATH_SEPARATOR = ":";
 const WINDOWS_PATH_SEPARATOR = ";";
 // File types cmd.exe /c tries for a bare name, in its lookup order; PATH order comes first.
 const WINDOWS_EXECUTABLE_SUFFIXES = [".exe", ".com", ".cmd", ".bat"] as const;
-const MS_PER_SECOND = 1000;
 const MODES = ["manual", "auto", "acceptEdits", "plan", "dontAsk"] as const;
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -131,7 +133,7 @@ const spawnLaunch = async (runtime: RuntimePorts, command: string[], ending?: Se
 		}
 	} catch (error) { return apiFail(LAUNCH_FAILED, messagesFor(runtime.language).session.io(errorText(error))); }
 	const start = () => runtime.process.spawnDetached(command, LAUNCH_EXIT_GRACE_MS, STDERR_LIMIT, path);
-	const started = ending === undefined ? apiOk(start()) : await ending.start(start);
+	const started = ending === undefined ? apiOk(start()) : await ending.startLaunch(start, LAUNCH_REGISTRATION_WAIT_MS);
 	if (!started.ok) {
 		await runtime.fs.remove(path).catch(() => undefined);
 		return started;
@@ -174,7 +176,7 @@ export const runSession = async (runtime: RuntimePorts, session: SessionRecord, 
 	const accountText = launch.value.account;
 	const spawned = await spawnCommand(launch.value.command);
 	if (!spawned.ok) return spawned;
-	const deadline = runtime.clock.now().getTime() + DEFAULT_TIMEOUT_SEC * MS_PER_SECOND;
+	const deadline = runtime.clock.now().getTime() + LAUNCH_REGISTRATION_WAIT_MS;
 	for (;;) {
 		const current = await lookupSession(runtime, session.id);
 		if (!current.ok) return current;

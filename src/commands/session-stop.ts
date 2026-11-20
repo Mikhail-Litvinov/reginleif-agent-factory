@@ -1,11 +1,11 @@
 import type { ApiResult, ProgressEvent } from "../output.js";
 import type { RuntimePorts } from "../ports.js";
-import type { SessionRecord } from "../session-core.js";
+import type { SessionProcess, SessionRecord } from "../session-core.js";
 import type { SessionEnding } from "../session-ending.js";
 
 import { apiFail, apiOk, PROGRESS_CODE_SESSION_COMPACTING, PROGRESS_CODE_SESSION_TERMINATING, SESSION_IO, SESSION_STOP_TIMEOUT } from "../output.js";
 import { messagesFor } from "../messages.js";
-import { compactSessionCore, liveProcesses, lookupSession, requestSession, sessionLive, SESSION_POLL_MS, SESSION_TIMEOUTS } from "../session-core.js";
+import { compactSessionCore, liveAmong, liveProcesses, processKey, readSession, requestSession, sessionLive, SESSION_POLL_MS, SESSION_TIMEOUTS } from "../session-core.js";
 import { withSessionEnding } from "../session-ending.js";
 
 // A stop compacts the session first only when it holds more tokens than this. The threshold is rig's own; its origin is not recorded in this repo.
@@ -66,30 +66,39 @@ export const stopEndingSession = async (runtime: RuntimePorts, session: SessionR
 
 export const stopSession = (runtime: RuntimePorts, session: SessionRecord, progress: (event: ProgressEvent) => void): Promise<ApiResult<StopResult>> => withSessionEnding<StopResult>(runtime, session.id,
 	(ending) => stopEndingSession(runtime, session, progress, ending),
-	async (ownersLive) => {
+	async (observe) => {
 		let stopped = false;
 		let announced = false;
-		const killCurrent = async (): Promise<ApiResult<boolean>> => {
-			const current = await lookupSession(runtime, session.id);
-			if (!current.ok) return current;
-			const live = await sessionLive(runtime, current.value);
-			if (!live.ok) return live;
-			if (live.value && !announced) { announced = true; progress({ code: PROGRESS_CODE_SESSION_TERMINATING }); }
-			return endSession(runtime, current.value);
-		};
-		// No elapsed-time limit: release or owner death ends this wait. The owner's steps are bounded:
-		// compaction notices the kill within a poll; mode's registration wait is bounded to 90 seconds.
+		let finalizing = false;
+		const terminating = new Map<string, { process: SessionProcess; deadline: number }>();
+		// One identity snapshot covers both fresh registrations and interrupted owners in each poll.
+		// A dead owner's in-flight launch keeps the wait alive through its registration deadline.
 		for (;;) {
-			const ended = await killCurrent();
-			if (!ended.ok) return ended;
-			stopped = ended.value || stopped;
-			const live = await ownersLive();
-			if (!live.ok) return live;
-			if (!live.value) break;
-			await runtime.clock.sleep(SESSION_POLL_MS);
+			const current = await readSession(runtime, session.id);
+			if (!current.ok) return current;
+			const candidates = new Map(current.value.processes.map((process) => [processKey(process), process]));
+			for (const [key, pending] of terminating) candidates.set(key, pending.process);
+			const processes = [...candidates.values()];
+			const observed = await observe(processes.filter((process) => process.pidCreated !== null).map((process) => process.pid));
+			if (!observed.ok) return observed;
+			const live = liveAmong(processes, observed.value.created);
+			const liveKeys = new Set(live.map(processKey));
+			for (const key of terminating.keys()) if (!liveKeys.has(key)) terminating.delete(key);
+			if (live.length > 0 && !announced) { announced = true; progress({ code: PROGRESS_CODE_SESSION_TERMINATING }); }
+			for (const process of live) {
+				const key = processKey(process);
+				const pending = terminating.get(key);
+				if (pending !== undefined && runtime.clock.now().getTime() >= pending.deadline) return apiFail(SESSION_STOP_TIMEOUT, messagesFor(runtime.language).session.stopTimeout());
+				const killed = await runtime.process.killTree(process.pid);
+				if (!killed.ok) return apiFail(SESSION_IO, messagesFor(runtime.language).session.io(killed.error));
+				if (pending === undefined) terminating.set(key, { process, deadline: runtime.clock.now().getTime() + STOP_TIMEOUT_MS });
+				stopped = true;
+			}
+			if (!observed.value.waiting) {
+				if (finalizing && live.length === 0) return stopped ? apiOk({ session: session.id, stopped: true, compacted: null }) : apiOk({ session: session.id, stopped: false, reason: "not-running" });
+				finalizing = true;
+			}
+			if (observed.value.waiting || live.length > 0) await runtime.clock.sleep(Math.min(SESSION_POLL_MS, observed.value.registrationRemainingMs ?? SESSION_POLL_MS));
 		}
-		const final = await killCurrent();
-		if (!final.ok) return final;
-		return stopped || final.value ? apiOk({ session: session.id, stopped: true, compacted: null }) : apiOk({ session: session.id, stopped: false, reason: "not-running" });
 	},
 );
