@@ -31,8 +31,17 @@ results; no second recovery scheduler next to Temporal; no success reported for 
 | D13 | Under D4 an agent could steal a key from the owner's Windows profile and accept its own task. The risk is accepted for the first version. | Owner |
 | D14 | A requirements change stops the running agent at once; a new attempt starts with the new revision. | Owner |
 | D15 | A dependency that ends without acceptance puts the waiting task into BLOCKED until the owner decides. | Owner |
-| D16 | An agent that surely died is continued by a new attempt within the attempt limit and budget. An unclear state always asks the owner. | Owner |
+| D16 | An agent that surely died is continued by a new attempt within the attempt limit and budget. An unclear state never starts a second run: a read-only inspection settles it, and only what it cannot settle goes to the owner. | Owner (retry); the inspection follows D18 and spec 8E |
 | D17 | Server code (API, Control Worker), the local worker and their tests all run on Node 24. Factory installation checks for Node and does not install it. | Call |
+| D18 | Agents settle technical contradictions themselves. The owner gets only results, real blockers, and decisions that need them: requirements, scope, cost, loss, publication, permissions, acceptance. | Owner |
+| D19 | Child tasks inside the approved requirements start by themselves within limits of depth, number and the parent's budget. Anything outside the requirements is a proposal to the owner. | Owner |
+| D20 | A result is reviewed by another provider. When its usage limit is spent, the task waits for the reset and the owner is notified. | Owner |
+| D21 | A cancel whose machine is gone waits with a notice; the owner may force-close it. | Owner |
+| D22 | While paused: resume, cancel, feedback and revision only. | Owner |
+| D23 | Cancel, reject, publication and force-close take a second press in the same channel, in Telegram and in the panel. | Owner |
+| D24 | Nothing is deleted by itself. Cleanup on command removes logs, artifacts and worktrees; the history of decisions and events stays for good. | Owner |
+| D25 | A review finding the implementer accepts is fixed. A disputed technical one is settled by a third independent run; a dispute about requirements, scope or cost goes to the owner. | Call from D18 |
+| D26 | A mandatory check that could not run is first repaired by agents; if that fails, the task is BLOCKED with the reason. It never counts as passed. | Call from D18 |
 
 Rejected: a separate repository (Rig updates and rolls back only itself and the hub); code in the Rig core (ordinary Rig
 would pull Temporal and PostgreSQL); the worker's own child processes (an agent would die with the worker).
@@ -92,8 +101,9 @@ which drops unknown keys.
 - The status in PostgreSQL is a projection written by `PersistTaskEvent`, with a row version for optimistic locking.
 - A mutation through the API: one transaction writes the decision, the event and an outbox row under the caller's
   idempotency key (unique). The answer says *recorded*, never *applied*. The relay delivers it as a Temporal Update whose
-  id is the outbox id; the workflow's validator accepts or refuses; the outcome is written back as `applied` or `refused`
-  with a reason. Clients show the delivery state.
+  id is the outbox id. The validator checks only the form (it cannot run activities); the handler checks the decision and
+  the outcome is written back as `applied` or `refused` with a reason. Every press is recorded, refused ones included.
+  Clients show the delivery state.
 - Temporal removes duplicate Updates only within one workflow run. The workflow carries the ids it has handled through
   Continue-As-New, and the unique key in PostgreSQL covers everything before it.
 - Creating a task starts its workflow the same way; a repeated start of the same id is a no-op.
@@ -109,7 +119,8 @@ which drops unknown keys.
 
 The spec's 13 states plus PAUSED, REJECTED and CANCELLING. Any non-final state may be cancelled: without a run it goes to
 CANCELLED at once; with a run it goes to CANCELLING until the machine confirms that the run ended. An unreachable machine
-keeps the task in CANCELLING and raises a notice; on reconnect the worker stops the run before anything else.
+keeps the task in CANCELLING and raises a notice. The owner may force-close it: CANCELLED, marked "end of run not
+confirmed". On reconnect the worker stops such a run before anything else.
 
 | From | To | When |
 |---|---|---|
@@ -122,20 +133,26 @@ keeps the task in CANCELLING and raises a notice; on reconnect the worker stops 
 | VERIFYING | AWAITING_APPROVAL / REWORK_REQUIRED / BLOCKED | checks and review pass / confirmed findings / rework limit reached |
 | AWAITING_APPROVAL | ACCEPTED / REWORK_REQUIRED / REJECTED | owner's ACCEPT / REQUEST_CHANGES / REJECT |
 | REWORK_REQUIRED | ASSIGNED | next attempt, earlier results kept |
-| BLOCKED | the state it left | owner's decision |
+| PLANNING, VERIFYING | FAILED | input that no attempt can make valid |
+| BLOCKED | by the kind of block, see below | `resolve_block` by the owner |
 | RUNNING | ASSIGNED | the agent surely died: new attempt in the same worktree, resuming the session where the agent allows |
 | any active state | PAUSED and back | see below |
 
 Final: ACCEPTED, REJECTED, CANCELLED, FAILED.
 
-- **PAUSE.** In RUNNING the request is recorded and takes effect when the run ends, instead of the move to VERIFYING; in
-  any other active state at once. RESUME continues with the move that was held back.
-- **Revision.** It never edits an old one. In RUNNING the run is stopped as in a cancel, the worktree stays, and once the
-  machine confirms the end a new attempt starts with the new revision. In VERIFYING and AWAITING_APPROVAL the task goes to
-  REWORK_REQUIRED with the new revision. In earlier states it goes back to PLANNING. A decision carries its revision
-  number; one on an older revision is refused.
+- **BLOCKED** stores its kind, and the kind decides the exit: scope to PLANNING; dependency to READY; execution, usage limit
+  or agent question to ASSIGNED; environment of a check to VERIFYING; rework limit to REWORK_REQUIRED with a raised limit.
+  Before blocking, agents try to settle a technical cause (D18).
+- **ASSIGNED without a machine** waits with a notice. The owner may cancel (no run, so at once) or allow another agent.
+- **PAUSE.** In RUNNING and VERIFYING the request is recorded and takes effect when the run or the check ends, before the
+  next move; in any other active state at once. RESUME continues with the move that was held back.
+- **Revision.** It never edits an old one. In RUNNING the run is stopped as in a cancel (shown as RUNNING, "stopping for new
+  requirements"), the worktree stays, and once the machine confirms the end a new attempt starts with the new revision. In
+  VERIFYING and AWAITING_APPROVAL the task goes to REWORK_REQUIRED with the new revision; in REWORK_REQUIRED it stays and
+  takes it. In BLOCKED and in states before ASSIGNED it goes to PLANNING, in ASSIGNED it stays and takes it. In PAUSED it is
+  stored and RESUME goes to PLANNING. A decision carries its revision number; one on an older revision is refused.
 - **Dependency.** One that ends without ACCEPTED puts the waiting task into BLOCKED. The owner removes the dependency,
-  replaces it or cancels the task; BLOCKED then returns to READY, so dependencies are resolved anew.
+  replaces it or cancels the task. Dependencies stay inside one project in the first version.
 - **add_feedback** adds a note and changes no state: the next attempt gets it. **change_priority** affects only work that
   has not started.
 
@@ -161,7 +178,7 @@ limit. The result therefore exists without the worker and without the `rig exec`
    | run alive by identity (pid and creation time) | running | attach |
    | started marker, no exit, run ended or lost by identity | surely died | new attempt (D16) |
    | no marker and no run record | never started | start |
-   | a record or the process table cannot be read | unclear | BLOCKED |
+   | a record or the process table cannot be read | unclear | read-only inspection of processes, folder and Git; BLOCKED if it settles nothing |
 
    A pruned `rig exec` record cannot hide a live run: only ended runs are pruned. On Windows the run is confined to a
    kill-on-close job, so the agent's children end with it.
@@ -172,7 +189,8 @@ limit. The result therefore exists without the worker and without the `rig exec`
 
 Because the runner holds the time limit, an agent without a server stops by itself. Without a connection the worker starts
 nothing new and decides nothing that needs the server. Results and logs go to the server through the API into a file
-store on the server volume; until the upload is confirmed they stay in the execution folder.
+store on the server volume; until the upload is confirmed they stay in the execution folder. The activity then returns only
+their keys and checksums, and the server checks that they match the stored files before it uses them.
 
 **Report and checks.** The agent's report follows the fields of spec 10.1 and is checked against a schema. Checks are run
 by the worker itself (`RunAutomatedChecks`) and stored with command, exit code and log; an agent's claim about a test
@@ -210,8 +228,8 @@ excluded; the job then waits or fails by its timeout.
 A Git worktree per execution that changes code, outside the owner's checkout. Stored per run: repository, base commit,
 branch, path, commits, check results. One writer per worktree. After a crash the worktree and Git state are inspected
 before any decision; no hard reset, no branch deletion. Cleanup is a separate activity that refuses a worktree with
-unpublished changes. Rig's `project-tmp.sh` hook edits `.gitignore` and writes `.claude/settings.local.json` in the project:
-these two must be told apart from the agent's changes when a result is collected.
+unpublished changes. Rig's `project-tmp.sh` hook writes `.claude/settings.local.json` in the project and adds it and `.tmp/`
+to Git's `info/exclude`, so they do not show as changes; collection leaves them out.
 
 ## Errors and retries
 
@@ -231,7 +249,9 @@ Numbers (attempts, timeouts, budgets, depth) are settings with defaults set in t
 
 - Temporal authorizes nobody by default: the frontend needs mTLS with required client certificates and a private network
   before it leaves the PC. PostgreSQL and the UI are never published.
-- API tokens are stored as hashes and carry a role: owner, worker, reader. An agent process gets no token that can decide.
+- API tokens are stored as hashes and carry a role: owner, worker, relay, reader. An agent process gets no token that can
+  decide. The Telegram client has the relay role: it may submit a decision only with the hub's press id and a Telegram user
+  that is mapped to an owner, and each press id works once.
 - The hub's local endpoints have no authentication today. The new generic mechanism needs a per-client key; a button press
   is checked against the hub's allowed users and works once; dangerous actions need a second press.
 - Temporal roles are separate: the worker's certificate may poll its own queues and complete activities; it may not start
