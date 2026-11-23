@@ -108,6 +108,23 @@ SHELL_RULE_WINDOWS = """- Run commands directly in the shell the tool gives you 
 # The environment that makes Python tools write UTF-8 to a pipe (their default is the ANSI code page); it reaches
 # the commands even in the sandbox (job probe), unlike the code page of a console codex-run could set.
 UTF8_ENV_OVERRIDE = 'shell_environment_policy.set={PYTHONUTF8="1",PYTHONIOENCODING="utf-8"}'
+# A job's codex process must not inherit the session state of the Codex process this launcher runs under (the desktop
+# app sets CODEX_SHELL, CODEX_THREAD_ID, CODEX_SESSION_ID, CODEX_PERMISSION_PROFILE, CODEX_WINDOWS_*, CODEX_APP_*, ...;
+# with them every command of the job fails "app runtime provisioning service is unavailable"). Only the user's own
+# configuration passes: our CODEX_RUN_* and the CODEX_ variables the Codex documentation gives to users:
+# CODEX_ACCESS_TOKEN (the user login, in the binary only), CODEX_HOME (config and state folder) and CODEX_API_KEY (api key for exec; developers.openai.com/codex/noninteractive,
+# .../config-advanced), CODEX_CA_CERTIFICATE and CODEX_SQLITE_HOME (read by the codex binary for certificates and the
+# state database; not in the pages checked, found in the binary's strings). Any other CODEX_ name is a host's.
+USER_CODEX_VARS = frozenset({"CODEX_HOME", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN", "CODEX_CA_CERTIFICATE", "CODEX_SQLITE_HOME"})
+
+
+def codex_environment(env=None):
+    env = os.environ if env is None else env
+    return {name: value for name, value in env.items()
+            if not name.upper().startswith("CODEX_")
+            or name.upper() in USER_CODEX_VARS or name.upper().startswith("CODEX_RUN_")}
+
+
 # Garbled command output: the replacement character, or a C0 control character other than tab, CR, LF, ESC
 # (ESC starts the colour codes of a terminal).
 MOJIBAKE_RE = re.compile("\ufffd|[\x00-\x08\x0b\x0c\x0e-\x1a\x1c-\x1f]")
@@ -375,7 +392,8 @@ class Supervisor:
         flags = CREATE_NO_WINDOW if os.name == "nt" else 0
         with open(self.events_path, "ab") as sink, open(self.dir / "codex.err", "ab") as err:
             proc, job = process_job.start(cmd, cwd=self.state["cwd"], stdin=subprocess.PIPE,
-                                          stdout=subprocess.PIPE, stderr=err, creationflags=flags)
+                                          stdout=subprocess.PIPE, stderr=err, creationflags=flags,
+                                          env=codex_environment())
             try:
                 self.save(codex_pid=proc.pid, status="running")
                 if stdin_text is not None:

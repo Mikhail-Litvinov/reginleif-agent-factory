@@ -15,6 +15,10 @@ def main():
     last = args[args.index("-o") + 1]
     prompt = sys.stdin.read()
     emit(type="thread.started", thread_id="thread-fake")
+    env_file = os.environ.get("FAKE_CODEX_ENV_FILE")
+    if env_file:
+        with open(env_file, "w", encoding="utf-8") as f:
+            json.dump(dict(os.environ), f)
     pid_file = os.environ.get("FAKE_CODEX_CHILD_PID")
     if pid_file:
         flags = 0x00000008 | 0x00000200 if os.name == "nt" else 0
