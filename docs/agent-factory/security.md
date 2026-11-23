@@ -1,6 +1,6 @@
 # Agent Factory security
 
-Design, nothing is built. [architecture.md](architecture.md) is binding (D1 to D17 are its decisions); facts about Rig and
+Design, nothing is built. [architecture.md](architecture.md) is binding (D1 to D26 are its decisions; "call" marks a choice made in these documents, open to veto); facts about Rig and
 the hub are in [audit.md](audit.md); tests are in [testing.md](testing.md). This file states weakness classes and defences,
 never steps to exploit the existing hub.
 
@@ -25,7 +25,7 @@ text only; never counted as a defence). A threat with only prompt text is listed
 |---|---|---|
 | Server: API, Control Worker, PostgreSQL, Temporal | decisions, state, audit | exposure to a network without TLS and client auth |
 | PC: local worker, runner, adapters | executing activities, holding its own credentials | deciding anything; reaching PostgreSQL |
-| Hub (on the PC, loopback, no authentication today) | carrying owner buttons if the fork adds per-client keys | any request reaching it from a local process (class: unauthenticated local service) |
+| Hub (on the PC, loopback, no authentication today) and the Telegram client (relay role) | carrying owner buttons if the fork adds per-client keys | any request reaching it from a local process (class: unauthenticated local service) |
 | Agents (Claude, Codex, OpenAI, tools) | producing a report | everything else: they read untrusted text, so their output is untrusted |
 | Web panel | owner and reader views through the API | any markup from tasks, logs or agent output |
 | Repositories | content | their hooks, configuration and instructions (class: repository-controlled execution) |
@@ -33,7 +33,7 @@ text only; never counted as a defence). A threat with only prompt text is listed
 | Temporal UI | diagnostics for the owner | being published |
 
 Borders that carry authentication: client to API (token with role), worker to API and Temporal (certificate plus token),
-Control Worker to Temporal (own certificate), hub client to hub (per-client key, fork), API to PostgreSQL (own account).
+Control Worker to Temporal (own certificate), relay to API (token with role relay), API to PostgreSQL (own account).
 There is no border between an agent and the Windows user who runs it (D4, D13).
 
 ## Threats
@@ -49,8 +49,8 @@ There is no border between an agent and the Windows user who runs it (D4, D13).
 | T7 | An agent leaves its directory or uses a forbidden tool | permission mode, tool and directory lists (Claude), sandbox (Codex), worker checks of repository, directories, Git operations | profile plus code | S3, `path-escape` |
 | T8 | A process of the same Windows user reads files, saved credentials, the hub key, the worker's credentials | none in version one (D13); untrusted repositories must not run | undefended | none possible on one user |
 | T9 | Local process speaks to the unauthenticated hub endpoints | fork adds a per-client key, a button press is checked against allowed users and works once | code in the fork | `hub-key`, `hub-once`. The unmodified hub stays open; a local process of the same user is T8 |
-| T10 | Replayed or forged Telegram button | press bound to decision id, user and a nonce; single use; expiry on an injected clock | code | `button-replay` |
-| T11 | One stray press does something dangerous | second confirmation, issued by the API (see Dangerous operations) | code | `second-confirm` |
+| T10 | Replayed or forged Telegram button | the relay submits a decision only with the hub's press id and a Telegram user mapped to an owner (`owners.telegram_user_id`); each `press_id` works once (unique in `task_decisions`); expiry on an injected clock | code | `button-replay`, `relay-press-once` |
+| T11 | One stray press does something dangerous | second press in the same channel, a `confirmations` row issued by the API (see Dangerous operations, D23) | code | `second-confirm` |
 | T12 | Secret leaks into PostgreSQL, events, logs, artifacts, `state.json` | redaction of every known secret value at the worker and the API; a canary secret test over every sink | code | `secret-canary`. Unknown secrets typed by an agent are not recognised |
 | T13 | Prompt injection through task text, repository files or tool results | no defence in the model. Limited by T5, T6, T7 and owner acceptance; "do not" lines in prompts are not counted | prompt only | none for the injection itself |
 | T14 | An agent changes policy, hooks, rules or its own profile | policy files live outside worktrees; collecting a result refuses a diff touching policy paths unless the owner confirms; two known Rig-written files are told apart | code | `policy-diff` |
@@ -70,12 +70,12 @@ There is no border between an agent and the Windows user who runs it (D4, D13).
 
 | Role | May | May not |
 |---|---|---|
-| owner | decide (accept, request changes, reject, pause, cancel, priority), edit requirements, budgets and allowlists, create and rotate tokens, install a release, confirm dangerous operations | nothing is blocked; dangerous ones need the second confirmation |
+| owner | decide (accept, request changes, reject, pause, resume, cancel, force-close, resolve a block, allow an agent, priority), edit requirements, budgets and allowlists, create and rotate tokens, install a release, confirm dangerous operations | nothing is blocked; dangerous ones need the second press |
 | worker (a machine) | poll its own queues, heartbeat, upload results and logs, read tasks assigned to it | decide, start workflows, send Updates, reach PostgreSQL, read other machines' data |
+| relay (the Telegram client) | read like a reader, acknowledge notices, submit a decision with a hub press id and a Telegram user mapped to an owner, each press id once | act for an unmapped user; reuse a press id; hold any other right |
 | reader | read tasks, history, status | read secrets or raw agent logs flagged sensitive; any change |
 | Control Worker (internal service identity) | start workflows, send Updates for recorded decisions, run server activities | accept anything by itself |
 | agent | nothing against the API | holds no token of any role |
-| hub client | forward owner presses into the API as the owner who pressed | act without the API checking the allowed user |
 
 Temporal roles follow this table (T2). Temporal admin and UI access are held by the owner only and are not reachable
 from the PC.
@@ -132,10 +132,12 @@ Windows user or a container, which is not planned for version one.
 
 ## Dangerous operations and second confirmation
 
-The API, not the client, requires it. After the first confirmation the API issues a nonce bound to the decision, the
-user and the operation; a second request carrying it, within a short window measured on an injected clock, is the
-second confirmation; the nonce works once. Telegram, the web panel and the command line all go through the same two
-calls, so no channel can skip the second step.
+The API, not the client, requires it (D23): two presses in the same channel. The first press records a `confirmations`
+row and the API issues a nonce bound to the actor, channel, operation, target and request hash; a second request
+carrying it, within `confirm.windowSeconds` measured on an injected clock, is the second press; the row works once.
+Telegram, the web panel and the command line all go through the same two calls, so no channel can skip the second step.
+A second press in another channel is not accepted (call: the cheapest form that the owner chose, and no channel needs
+the other to be reachable).
 
 | Operation | Why |
 |---|---|
@@ -147,21 +149,21 @@ calls, so no channel can skip the second step.
 | Change directory, repository or machine allowlists | scope |
 | Turn on automatic acceptance | removes the owner |
 | Restore a backup or run a migration | state loss |
-| Delete a worktree with unpublished changes | work loss |
+| Delete a worktree with unpublished changes (cleanup `force`) | work loss |
 | Allow network or push in a profile | reach |
+| REJECT, CANCEL and force-close of a task | closes a task for good (D7, D21, D23) |
 
-REJECT, CANCEL and PAUSE use one confirmation unless the owner chooses otherwise (see Open for the owner).
+REJECT, CANCEL, force-close and publication always take two presses (D23). PAUSE takes one: it only stops new work and
+RESUME undoes it (call).
 
-## Open for the owner
+## Open, decided in its phase
 
-1. Second confirmation: (a) same channel, two presses; (b) a different channel, for example a Telegram press then the
-   panel; (c) a typed code. Cost: (a) cheapest and weakest, (b) needs the panel reachable, (c) most friction. Recommended
-   (a) for routine, (b) for T-class operations that move credentials or releases.
-2. REJECT closes a task for good (D7): one confirmation or two.
-3. Whether the `reader` role may see raw agent logs, or only reports.
-4. Whether an agent may have network access in any profile in version one (affects T6 and T13).
+| Question | What it changes for the owner | Phase |
+|---|---|---|
+| Whether the `reader` role may see raw agent logs, or only reports | What a read-only view can leak | 2 (the API route) |
+| Whether an agent may have network access in any profile in version one (affects T6 and T13) | Reach and leak risk of every run | 4 (profiles) |
 
-## Contradictions
+## Honest limits
 
 - The specification (15.1) says agents must not have unrestricted access to the operating system; D4 and D13 accept
   that, on one Windows user, they do. The design says so plainly instead of claiming a wall.

@@ -8,23 +8,31 @@ section 12. Tables: [database.md](database.md).
 - JSON over HTTPS only. Times are RFC 3339 UTC. Ids are UUIDs. Unknown request fields are refused.
 - A task mutation is *recorded*, never *applied*: decision, event and outbox row commit in one PostgreSQL
   transaction; `delivery_state` shows the delivery to Temporal.
-- Roles: `owner`, `worker`, `reader`; an agent process has no token. A Temporal outage never fails a mutation; a
-  PostgreSQL outage does (`503`, nothing recorded).
+- Roles: `owner`, `worker`, `relay`, `reader`; an agent process has no token. A Temporal outage never fails a mutation;
+  a PostgreSQL outage does (`503`, nothing recorded). "Call" marks a design choice made here, open to veto.
+- The relay is the Telegram client. It reads like a reader, acknowledges notices and submits a decision only with the
+  hub's `press_id` and the Telegram user id, which `owners.telegram_user_id` must map to an owner; each `press_id` is
+  accepted once. The decision's actor is that owner and its `channel` is `telegram`.
 
 ## Answers of a mutation
 
 - `recorded` (202): committed; delivery pending. The body is the decision with `delivery_state` and a `Location` to
   `/decisions/{id}`.
 - `applied` and `refused`: seen only by reading the decision; `refused` carries `refusal_reason` and notifies the owner.
+  The reasons are `not_allowed_in_state`, `revision_stale`, `actor_not_allowed`, `already_resolved`,
+  `block_kind_mismatch` and `task_closed`; they are refusals recorded by the workflow, never HTTP errors.
 - Creates without a workflow decision (projects, agents, tokens, dependencies) answer 201 with the row; a task answers
   201 with `workflow_start: recorded|delivering|applied`.
-- The API refuses at once, recording nothing, only what PostgreSQL facts decide: validation, authentication, rights,
-  a missing row, a stale `revision_number`, a final-state task, a version conflict, a cycle. The rest is the workflow's
-  call (Open for the owner, 1).
+- The API refuses at once, recording nothing, only what is a matter of form or of the request itself: validation,
+  authentication, rights, a missing row, a duplicate `press_id`, a version conflict (`If-Match`), a cycle, a missing
+  second press. A stale `revision_number`, a state that does not allow the operation, and a task already closed are not
+  checked here: the decision is recorded (a refused one too) and the workflow refuses it with a reason (call: the
+  journal then shows every press, and the API never decides from a state the workflow owns).
 
 ## Endpoints
 
-Roles: O owner, W worker, R reader. Mutations need `Idempotency-Key`. Lists take `limit`, `cursor` and the filters named.
+Roles: O owner, W worker, L relay, R reader (L reads wherever R does, acknowledges notices, and submits decisions as
+described above). Mutations need `Idempotency-Key`; a relay decision also carries `press_id` and `telegram_user_id`. Lists take `limit`, `cursor` and the filters named.
 
 ### Projects and policy
 
@@ -35,7 +43,7 @@ Roles: O owner, W worker, R reader. Mutations need `Idempotency-Key`. Lists take
 | `GET /projects/{id}`, `PATCH` | O R / O | Project with its policy version; patch takes changed fields and `If-Match`. |
 | `POST /projects/{id}/archive` | O | 200; `409 project_active` while a task is active. |
 | `GET /projects/{id}/policy` | O R | Latest `execution_policies` version. |
-| `PUT /projects/{id}/policy` | O | Full policy; creates a new version. Loosening security columns needs the header `X-Confirm: policy-change`, else `409 confirmation_required`. |
+| `PUT /projects/{id}/policy` | O | Full policy; creates a new version. Loosening security columns needs a second press (see Second press), else `409 confirmation_required`. |
 | `GET/POST /projects/{id}/routing-rules`, `DELETE .../{rule}` | O R / O | Rule `match`, `preferred_agent_ids`, `position`. |
 
 ### Tasks
@@ -54,21 +62,47 @@ Roles: O owner, W worker, R reader. Mutations need `Idempotency-Key`. Lists take
 | `GET /tasks/{id}/artifacts` | O R W | Artifact rows (the worker only for its own runs); filters `type`, `run_id`. |
 | `GET /tasks/{id}/reviews`, `/decisions` | O R | Verdicts and findings; decisions with `delivery_state`. |
 
-### Decisions (all 202 recorded, owner only)
+### Decisions (all 202 recorded; owner, or relay with a press id)
 
-Every body carries `revision_number` (the revision the owner saw) except pause and resume.
+Every body carries `revision_number` (the revision the owner saw) where the `task_decisions.kind` rule in
+[database.md](database.md) requires it (`approve`, `reject`, `request-changes`, `resolve-block`; `revisions` names the
+revision it builds on). The 12 kinds are exactly the rows below.
 
 | Path (`POST /tasks/{id}/...`) | Extra body | Notes |
 |---|---|---|
-| `approve` | `comment` | ACCEPT. Refused later if the task is not in AWAITING_APPROVAL. |
-| `reject` | `reason` | REJECT closes the task (D7). |
-| `request-changes` | `findings`, `comment` | REQUEST_CHANGES returns the task for rework. |
-| `cancel` | `reason` | CANCEL, at once (D8). |
-| `pause`, `resume` | `reason` | PAUSE lets the run finish (D8). |
-| `feedback` | `text` | add_feedback; no state change. |
-| `priority` | `priority` | change_priority; affects work not yet started. |
+| `approve` | `comment` | `approve`. Refused (`not_allowed_in_state`) if the task is not in AWAITING_APPROVAL. |
+| `reject` | `reason` | `reject` closes the task (D7). Second press (D23). |
+| `request-changes` | `findings`, `comment` | `request_changes` returns the task for rework. |
+| `cancel` | `reason` | `cancel`, at once (D8). Second press (D23). |
+| `pause`, `resume` | `reason` | `pause` lets the run finish (D8). While paused only `resume`, `cancel`, `feedback` and `revisions` are allowed (D22). |
+| `feedback` | `text` | `add_feedback`; no state change. |
+| `priority` | `priority` | `change_priority`; affects work not yet started. |
+| `revisions` | see Tasks | `revise_requirements`. |
+| `resolve-block` | `block_kind`, `answer` or `resume_to` | `resolve_block`; refused `block_kind_mismatch` if the task is blocked for another reason than `block_kind`. |
+| `force-close` | `reason` | `force_close`: closes a task whose machine is gone (D21). Second press (D23). |
+| `allow-agent` | `agent_id` | `allow_agent`: adds an agent to the task's `allowedAgents` while it is ASSIGNED with no eligible agent. |
 
-`GET /decisions/{id}` (O R) reads a decision with `delivery_state` and `refusal_reason`. Decisions are never changed or deleted.
+Publication of a branch or pull request is also a dangerous operation (D23): it uses the same second press through
+`POST /tasks/{id}/publish`, which records a `confirmations` row and then the decision.
+
+`GET /decisions/{id}` (O R) reads a decision with `delivery_state` and `refusal_reason`. Decisions are never changed or
+deleted. A refused decision stays as history.
+
+#### Second press (D23)
+
+A dangerous operation (`cancel`, `reject`, `force-close`, publication, loosening a policy, forcing a cleanup) takes two
+presses in the same channel and by the same actor. The first request records a `confirmations` row (actor, channel,
+operation, target, request hash) and answers `409 confirmation_required` with `confirmation_id`, a one-time `nonce`
+and `expires_at` (`confirm.windowSeconds`). The second request repeats the same body with the header
+`X-Confirm: <confirmation_id>.<nonce>`; it is accepted once, only for the same actor, channel, operation, target and
+body hash, and its decision carries the `confirmation_id`. The Telegram client turns this into a second button press
+and sends both presses with their press ids (call: the confirmation is the server's, so no channel can skip it).
+
+### Cleanup (D24)
+
+| Method and path | Role | Body and answer |
+|---|---|---|
+| `POST /tasks/{id}/cleanup` | O | `dry_run` (default true) lists the logs, artifacts, execution folders and worktree it would remove and their size. With `dry_run=false` it records a `task_events` row and a `cleanup` outbox row (202). Refused: a task not final (`409 task_active`), an artifact of a task awaiting approval, a worktree with unpublished changes unless `force=true` with a second press. |
 
 ### Agents, workers, tokens, notifications
 
@@ -128,12 +162,15 @@ Every error is `application/problem+json` with `type`, `title`, `status`, `code`
 |---|---|---|
 | `unauthenticated`, `forbidden` | 401, 403 | No, expired or revoked token; the role or bound machine does not allow it. |
 | `not_found` | 404 | No row, or a soft-deleted one. |
-| `revision_stale`, `confirmation_required` | 409 | Older `revision_number`; a dangerous change without `X-Confirm`. |
+| `confirmation_required` | 409 | A dangerous operation without a valid second press; the body carries the new `confirmation_id`, `nonce` and `expires_at`. |
+| `press_replayed` | 409 | A relay `press_id` already used. |
 | `rate_limited`, `unavailable`, `internal` | 429, 503, 500 | `Retry-After`; PostgreSQL or volume down, nothing recorded; unexpected. |
 | `validation_failed` | 422 | Schema, enum, size or format. |
 | `version_conflict` | 409 | `If-Match` does not match `row_version`. |
 | `idempotency_conflict`, `idempotency_in_progress` | 409 | See Idempotency. |
-| `dependency_cycle`, `depth_exceeded`, `project_active`, `task_active`, `task_closed` | 409 | A fact of PostgreSQL forbids it. |
+| `dependency_cycle`, `depth_exceeded`, `project_active`, `task_active` | 409 | A fact of PostgreSQL forbids it. |
+
+`revision_stale` and `task_closed` are not HTTP errors: they are refusal reasons of a recorded decision (see Answers of a mutation).
 | `checksum_mismatch`, `payload_too_large` | 422, 413 | Upload checks. |
 | `contract_unsupported` | 426 | The worker's contract version is outside the supported range; the machine gets no work. |
 
@@ -183,18 +220,14 @@ from that table; a route outside the table cannot be mounted, and a table entry 
 any difference; another calls every route and checks the live response against its schema; the worker's client is
 generated from the same table. No library is named here; no part of the specification is written by hand.
 
-## Open for the owner
+## Two result paths
 
-1. **Synchronous refusal.** The API refuses `revision_stale` and `task_closed` at once from PostgreSQL facts (this
-   document), so nothing is recorded. Alternative: always record, and let the workflow refuse, so the journal shows every
-   attempt. The first is clearer for the owner; the second keeps a full trail of refused presses.
-2. **Panel login.** Options: the owner pastes an owner token once (a cookie then holds a session); a separate password
-   and a session table. The first adds no account system; the second is friendlier on a phone.
-3. **Rate limit numbers and the token overlap** are settings; the owner may want to set them at install time.
-4. **Hub's role.** See Contradictions 2 in [database.md](database.md): how the Telegram client authenticates as the owner.
+Large payloads (logs, artifacts) go through the API; structured results (checks, verdicts, run status) go through
+Temporal as activity results. Both name the same run id and checksum, and a test checks that they agree.
 
-## Contradictions
+## Open, decided in its phase
 
-1. The architecture sends results and logs "through the API" yet keeps the worker without database access and returns
-   checks and verdicts as activity results; this document follows both (uploads through the API, structured results
-   through Temporal), which leaves two paths that must agree on the run id and checksum.
+| Question | What it changes for the owner | Phase |
+|---|---|---|
+| Panel login: the owner pastes an owner token once and a cookie holds the session, or a separate password and a session table | Whether a phone login needs an account system | 6 |
+| Rate-limit numbers (`rate.*`) | When a client of the owner is answered `429` | 7 (defaults in phase 2) |

@@ -1,6 +1,6 @@
 # Agent Factory testing
 
-Design, nothing is built. [architecture.md](architecture.md) is binding (D-numbers are its decisions); threats and their
+Design, nothing is built. [architecture.md](architecture.md) is binding (D1 to D26 are its decisions; "call" marks a choice made in these documents, open to veto); threats and their
 check ids (`secret-canary`, `path-escape`, ...) are in [security.md](security.md). A check named here must be able to
 fail: each has a pass criterion and a fail criterion, and a new check is first shown failing on the old or broken code.
 
@@ -15,6 +15,9 @@ fail: each has a pass criterion and a fail criterion, and a new check is first s
   outside a test marked `live`; live tests run by hand with `FACTORY_LIVE=1`, and the run states its cost beforehand.
 - Cap parallelism, leave one core free, run heavy container suites one at a time.
 - Probes of a recurring failure stay as tests under a `probe` category; one-off probes are deleted.
+- Runner: Node's built-in test runner for Factory tests (call: fewest dependencies, D17 fixes the runtime).
+- CI: none (call). The suite, S1 to S6 where they apply, and the failure scenarios run by hand before a release; a
+  release records the command, versions and result. A hosted or self-hosted runner is not planned until a server exists.
 
 ## Levels and tools
 
@@ -29,6 +32,23 @@ fail: each has a pass criterion and a fail criterion, and a new check is first s
 | Live | real agent CLIs, marked, hand-run | adapter smoke only |
 
 Factory tests live in `factory/tests` with their own commands; the Rig suite never imports them.
+
+## State, decision and queue checks
+
+Table-driven where the rule is data; each can fail (a cell removed, a check dropped).
+
+| Id | Check | Pass | Fail |
+|---|---|---|---|
+| `ops-matrix` | Walks the 16 states by the 12 decision kinds of [temporal.md](temporal.md) (the operations matrix); for each pair sends the decision to a workflow in that state | every cell has the stated effect (applied, or refused with one of `not_allowed_in_state`, `revision_stale`, `actor_not_allowed`, `already_resolved`, `block_kind_mismatch`, `task_closed`); no cell is empty or leaves the workflow stuck | a cell without an effect, an unknown refusal reason, or a state change outside the transition table |
+| `state-exit` | For every state, the "every state has an exit" table: drive the task to the state, then take the stated exit | each state reaches a final state or its normal successor, CANCELLING and BLOCKED included (D21, D26) | a state with no exit |
+| `decision-recorded` | Send a decision that must be refused (stale revision, closed task, wrong actor, wrong block kind) through the API | one `task_decisions` row, `refused` with a reason and a notice; the API answers 202, never an error for state | no row, or an HTTP refusal for a state fact |
+| `decision-kinds` | The enum in [database.md](database.md), the API routes of [api.md](api.md) and the handler table of the workflow list the same 12 kinds (`allow_agent` included) | identical sets | any set differs |
+| `second-press` | Each dangerous operation (`cancel`, `reject`, `force-close`, publication) with one press, with a second press in another channel, with an expired or reused one | only the same-channel second press inside the window is accepted, once | any other form accepted |
+| `relay-press-once` | The relay submits the same `press_id` twice, and a press from an unmapped Telegram user | the first decision recorded; the second refused; the unmapped user refused | a second row for one press id, or an unmapped user accepted |
+| `gpu-order` | Several tasks request one machine's GPU slot with different priorities and request times, while one job runs | grants go by highest priority, then oldest request; one holder at a time; no preemption | a lower priority or a later request granted first, or two holders |
+| `cleanup-command` | Cleanup of a final task, a task not final, a task awaiting approval, a worktree with unpublished changes; and a day count passing on the injected clock | nothing is deleted by itself; the command removes only files and keeps rows; refusals as listed in [database.md](database.md) | anything removed without the command, or a row deleted |
+| `review-provider` | Review of a task whose implementer ran on one provider, with and without another provider eligible (D20) | another provider reviews; with none the task waits and a notice is sent | the same provider reviews |
+| `check-not-run` | A mandatory check that cannot run (D26) | agents get a repair attempt; then BLOCKED `check_environment`; never AWAITING_APPROVAL | a `not_run` check counted as passed or sent to the owner as complete |
 
 ## Failure scenarios (spec 20.3)
 
@@ -128,17 +148,14 @@ broken harness.
 - Unknown secrets typed by an agent: redaction cannot find them; the canary test covers known values only.
 - Permanent operation and off-host backup: no check before a server exists.
 
-## Open for the owner
+## Open, decided in its phase
 
-1. Runner for Factory tests: Node's built-in runner (call, fewest dependencies) or a third-party runner with more
-   tooling. No effect on what the owner sees; listed because D17 fixes only the runtime.
-2. CI: there is none today. Options: none, run by hand before each release (cheapest); a hosted runner for unit and
-   workflow tests only; a self-hosted runner for the container suites. Recommended: by hand until the server exists.
-3. How budget is measured when agents run on a subscription and not on keys (decided in its phase): without a price per
-   run, F12 can only test a counted unit (calls or tokens), not money.
-4. How often the live smoke runs and who pays for it.
+| Question | What it changes for the owner | Phase |
+|---|---|---|
+| How budget is measured when agents run on a subscription and not on keys: without a price per run, F12 can only test a counted unit (calls or tokens), not money | What "budget exceeded" means for a subscription agent | 5 |
+| How often the live smoke (paid) runs and who pays for it | Cost per release | 7 |
 
-## Contradictions
+## Notes on the specification
 
 - The specification (scenario E) sends an unclear agent state to verification; the architecture (D16 and the error
   table) sends it to BLOCKED. Tests follow the architecture.

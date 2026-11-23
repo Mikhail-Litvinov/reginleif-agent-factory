@@ -117,7 +117,7 @@ which drops unknown keys.
 
 ## Task states
 
-The spec's 13 states plus PAUSED, REJECTED and CANCELLING. Any non-final state may be cancelled: without a run it goes to
+The spec's 13 states under their own names plus PAUSED, REJECTED and CANCELLING, 16 in all. Any non-final state may be cancelled: without a run it goes to
 CANCELLED at once; with a run it goes to CANCELLING until the machine confirms that the run ended. An unreachable machine
 keeps the task in CANCELLING and raises a notice. The owner may force-close it: CANCELLED, marked "end of run not
 confirmed". On reconnect the worker stops such a run before anything else.
@@ -143,14 +143,16 @@ Final: ACCEPTED, REJECTED, CANCELLED, FAILED.
 - **BLOCKED** stores its kind, and the kind decides the exit: scope to PLANNING; dependency to READY; execution, usage limit
   or agent question to ASSIGNED; environment of a check to VERIFYING; rework limit to REWORK_REQUIRED with a raised limit.
   Before blocking, agents try to settle a technical cause (D18).
-- **ASSIGNED without a machine** waits with a notice. The owner may cancel (no run, so at once) or allow another agent.
+- **ASSIGNED without a machine** waits with a notice. The owner may cancel (no run, so at once) or allow another
+  agent (`allow_agent`).
 - **PAUSE.** In RUNNING and VERIFYING the request is recorded and takes effect when the run or the check ends, before the
   next move; in any other active state at once. RESUME continues with the move that was held back.
 - **Revision.** It never edits an old one. In RUNNING the run is stopped as in a cancel (shown as RUNNING, "stopping for new
   requirements"), the worktree stays, and once the machine confirms the end a new attempt starts with the new revision. In
   VERIFYING and AWAITING_APPROVAL the task goes to REWORK_REQUIRED with the new revision; in REWORK_REQUIRED it stays and
-  takes it. In BLOCKED and in states before ASSIGNED it goes to PLANNING, in ASSIGNED it stays and takes it. In PAUSED it is
-  stored and RESUME goes to PLANNING. A decision carries its revision number; one on an older revision is refused.
+  takes it. In BLOCKED and in states before ASSIGNED it goes to PLANNING, in ASSIGNED it stays and takes it. BLOCKED with a
+  run whose end is not confirmed only stores it, and the next `resolve_block` goes to PLANNING. In PAUSED it is stored and
+  RESUME goes to PLANNING (back to BLOCKED when it was paused there with such a run). A decision carries its revision number; one on an older revision is refused.
 - **Dependency.** One that ends without ACCEPTED puts the waiting task into BLOCKED. The owner removes the dependency,
   replaces it or cancels the task. Dependencies stay inside one project in the first version.
 - **add_feedback** adds a note and changes no state: the next attempt gets it. **change_priority** affects only work that
@@ -176,7 +178,7 @@ limit. The result therefore exists without the worker and without the `rig exec`
    |---|---|---|
    | exit in the folder | finished | collect |
    | run alive by identity (pid and creation time) | running | attach |
-   | started marker, no exit, run ended or lost by identity | surely died | new attempt (D16) |
+   | started marker, no exit, run ended, pruned or lost by identity | surely died | new attempt (D16) |
    | no marker and no run record | never started | start |
    | a record or the process table cannot be read | unclear | read-only inspection of processes, folder and Git; BLOCKED if it settles nothing |
 
@@ -185,7 +187,8 @@ limit. The result therefore exists without the worker and without the `rig exec`
 2. `MonitorExecution` is long, heartbeats, and receives cancellation through the heartbeat. After a worker restart the
    retry attaches to the same execution.
 3. `CollectResults` reads the worker's own execution folder. `rig exec` keeps only 50 runs for the whole machine, so its
-   log is used for liveness and diagnosis, not as the result.
+   log is used for liveness and diagnosis, not as the result. A started marker with no exit and a pruned record means the
+   run ended; the marker and the exit file are the proof, not the record.
 
 Because the runner holds the time limit, an agent without a server stops by itself. Without a connection the worker starts
 nothing new and decides nothing that needs the server. Results and logs go to the server through the API into a file
@@ -219,8 +222,9 @@ Attaching to a job with a live supervisor does not change it. The supervisor is 
 foreign process can look alive and `cancel` would kill it, so the launcher first gets the pid-and-creation-time identity
 that Rig uses elsewhere. Every start drops the session variables of a surrounding Codex app.
 
-GPU: one slot covers the job from start to end, so it is one activity (`RunGpuJob`), not a start and a monitor. After a
-worker restart the generator's own queue is checked before any next job. Use of the card outside Factory cannot be
+GPU: one slot covers the job from start to end, so it is one activity (`RunGpuJob`), not a start and a monitor. The
+order (priority, then first come, no preemption) is kept by the server in `gpu_leases`; a Temporal queue alone does not
+order by priority. After a worker restart the generator's own queue is checked before any next job. Use of the card outside Factory cannot be
 excluded; the job then waits or fails by its timeout.
 
 ## Workspaces
@@ -240,7 +244,7 @@ to Git's `info/exclude`, so they do not show as changes; collection leaves them 
 | Agent failed or surely died | new attempt within the attempt limit and budget | BLOCKED |
 | Agent failed, state unclear | none | BLOCKED |
 | Agent usage limit | wait for the reset time when it is known | BLOCKED |
-| Validation, permission, budget, bad input | none | BLOCKED or FAILED |
+| Validation, permission, budget, bad input | none | FAILED only when no attempt can make the input valid, otherwise BLOCKED |
 | External effect (push, pull request, publication) | only after checking the target by idempotency key | BLOCKED |
 
 Numbers (attempts, timeouts, budgets, depth) are settings with defaults set in the phase that measures them.
@@ -250,7 +254,7 @@ Numbers (attempts, timeouts, budgets, depth) are settings with defaults set in t
 - Temporal authorizes nobody by default: the frontend needs mTLS with required client certificates and a private network
   before it leaves the PC. PostgreSQL and the UI are never published.
 - API tokens are stored as hashes and carry a role: owner, worker, relay, reader. An agent process gets no token that can
-  decide. The Telegram client has the relay role: it may submit a decision only with the hub's press id and a Telegram user
+  decide. The Telegram client has the relay role: it may submit a decision (dangerous ones after the hub's second press) only with the hub's press id and a Telegram user
   that is mapped to an owner, and each press id works once.
 - The hub's local endpoints have no authentication today. The new generic mechanism needs a per-client key; a button press
   is checked against the hub's allowed users and works once; dangerous actions need a second press.

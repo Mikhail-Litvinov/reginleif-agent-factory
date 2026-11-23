@@ -1,7 +1,8 @@
 # Agent Factory: agent adapters, runner, checks, routing
 
 Binding: [architecture.md](architecture.md). Facts: [audit.md](audit.md). Workflow side: [temporal.md](temporal.md).
-Spec sections are quoted as "spec 6.1" and so on. Anything not backed by the audit is marked "to be checked".
+Spec sections are quoted as "spec 6.1" and so on. Anything not backed by the audit is marked "to be checked". "Call"
+marks a design choice made here, open to veto.
 
 ## AgentAdapter: operations by meaning (spec 6.1)
 
@@ -17,7 +18,7 @@ operation takes an `executionId` created on the server; the adapter keeps its fa
 | `attach` | Looks the run up and returns one of five outcomes of the architecture's recovery table: `collect`, `attach`, `died` (new attempt), `start`, `unclear` (BLOCKED, D16). |
 | `getStatus` | State (starting, running, exited, lost), usage so far, time of last output. Read only. |
 | `streamOutput` | Output chunks from a byte offset, so a restart or a retry resumes and never repeats. |
-| `cancel` | Idempotent. Stops the run by process identity (pid plus creation time), returns whether the end is confirmed; "not confirmed" keeps the task in CANCELLING. |
+| `cancel` | Idempotent. Stops the run by process identity (pid plus creation time), returns whether the end is confirmed; "not confirmed" keeps the task in CANCELLING until the machine confirms or the owner uses `force_close` (D21). |
 | `collectResult` | Reads the execution folder, validates the report schema (below), computes usage, returns a result or a schema finding. |
 | `cleanup` | Removes provider leftovers (temp, caches, supervisor job folder after upload). Never touches a worktree. |
 
@@ -29,7 +30,7 @@ What an adapter cannot do (fixed limits of the providers, from the audit):
 | Codex (supervisor, job folder `~/.claude/codex-jobs/`) | Report usage as a stable schema (events are unversioned); detect a usage limit before it hits (detection is reactive, status `limit`); `cancel` safely without pid-and-creation-time identity (this is added); the launcher's own restarts and orphan limit must be switched off, the factory owns attempts. Statuses mapped: done, question, blocked, malformed, cancelled, orphaned, limit. |
 | OpenAI API | Run tools in a worktree (only text and file outputs through our code); resume a lost request: an unanswered request is recorded as `unclear`, its retry counts against the budget. Streaming of partial output is an option of the call, not a given. |
 | ComfyUI (HTTP and WebSocket: queue, watch, cancel, fetch) | Edit code or files in a worktree; cancel a node that is already inside a long GPU kernel before it ends; give a model-specific quality verdict. |
-| LM Studio | The audit confirms the `lms` command line only. Chat endpoint, model loading and unloading by API, token usage, cancel of a request: to be checked. Until then the adapter is marked `experimental`, and routing never selects it unless the owner allows. |
+| LM Studio | The audit confirms the `lms` command line only. Chat endpoint, model loading and unloading by API, token usage, cancel of a request: to be checked. Until then the adapter is marked `experimental` and routing never selects it (call; it is lifted when the interface is checked, phase 5). |
 
 ## Environment checks
 
@@ -48,7 +49,9 @@ A failed check marks that capability unavailable on that machine; it never stops
 ## The runner (`factory/runner/`)
 
 Started by `rig exec`; it is the process that outlives the worker (scenarios A and B).
-1. Writes the started marker (execution id, pid, creation time, time of start) before anything else.
+1. Writes the started marker (execution id, pid, creation time, time of start) before anything else. The marker and the
+   exit file, not the run record of `rig exec` (which keeps only 50 runs), are what proves `died` against `unclear`
+   after a long outage.
 2. Starts the agent with the command in the intent file; the command is built by the adapter, never by the runner.
 3. Streams stdout and stderr into `output` (append-only, offset-addressable) and keeps a last-output time.
 4. Enforces the time limit (`run.maxSeconds` from the settings snapshot, spec 17): at the limit it stops the agent,
@@ -72,8 +75,9 @@ The agent's final report is one JSON document validated by `collectResult`:
 
 Automated checks (`RunAutomatedChecks`) run on the worker, by the workflow's decision, with commands from the project
 profile, not from the agent. For each: command, working directory, exit code, duration, log (kept as a file, large
-ones as a reference), status. A check that cannot run (tool missing, timeout) is `not_run` with the reason and is shown
-to the owner; it is never counted as passed. Graphics tasks: automatic checks cover format, size, count and naming only;
+ones as a reference), status. A mandatory check that cannot run (tool missing, timeout) is `not_run` with the reason;
+agents first repair its cause, and if it still cannot run the task is BLOCKED `check_environment` with the reason (D26).
+It is never counted as passed and never goes to the owner as complete. Graphics tasks: automatic checks cover format, size, count and naming only;
 visual quality and story conformance are never recorded as automatically confirmed, they need the reviewer or the owner.
 
 ## Usage metrics per adapter
@@ -98,10 +102,13 @@ event.
 1. Hard filters: the task's required capability is present and verified; the adapter is available on an online machine;
    the platform fits (OS, tools); permissions of the profile allow the agent, tools and network; project limits
    (concurrent tasks, per-agent tasks, budget left) are not exceeded; the account and model gates pass; for review, the
-   agent is different from the implementer (spec 9.1).
-2. Ranking among the eligible by: owner preference for the project, current load of the machine and queue, estimated
-   cost, and past outcomes. The order of these keys is open (below).
-No eligible agent: the task stays ASSIGNED with the list of failed filters shown to the owner.
+   agent is in the task's `allowedAgents` when the owner restricted it (`allow_agent`); for review, the provider differs
+   from the providers of the implementer runs (D20, spec 9.1).
+2. Ranking among the eligible by: owner preference for the project (`routing_rules`), then estimated cost, then current
+   load of the machine and queue; past outcomes break a tie (call: preference is the owner's word, cost is what the
+   owner pays, load only orders equals).
+No eligible agent: the task stays ASSIGNED with the list of failed filters shown to the owner and one notice. The owner
+answers with `allow_agent` or fixes the cause; a review with no other provider waits for one (D20).
 
 ## Worktrees
 
@@ -129,36 +136,23 @@ No eligible agent: the task stays ASSIGNED with the list of failed filters shown
   absent (resubmit within `attempt.max`).
 - A task waiting for the GPU is ASSIGNED or VERIFYING with the reason "waiting for the GPU" and the queue position.
   A job that exceeds `gpu.maxSeconds` is cancelled in the generator, then the activity returns `died`.
-- Ordering inside the queue is first-come (Temporal task order), with owner priority (spec 17) only if the owner chooses
-  (open below). Loading or unloading an LM Studio model while a ComfyUI job holds the slot is not allowed: the adapter
+- Ordering is by task priority, then first come (call). Temporal task order cannot do that, so the slot is a row in
+  `gpu_leases` (database.md): a task requests it, the grant goes to the open request with the highest priority and
+  oldest request time, and `RunGpuJob` starts only with a grant. A running job is never preempted. A loaded LM Studio
+  model counts as holding the slot: loading or unloading a model while a ComfyUI job holds it is not allowed, the adapter
   asks for the slot first.
 
-## Open for the owner
+## Retention of execution folders (D24)
 
-1. **Ranking order** among eligible agents. Options: preference first; cheapest first; least loaded first. Recommendation:
-   preference, then cost, then load.
-2. **Reviewer must be another provider**, or only another instance of the same provider. Options: other provider always
-   (if one exists, else owner decides); other instance allowed. Changes cost and independence of review.
-3. **Hook-made files at collection.** The two paths (`.tmp/`, `.claude/settings.local.json`) are excluded from the
-   agent's changes. Options: always exclude (as written); also list them in the report; revert them after the run.
-4. **Unclear and `not_run` checks.** Options: a task with a `not_run` check goes to the owner marked incomplete (as
-   written); or is blocked until the check runs.
-5. **GPU priority.** Options: first come, first served; owner priority. Whether a loaded LM Studio model counts against
-   the slot also changes what the owner can run in parallel.
-6. **Retention of execution folders** after upload: delete at once; keep for N days (`executions.keepDays`); keep until
-   cleanup. It decides what stays on the machine and its disk cost.
-7. **LM Studio**: allow it as an agent at all before its API is checked, or leave it out of routing until then.
+Nothing is deleted by itself. Execution folders stay on the machine after upload until the owner's cleanup command
+(api.md) removes them; the command lists what it would remove and its size first. There is no `executions.keepDays`.
 
-## Contradictions
+## Open, decided in its phase
 
-1. The architecture says Rig's `project-tmp` hook edits `.gitignore`. The hook (`base/hooks/project-tmp.sh`) appends to
-   Git's `info/exclude` and writes `.claude/settings.local.json`; it does not edit `.gitignore`. This document follows
-   the hook. The architecture text needs the correction.
-2. `rig exec` keeps only 50 runs, while the architecture treats the run record as proof of `died` versus `unclear` after
-   a long outage. Solved here by relying on the started marker and exit file in the execution folder; the architecture
-   does not say so.
-3. The architecture requires `cancel` to be confirmed; a run lost with its machine can never be confirmed (see the
-   CANCELLING exit in temporal.md).
-4. Spec 6.1 lists `getStatus` and `streamOutput` as adapter operations, while the architecture's execution model has
-   the worker read the execution folder through activities. Both are kept; `getStatus` is derived from the folder, not
-   from the provider.
+| Question | What it changes for the owner | Phase |
+|---|---|---|
+| Budgets of subscription agents (what counts as "budget left" when the provider shows no number) | When routing skips an agent and when the owner is told to wait | 5 |
+| Network access of a profile (which hosts a profile may reach; default off) | What an agent can fetch and leak | 4 |
+
+Spec 6.1 lists `getStatus` and `streamOutput` as adapter operations, while the architecture has the worker read the
+execution folder through activities. Both are kept; `getStatus` is derived from the folder, not from the provider.
