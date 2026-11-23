@@ -1,6 +1,6 @@
 ---
 name: codex
-description: Hands a task to Codex (OpenAI) and relays its progress and short final report. Use for executive work so it does not spend the Claude limit - code search and reading big files, implementing a settled plan, refactoring, writing and running tests, builds, log analysis, routine edits. Not for design decisions. Always launch it in the background. The prompt starts with header lines (model, effort, mode, approved, cwd) and then `task:` with the full brief; or `attach: <job>` / `reply: <job>` to reconnect to or continue a Codex job.
+description: 'Hands a task to Codex (OpenAI) and relays its progress and short final report. Use for executive work so it does not spend the Claude limit - code search and reading big files, implementing a settled plan, refactoring, writing and running tests, builds, log analysis, routine edits. Not for design decisions. Always launch it in the background. The prompt starts with header lines (model, effort, mode, approved, cwd) and then `task:` with the full brief; or `attach: <job>` / `reply: <job>` to reconnect to or continue a Codex job.'
 model: haiku
 omitClaudeMd: true
 tools: Bash, Write

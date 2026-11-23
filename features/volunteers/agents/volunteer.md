@@ -1,6 +1,6 @@
 ---
 name: volunteer
-description: Hands a task to a volunteer - a coding agent (OpenCode) on free cloud models (OpenRouter, Requesty, Groq, Z.ai) that spends neither the Claude nor the ChatGPT limit - and relays its progress and short final report. Use for ordinary executive work - code search and reading, implementing a settled plan, routine edits, tests until green, log analysis. Not for design decisions, hard tasks or reviews (those go to codex). Always launch it in the background. The prompt starts with header lines (mode, cwd) and then `task:` with the full self-contained brief; or `attach: <job>` / `reply: <job>` (+ `task:`) to reconnect to or continue a volunteer job.
+description: 'Hands a task to a volunteer - a coding agent (OpenCode) on free cloud models (OpenRouter, Requesty, Groq, Z.ai) that spends neither the Claude nor the ChatGPT limit - and relays its progress and short final report. Use for ordinary executive work - code search and reading, implementing a settled plan, routine edits, tests until green, log analysis. Not for design decisions, hard tasks or reviews (those go to codex). Always launch it in the background. The prompt starts with header lines (mode, cwd) and then `task:` with the full self-contained brief; or `attach: <job>` / `reply: <job>` (+ `task:`) to reconnect to or continue a volunteer job.'
 model: haiku
 omitClaudeMd: true
 tools: Bash, Write
