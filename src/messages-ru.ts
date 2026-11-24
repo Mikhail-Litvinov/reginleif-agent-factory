@@ -79,6 +79,7 @@ export const ru: Messages = {
 		launchCswapPath: (): string => "Путь к cswap нельзя записать в командную строку запуска",
 		launchAccountLookup: (reason: string): string => `Не удалось определить аккаунт сессии: ${reason}`,
 		launchUnavailable: (): string => "Терминал недоступен: проверены x-terminal-emulator с DISPLAY или WAYLAND_DISPLAY и tmux",
+		terminalNodeMissing: (): string => "Для удалённого терминала нужен Node.js в PATH. Установи Node.js перед запуском сессии.",
 		transcriptPath: (): string => "Некорректный путь к транскрипту",
 		transcriptMissing: (): string => "Транскрипт не существует",
 		transcriptRecord: (): string => "Некорректная запись транскрипта",

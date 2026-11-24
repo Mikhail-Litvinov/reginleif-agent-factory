@@ -37,7 +37,7 @@ const WINDOWS_EXECUTABLE_SUFFIXES = [".exe", ".com", ".cmd", ".bat"] as const;
 const MODES = ["manual", "auto", "acceptEdits", "plan", "dontAsk"] as const;
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-type LaunchResult = { session: string; pid: number; mode: string | null; account: number | null };
+type LaunchResult = { session: string; pid: number; mode: string | null; account: number | null; terminal?: true };
 type SpawnLaunch = (command: string[]) => Promise<ApiResult<number>>;
 const object = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 const validMode = (value: string): boolean => MODES.some((mode) => mode === value);
@@ -93,7 +93,14 @@ export const prepareLaunch = async (runtime: RuntimePorts, session: SessionRecor
 	const display = Boolean(runtime.environment.get("DISPLAY") || runtime.environment.get("WAYLAND_DISPLAY"));
 	const terminal = runtime.platform === "linux" && display ? await launcherPath(runtime, "x-terminal-emulator") : null;
 	const tmux = runtime.platform === "linux" && terminal === null ? await launcherPath(runtime, "tmux") : null;
-	const command = buildLaunchCommand({ platform: runtime.platform, cwd: cwd.value, session: session.id, account, mode, plugins, cswap, terminal, tmux });
+	const relayScript = runtime.resolvePath(state.value.paths.hub, "terminal", "main.mjs");
+	const relayInstalled = state.value.features.telegram === true && await runtime.fs.stat(relayScript) !== null
+		&& await runtime.fs.stat(runtime.resolvePath(state.value.paths.hub, "terminal", "node_modules", "node-pty", "package.json")) !== null;
+	const node = relayInstalled ? await launcherPath(runtime, "node", runtime.platform === "windows" ? [".exe"] : [""]) : null;
+	if (relayInstalled && node === null) return apiFail(LAUNCH_UNAVAILABLE, m.terminalNodeMissing());
+	const relay = node === null ? undefined : { node, script: relayScript, home: runtime.home, transcript: session.transcriptPath,
+		claude: await launcherPath(runtime, "claude", runtime.platform === "windows" ? WINDOWS_EXECUTABLE_SUFFIXES : [""]) ?? "claude" };
+	const command = buildLaunchCommand({ platform: runtime.platform, cwd: relay ? session.cwd : cwd.value, session: session.id, account, mode, plugins, cswap: relay ? cswapFound : cswap, terminal, tmux, relay });
 	return command === null ? apiFail(LAUNCH_UNAVAILABLE, m.launchUnavailable()) : apiOk(command);
 };
 
@@ -176,10 +183,24 @@ export const runSession = async (runtime: RuntimePorts, session: SessionRecord, 
 	const launch = await resolveLaunch(runtime, session, mode, accountOverride);
 	if (!launch.ok) return launch;
 	const accountText = launch.value.account;
+	const remoteTerminal = launch.value.command[1]?.replaceAll("\\", "/").endsWith("/terminal/main.mjs") === true;
+	const relayRecord = joinPath(runtime.home, ".agent-rig", "terminals", `${session.id}.json`);
+	const relayGeneration = async (): Promise<{ generation: string; childPid: number } | null> => {
+		try {
+			const value: unknown = JSON.parse(await runtime.fs.readText(relayRecord));
+			return object(value) && value.session === session.id && typeof value.generation === "string" && typeof value.childPid === "number" && Number.isSafeInteger(value.childPid) && value.childPid > 0
+				? { generation: value.generation, childPid: value.childPid } : null;
+		} catch { return null; }
+	};
+	const previousGeneration = remoteTerminal ? (await relayGeneration())?.generation : undefined;
 	const spawned = await spawnCommand(launch.value.command);
 	if (!spawned.ok) return spawned;
 	const deadline = spawned.value;
 	for (;;) {
+		if (remoteTerminal) {
+			const current = await relayGeneration();
+			if (current && current.generation !== previousGeneration) return apiOk({ session: session.id, pid: current.childPid, mode, account: accountText === "" ? null : Number(accountText), terminal: true });
+		}
 		const current = await lookupSession(runtime, session.id);
 		if (!current.ok) return current;
 		// The launched process is one the record did not name before the launch.
@@ -213,13 +234,13 @@ export const runCommand = async (runtime: RuntimePorts, args: readonly string[])
 	return runSession(runtime, session.value, mode ?? await transcriptMode(runtime, session.value.transcriptPath), account);
 };
 
-export const modeCommand = async (runtime: RuntimePorts, args: readonly string[], progress: (event: ProgressEvent) => void): Promise<ApiResult<{ session: string; mode: string; changed: false } | { session: string; mode: string; pid: number }>> => {
+export const modeCommand = async (runtime: RuntimePorts, args: readonly string[], progress: (event: ProgressEvent) => void): Promise<ApiResult<{ session: string; mode: string; changed: false } | { session: string; mode: string; pid: number; terminal?: true }>> => {
 	if (args.length !== 2) return apiFail(ERROR_CODE_USAGE, messagesFor(runtime.language).session.usageMode());
 	const [id, mode] = args;
 	if (!validMode(mode)) return invalid(messagesFor(runtime.language).session.launchMode());
 	const session = await lookupSessionForCommand(runtime, id, false);
 	if (!session.ok) return session;
-	return withSessionEnding<{ session: string; mode: string; changed: false } | { session: string; mode: string; pid: number }>(runtime, id, async (ending) => {
+	return withSessionEnding<{ session: string; mode: string; changed: false } | { session: string; mode: string; pid: number; terminal?: true }>(runtime, id, async (ending) => {
 		if (await transcriptMode(runtime, session.value.transcriptPath) === mode) return apiOk({ session: id, mode, changed: false });
 		const launch = await resolveLaunch(runtime, session.value, mode, null);
 		if (!launch.ok) return launch;
@@ -235,6 +256,6 @@ export const modeCommand = async (runtime: RuntimePorts, args: readonly string[]
 			if (!ended.ok) return ended;
 			return apiFail(SESSION_ENDING, messagesFor(runtime.language).session.ending());
 		}
-		return result.ok ? apiOk({ session: id, mode, pid: result.value.pid }) : result;
+		return result.ok ? apiOk({ session: id, mode, pid: result.value.pid, ...(result.value.terminal ? { terminal: true as const } : {}) }) : result;
 	}, undefined, (result, takenOver) => takenOver ? apiFail(SESSION_ENDING, messagesFor(runtime.language).session.ending()) : result);
 };

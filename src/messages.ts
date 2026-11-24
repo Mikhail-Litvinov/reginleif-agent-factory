@@ -94,6 +94,7 @@ export const en = {
 		launchCswapPath: (): string => "The cswap path cannot be put on the launch command line",
 		launchAccountLookup: (reason: string): string => `The session account could not be determined: ${reason}`,
 		launchUnavailable: (): string => "No terminal available: checked x-terminal-emulator with DISPLAY or WAYLAND_DISPLAY, and tmux",
+		terminalNodeMissing: (): string => "Terminal relay needs Node.js on PATH; install Node.js before starting a remote session.",
 		transcriptPath: (): string => "Invalid transcript path",
 		transcriptMissing: (): string => "Transcript does not exist",
 		transcriptRecord: (): string => "Invalid transcript record",

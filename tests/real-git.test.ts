@@ -24,6 +24,9 @@ describe("real git adapter", () => {
 		runGit(repositoryPath, ["init", "--initial-branch=main"]);
 		runGit(repositoryPath, ["config", "user.name", "Rig Test"]);
 		runGit(repositoryPath, ["config", "user.email", "rig-test@example.invalid"]);
+		// These assertions inspect exact LF bytes, independently of the owner's
+		// global Windows checkout conversion policy.
+		runGit(repositoryPath, ["config", "core.autocrlf", "false"]);
 		await fs.writeFile(join(repositoryPath, TRACKED_FILE), "before\n", "utf8");
 		await fs.writeFile(join(repositoryPath, UNRELATED_FILE), "original\n", "utf8");
 		runGit(repositoryPath, ["add", TRACKED_FILE, UNRELATED_FILE]);

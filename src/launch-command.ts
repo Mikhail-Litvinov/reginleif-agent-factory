@@ -2,13 +2,18 @@ import type { Platform } from "./feature.js";
 
 // cswap, terminal and tmux are the launcher commands as they were checked: a full path where a lookup found the file,
 // null when that launcher is not used. The launch starts exactly these strings.
-type LaunchFacts = { platform: Platform; cwd: string; session: string; account: string; mode: string | null; plugins: string[]; cswap: string | null; terminal: string | null; tmux: string | null };
+export type RelayLaunch = { node: string; script: string; home: string; transcript: string | null; claude: string };
+type LaunchFacts = { platform: Platform; cwd: string; session: string; account: string; mode: string | null; plugins: string[]; cswap: string | null; terminal: string | null; tmux: string | null; relay?: RelayLaunch };
 
 const quote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
 
 export const buildLaunchCommand = (facts: LaunchFacts): string[] | null => {
-	const args = [...facts.plugins.flatMap((plugin) => ["--channels", `plugin:${plugin}`]), "--resume", facts.session, ...(facts.mode === null ? [] : ["--permission-mode", facts.mode])];
-	const claude = facts.cswap === null ? ["claude", ...args] : [facts.cswap, "run", ...(facts.account === "" ? [] : [facts.account]), "--share-history", "--", ...args];
+	const args = [...facts.plugins.flatMap((plugin) => [facts.relay ? "--dangerously-load-development-channels" : "--channels", `plugin:${plugin}`]), "--resume", facts.session, ...(facts.mode === null ? [] : ["--permission-mode", facts.mode])];
+	const claude = facts.cswap === null ? [facts.relay?.claude ?? "claude", ...args] : [facts.cswap, "run", ...(facts.account === "" ? [] : [facts.account]), "--share-history", "--", ...args];
+	if (facts.relay) {
+		const payload = { session: facts.session, cwd: facts.cwd, home: facts.relay.home, transcript: facts.relay.transcript, command: claude[0], args: claude.slice(1) };
+		return [facts.relay.node, facts.relay.script, Buffer.from(JSON.stringify(payload)).toString("base64url")];
+	}
 	// Windows: the cswap path may hold spaces, so it is quoted on the line. Probed with the real wt.exe and a cswap.cmd in
 	// a directory with a space: the quoted path alone works (the product's argument quoting turns the line into one
 	// quoted argument whose inner quotes keep the outer cmd.exe inside quotes at the `&`); wrapping the line in one more
