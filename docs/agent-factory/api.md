@@ -111,7 +111,7 @@ and sends both presses with their press ids (call: the confirmation is the serve
 | `GET /agents`, `GET /agents/{id}` | O R | Filters `provider`, `enabled`. Capabilities, limits, usage. |
 | `POST /agents`, `PATCH /agents/{id}`, `DELETE /agents/{id}` | O | Agent fields (no secret values; credential references only); `If-Match`; delete is soft. |
 | `GET /workers`, `GET /workers/{id}` | O R | Filters `status`, `platform`. `outdated` shows the contract version. |
-| `PATCH /workers/{id}` | O | `status: disabled|online`, `concurrency_limit`. |
+| `PATCH /workers/{id}` | O | `status: disabled\|online`, `concurrency_limit`. |
 | `POST /workers/register` | W | `machine_id`, `name`, `platform`, `capabilities`, `version`, `contract_version`. 200 with the worker id and the supported contract range. Repeating it is safe. |
 | `POST /workers/{id}/heartbeat` | W | `capabilities` (changed only), run ids alive. 200 with server time and token expiry. Own id only. |
 | `GET /tokens` | O | Prefix, role, bound worker, times; never the secret. |
@@ -139,6 +139,7 @@ Checks, verdicts and run status reach PostgreSQL as activity results over Tempor
 |---|---|---|
 | `GET /system/health` | none | `{status}` only: the process is up. Never details. |
 | `GET /system/ready` | O R | PostgreSQL, Temporal, outbox lag, oldest pending outbox row, artifact volume. |
+| `GET /system/metrics` | O R | The metrics of spec 16 as text exposition: tasks per status, run duration, retries, agent errors, worker availability, delay from queueing to start, wait for acceptance, tokens and cost, PostgreSQL and Temporal state. Counts come from the projection, never from the workflow. Phase 7. |
 | `GET /system/audit` | O | The audit log; filters `actor_id`, `action`, `target_id`, `after_seq`. |
 | `GET /openapi.json` | none | The specification generated from the code (below). |
 
@@ -169,10 +170,10 @@ Every error is `application/problem+json` with `type`, `title`, `status`, `code`
 | `version_conflict` | 409 | `If-Match` does not match `row_version`. |
 | `idempotency_conflict`, `idempotency_in_progress` | 409 | See Idempotency. |
 | `dependency_cycle`, `depth_exceeded`, `project_active`, `task_active` | 409 | A fact of PostgreSQL forbids it. |
-
-`revision_stale` and `task_closed` are not HTTP errors: they are refusal reasons of a recorded decision (see Answers of a mutation).
 | `checksum_mismatch`, `payload_too_large` | 422, 413 | Upload checks. |
 | `contract_unsupported` | 426 | The worker's contract version is outside the supported range; the machine gets no work. |
+
+`revision_stale` and `task_closed` are not HTTP errors: they are refusal reasons of a recorded decision (see Answers of a mutation).
 
 ## Pagination, filtering, request id, rate limit, audit
 

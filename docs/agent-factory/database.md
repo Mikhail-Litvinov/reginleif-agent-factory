@@ -1,8 +1,10 @@
 # Agent Factory database
 
-The application database of Agent Factory. Binding sources: [architecture.md](architecture.md) (decisions D1-D26, the
+The application database of Agent Factory. Binding sources: [architecture.md](architecture.md) (decisions D1-D27, the
 task states, state ownership) and the task specification section 4. Status: design. Types are PostgreSQL 16. The
-Temporal database is separate and not described here. "Call" marks a design choice made here, open to veto.
+Temporal database is separate and not described here. "Call" marks a design choice made here, open to veto. The schema
+is written in Drizzle (D27): the table definitions live in `factory/db/schema/` and are the source of the migrations
+(see Migrations and backup); this document is the design the definitions follow.
 
 ## Conventions
 
@@ -24,7 +26,7 @@ Temporal database is separate and not described here. "Call" marks a design choi
 | Table | Columns (type; key, constraint) |
 |---|---|
 | `projects` | `id`; `name text` unique among live rows; `description`; `repository_url`; `default_branch`; `workspace_policy` enum (`worktree`); `settings jsonb`; `priority int` (project priority, spec 17); `created_at`; `updated_at`; `archived_at`; `deleted_at`; `row_version` |
-| `tasks` | `id`; `project_id` FK; `parent_task_id` FK nullable; `title`; `description`; `priority int`; `status` enum (the 16 states of the architecture: CREATED, PLANNING, READY, WAITING_DEPENDENCIES, ASSIGNED, RUNNING, VERIFYING, AWAITING_APPROVAL, REWORK_REQUIRED, BLOCKED, ACCEPTED, REJECTED, CANCELLED, FAILED, PAUSED, CANCELLING); `current_revision int` (the applied revision, see Revisions); `created_by` (owner id); `assigned_agent_id` FK nullable (the current assignee; the history is in `task_runs`); `workflow_id text` unique, `check (workflow_id = 'task-' \|\| id)`; `workflow_run_id` nullable; `block_kind` enum nullable (`scope`, `dependency`, `execution`, `usage_limit`, `agent_question`, `check_environment`, `rework_limit`); `block_reason text`; `resume_to` enum nullable (the state RESUME goes to); `pause_requested bool`; `stopping bool` (a run is being stopped for new requirements, shown as RUNNING); `end_unconfirmed bool` (set by a force-close: CANCELLED without the machine's confirmation); `origin_type`, `origin_task_id`, `origin_run_id`, `depth` (see Child tasks); `created_at`; `updated_at`; `completed_at` (set once, on a final state); `deleted_at`; `row_version`. Checks: `(status = 'BLOCKED') = (block_kind is not null)`, `(status = 'PAUSED') = (resume_to is not null)`. |
+| `tasks` | `id`; `project_id` FK; `parent_task_id` FK nullable; `title`; `description`; `priority int`; `status` enum (the 16 states of the architecture: CREATED, PLANNING, READY, WAITING_DEPENDENCIES, ASSIGNED, RUNNING, VERIFYING, AWAITING_APPROVAL, REWORK_REQUIRED, BLOCKED, ACCEPTED, REJECTED, CANCELLED, FAILED, PAUSED, CANCELLING); `current_revision int` (the applied revision, see Revisions); `created_by` (owner id); `assigned_agent_id` FK nullable (the current assignee; the history is in `task_runs`); `workflow_id text` unique, `check (workflow_id = 'task-' \|\| id)`; `workflow_run_id` nullable; `block_kind` enum nullable (`scope`, `dependency`, `execution`, `usage_limit`, `agent_question`, `check_environment`, `rework_limit`); `block_reason text`; `resume_to` enum nullable (the state RESUME goes to); `pause_requested bool`; `stopping bool` (a run is being stopped for new requirements, shown as RUNNING); `end_unconfirmed bool` (set by a force-close: CANCELLED without the machine's confirmation); `origin_type`, `origin_task_id`, `origin_run_id` (a foreign key to `task_runs`, added by an `alter table` in the migration that creates `task_runs`, see Creation order), `depth` (see Child tasks); `created_at`; `updated_at`; `completed_at` (set once, on a final state); `deleted_at`; `row_version`. Checks: `(status = 'BLOCKED') = (block_kind is not null)`, `(status = 'PAUSED') = (resume_to is not null)`. |
 | `task_revisions` | `id`; `task_id` FK; `revision_number int`, unique with `task_id`, contiguous from 1; `requirements text`; `acceptance_criteria jsonb` (a list of items, each with a stable `id` that proposals cite); `constraints jsonb`; `change_reason text not null`; `author_id` (owner); `decision_id` FK nullable (the decision that asked for it); `created_at`. Immutable. |
 | `task_dependencies` | `task_id` FK; `depends_on_task_id` FK; `dependency_type` enum (`requires_accepted`); primary key `(task_id, depends_on_task_id)`; `check (task_id <> depends_on_task_id)`; both tasks in one project (a trigger refuses otherwise, architecture: dependencies stay inside one project); `created_at`; `removed_at` (removal is a mark, the row stays for history); `removed_by` |
 | `task_runs` | `id`; `task_id` FK; `attempt_number int`, unique with `task_id` (counts all roles, never reused); `role` enum (`planner`, `implementer`, `tester`, `reviewer`); `agent_id` FK; `worker_id` FK nullable; `temporal_activity_id`; `execution_id uuid` unique (created on the server before the activity is scheduled); `session_id` nullable; `workspace_id` FK nullable; `task_revision int` (the revision the run works on); `policy_id` FK (the policy version in force); `contract_version int`; `status` enum (`created`, `starting`, `running`, `finished`, `failed`, `died`, `unclear`, `cancelling`, `cancelled`); `gpu_wait_since timestamptz` nullable (set while the run waits for the GPU slot); `started_at`; `heartbeat_at`; `finished_at`; `exit_code`; `error_code`; `error_message`; `result_summary`; `usage_metrics jsonb`; `created_at`; `row_version` |
@@ -36,7 +38,7 @@ Temporal database is separate and not described here. "Call" marks a design choi
 | `review_finding_outcomes` | One row per step of a finding: `id`; `review_id` FK; `finding_key`; `outcome` enum (`accepted`, `disputed`, `confirmed`, `dismissed`, `owner`); `run_id` FK (the implementer's or the settling reviewer's run); `reason`; `created_at`. Immutable. A finding is confirmed when its last outcome is `accepted` or `confirmed` (D25); `owner` marks a dispute about requirements, scope or cost. |
 | `task_approvals` | `id`; `task_id` FK; `revision_number int`; `approval_type` enum (`manual`, `policy_auto`); `decision` enum (`accept`, `reject`, `request_changes`); `decision_id` FK nullable; `policy_id` FK nullable; `actor_id`; `created_at`. Immutable. Written by the workflow when it applies such a decision (the press itself, refused ones too, is in `task_decisions`). `check ((approval_type = 'manual') = (decision_id is not null))`; a `policy_auto` row names the policy the owner switched on. Unique `(task_id, decision_id)`. Call: it stays a table of its own as in spec 4.1. |
 | `execution_policies` | See Policies. |
-| `outbox_events` | See Outbox below. |
+| `outbox_events` | See the next table (it is one table, counted once). |
 
 ## What the architecture adds
 
@@ -50,7 +52,7 @@ Temporal database is separate and not described here. "Call" marks a design choi
 | `workspaces` | Spec 7; `task_runs.workspace_id` | `id`; `task_id`; `worker_id`; `repository`; `base_commit`; `branch`; `worktree_path`; `state` enum (`prepared`, `in_use`, `done`, `cleaned`, `kept`); `commits jsonb`; `pull_request_url`; `created_at`; `cleaned_at`. At most one `in_use` row per `worktree_path` (partial unique index): one writer per worktree. |
 | `run_checks` | Checks run by the worker, never claimed by an agent (architecture, report and checks) | `id`; `run_id` FK; `name`; `command`; `status` enum (`passed`, `failed`, `not_run`); `not_run_reason`; `exit_code`; `log_artifact_id` FK; `started_at`; `finished_at`. Immutable. A `not_run` row never counts as passed (D26). |
 | `task_proposals` | Child tasks and suggestions of agents (D19) | `id`; `task_id` FK (the parent); `run_id` FK; `kind` enum (`decomposition`, `requirement_change`, `suggestion`); `title`; `requirements`; `covers jsonb` (ids of the parent's acceptance criteria the proposal fulfils); `state` enum (`auto_created`, `open`, `accepted`, `declined`); `child_task_id` FK nullable; `decided_by` FK owners nullable; `created_at`; `decided_at`. Only `state` and the decision columns change after insert. |
-| `gpu_leases` | The one GPU slot per machine (D12) | `id`; `machine_id`; `execution_id`; `task_id`; `priority` (copied from the task at request time); `requested_at`; `granted_at` nullable; `released_at` nullable. A partial unique index on `machine_id` where `granted_at` is set and `released_at` is empty keeps one holder. The next grant goes to the open request with the highest `priority`, then the oldest `requested_at` (call: a priority-then-first-come order cannot be had from Temporal task order, so the slot is a PostgreSQL lease). A lease whose run is in a final status counts as released. |
+| `gpu_leases` | The one GPU slot per machine (D12) | `id`; `machine_id` (FK to `workers.machine_id`); `execution_id` (FK to `task_runs.execution_id`); `task_id` FK; `priority` (copied from the task at request time); `requested_at`; `granted_at` nullable; `released_at` nullable. A partial unique index on `machine_id` where `granted_at` is set and `released_at` is empty keeps one holder. The next grant goes to the open request with the highest `priority`, then the oldest `requested_at` (call: a priority-then-first-come order cannot be had from Temporal task order, so the slot is a PostgreSQL lease). A lease whose run is in a final status counts as released. |
 | `settings` | The named settings of the architecture ("numbers are settings") that are not policy columns | `key text` primary key; `value jsonb`; `updated_by`; `updated_at`; `row_version`. Every change is an `audit_log` row. See Policies. |
 | `routing_rules` | Spec 3.1 and 6.5 routing settings | `id`; `project_id` nullable (null is global); `position int`; `match jsonb`; `preferred_agent_ids uuid[]`; `row_version`. Starting profiles are data, not code. |
 | `notifications` | Spec 16.2, no repeated notices | See Notifications. |
@@ -161,12 +163,36 @@ The workflow reads both through `LoadSettings` into its snapshot.
 
 ## Notifications
 
-`notifications`: `id`; `event_type` enum (spec 16.2 list); `dedup_key text` (for example `worker_offline:<worker id>`,
+`notifications`: `id`; `event_type` enum; `dedup_key text` (for example `worker_offline:<worker id>`,
 `task_blocked:<task id>:<blocked_at>`); `task_id`/`worker_id` nullable; `state` enum (`open`, `resolved`);
 `occurrences int`; `first_raised_at`; `last_raised_at`; `delivered_at`; `resolved_at`. Unique index on `dedup_key where
 state = 'open'`: raising an open notice only bumps `occurrences` and `last_raised_at`, so one outage gives one message.
 A resolved notice allows a new one. Repeating an open notice is the setting `notice.repeatHours`, empty (never) until
 its phase (see Open, decided in its phase).
+
+Event types: the eight of spec 16.2 and the notices the other documents raise. A machine going offline is the same
+event as a worker going offline (`worker_offline`: the worker is the machine's process).
+
+| `event_type` | Raised when | Source |
+|---|---|---|
+| `worker_offline` | the liveness schedule marks a silent machine OFFLINE (one per outage) | spec 16.2; architecture |
+| `workflow_failed` | a task reaches FAILED | spec 16.2 |
+| `task_blocked` | a task enters BLOCKED (the `block_kind` is in the text) | spec 16.2 |
+| `approval_required` | a task enters AWAITING_APPROVAL | spec 16.2 |
+| `infrastructure_unavailable` | an infra failure class exhausts its retries (PostgreSQL, API, network) | spec 16.2; architecture |
+| `backup_failed` | a backup or a restore check fails | spec 16.2 |
+| `retry_limit_exceeded` | attempts, auto fixes or rework rounds reach the policy limit | spec 16.2 |
+| `budget_exceeded` | a token, cost or time limit stops a run | spec 16.2; F12 |
+| `no_machine_available` | a task waits in ASSIGNED with no machine to start on | architecture (ASSIGNED to RUNNING) |
+| `no_eligible_agent` | `SelectAgent` finds no agent that passes the hard filters | agent-adapters.md; temporal.md |
+| `usage_limit_wait` | a provider's usage limit holds a run or a reviewer until its reset (D20) | architecture; temporal.md |
+| `cancel_unconfirmed` | a cancel waits in CANCELLING because the machine is gone (D21) | architecture |
+| `cleanup_stuck` | `CleanupWorkspace` cannot remove a worktree with unpublished changes | temporal.md |
+| `decision_refused` | a recorded decision is refused (stale revision, closed task, wrong actor, wrong block kind) | testing.md `decision-recorded` |
+
+The table is created with all these values in migration 0003 (phase 2): `NotifyUser` (phase 3) and the refused-decision
+notice of `decision-recorded` (phase 2) write to it long before the Telegram client delivers anything (phase 6); a
+later type is an expand step (an enum value).
 
 ## Accounts and rights
 
@@ -190,10 +216,29 @@ owner, each `press_id` once; reader reads. The web panel runs as an owner token 
 
 ## Migrations and backup
 
-- Forward-only numbered SQL files in `factory/db/`, applied by a one-shot step with `af_migrator` before the API and
-  control worker start, under a session advisory lock, each file in one transaction (a statement that cannot, such as
-  `create index concurrently`, has its own file). The applied file name and checksum are recorded; a changed applied
-  file stops the step.
+- Drizzle (D27) holds the schema: definitions in `factory/db/schema/` (one file per aggregate), migrations generated by
+  `drizzle-kit generate` into `factory/db/migrations/` and then completed by hand in the same numbered file: what
+  Drizzle cannot express (triggers, partial and expression indexes where needed, `check` constraints on JSON, grants,
+  the rows of `task_transitions`, deferrable constraints) is plain SQL there. Forward only: there is no down file; a
+  wrong migration is fixed by a new one. A test regenerates the schema from the definitions and fails when a
+  generated part differs from the committed file.
+- Applied by a one-shot step with `af_migrator` before the API and control worker start, under a session advisory lock,
+  each file in one transaction (a statement that cannot, such as `create index concurrently`, has its own file). The
+  applied file name and checksum are recorded; a changed applied file stops the step.
+- Creation order. Every foreign key target exists when the key is created, or the key is added by an `alter table` later
+  in the same file (or the file that creates the target):
+
+  | Migration | Cycle or forward reference | How it is made safe |
+  |---|---|---|
+  | 0002 | `tasks.origin_run_id` points to `task_runs` (0004) | the column is created in 0002 without the key; 0004 adds the key after `task_runs` and a trigger that the run belongs to `origin_task_id` |
+  | 0003 | `task_decisions.outbox_id` (not null) and `outbox_events.decision_id` | create `outbox_events` without `decision_id`, create `task_decisions` (key to the outbox), then `alter table outbox_events add foreign key (decision_id) ... deferrable initially deferred`; the server makes both uuids first and inserts both rows in one transaction |
+  | 0003 | `task_decisions.confirmation_id` and `confirmations.decision_id` | create `confirmations` without `decision_id`, create `task_decisions`, then `alter table confirmations add foreign key (decision_id)`; the first press inserts a confirmation, the decision's insert sets `used_at` and `decision_id` in the same transaction |
+  | 0003 | `task_revisions.decision_id` | created after `task_decisions`, no cycle (`tasks.current_revision` is a number, not a key) |
+  | 0004 | `workspaces`, `task_runs`, `task_events`, `task_artifacts`, `run_checks` | in this order: runs need `workspaces`, events need runs, checks need artifacts |
+  | 0006 | `gpu_leases` to `workers.machine_id`, `task_runs.execution_id`, `tasks` | all exist since 0001, 0002, 0004 |
+
+  A test applies the migrations one by one to an empty database and checks the schema after each file; it fails when a
+  table of this document is in no file or in two (`migration-order`).
 - Expand then contract (architecture): a release works with the schema before and after it; a column or value is
   removed one release after nothing reads it. Rolling code back needs no schema rollback. A contracting migration is
   preceded by an automatic backup, and its documented rollback is restore from that backup into a new database.

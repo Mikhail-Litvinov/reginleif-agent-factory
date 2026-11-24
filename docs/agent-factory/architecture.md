@@ -42,6 +42,7 @@ results; no second recovery scheduler next to Temporal; no success reported for 
 | D24 | Nothing is deleted by itself. Cleanup on command removes logs, artifacts and worktrees; the history of decisions and events stays for good. | Owner |
 | D25 | A review finding the implementer accepts is fixed. A disputed technical one is settled by a third independent run; a dispute about requirements, scope or cost goes to the owner. | Call from D18 |
 | D26 | A mandatory check that could not run is first repaired by agents; if that fails, the task is BLOCKED with the reason. It never counts as passed. | Call from D18 |
+| D27 | Drizzle (as the task spec recommends; Rig has no database code to reuse) defines the schema and types; its generated SQL migrations are reviewed, committed, completed by hand where Drizzle cannot express a rule, and applied forward only. | Call, from spec 4 |
 
 Rejected: a separate repository (Rig updates and rolls back only itself and the hub); code in the Rig core (ordinary Rig
 would pull Temporal and PostgreSQL); the worker's own child processes (an agent would die with the worker).
@@ -166,8 +167,12 @@ so host affinity comes from the queue name, with a schedule-to-start timeout.
 An execution is identified by `execution_id`, created on the server before the activity is scheduled. The worker keeps
 `~/.agent-rig/factory/executions/<execution_id>/`: intent, launch id, started marker, output, exit, result.
 
-**The runner** (`factory/runner/`) is a small program of the release that `rig exec` starts. It writes the started marker
-as its first act, starts the agent, writes output and exit into the execution folder, and stops the agent at the time
+**The runner** (`factory/runner/`) is a small program of the release that `rig exec` starts through a shell script on its
+standard input (the only form of `rig exec` that runs an arbitrary program). The execution id stands in that script, so it
+is in the recorded text; searching the records by it is worker code, `rig exec` has no such search and does not refuse a
+second start. Death is read from the recorded pid and creation time at once, without waiting for the record's heartbeat to
+go stale. The runner writes the started marker as its first act, starts the agent, writes output and exit into the
+execution folder, and stops the agent at the time
 limit. The result therefore exists without the worker and without the `rig exec` log.
 
 1. `StartAgentExecution` writes the intent first. If the intent already exists it looks the execution up instead of
