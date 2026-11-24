@@ -16,6 +16,7 @@
 - A consultant or reviewer gets the problem, goals and requirements only, never my candidate fix or the user's jabs.
   Then I pick the most engineered simple fix and build until holes close.
 - Fix a known visible defect that has a known general fix; do not stop at a proposal.
-- A part done only in a test harness, not in production code, stays an open item in every report.
+- A part done only in a test harness, not in production code, stays open in the findings file. Mention this limitation
+  when reporting completion of that part; do not repeat unrelated open findings in every message.
 - After a slip, remove its class with a guard in a tool or script; guards in the user's own tooling (hooks, settings,
   global scripts, skills) are proposed in one line and wait for approval.
