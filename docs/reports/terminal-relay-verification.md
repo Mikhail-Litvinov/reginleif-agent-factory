@@ -38,6 +38,8 @@ was resumed under the new supervisor. The transcript was retained.
 
 The live supervisor showed the development-channel startup confirmation before the plugin registered.
 The hub delivered its terminal card into the existing Factory topic with a notification.
+The installed hub was restarted again while this confirmation was open. The supervisor generation,
+supervisor PID and Claude child PID stayed unchanged, and the restarted hub resumed Telegram polling.
 The next required acceptance action is the owner's Enter press in Telegram, followed by a short topic
 message and an observed Claude response. This last user interaction has not yet been verified.
 
