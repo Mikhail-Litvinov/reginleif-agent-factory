@@ -110,8 +110,9 @@ owner's own credential such as a login; then they enter with `owner`. A routine 
 dangerous operation and asks no owner (robotics.md, Ordinary physical work needs no owner); a `physical_unknown` is the
 chief engineer's even when a person might have to look: a person is asked only when no allowed observation remains, and
 then as a dependency with the smallest human part, not as the owner's decision. A start that may have people in the
-zone, or that is unattended with no valid unattended policy, is no new kind: the task stays ASSIGNED and waits for the
-owner's two-press confirmation (D23, operation `robot_start`; `people_may_be_present`, `unattended_policy_missing`); the lease is issued on a valid policy or on the spent confirmation of this start. The engineer's resolution is a `resolve_block`
+zone, or that has nobody attending and no valid unattended policy, is no new kind: the task stays ASSIGNED and waits for
+the person's start press or the owner's two-press confirmation listing each open reason (robotics.md "People in the zone,
+and attendance" and Table 2; `people_may_be_present`, `unattended_policy_missing`). The engineer's resolution is a `resolve_block`
 decision row with its run (`engineer_run_id`) and channel `api`, applied by the same handler as the owner's. The choices
 are those of the kind, except one that raises a cost, token or time budget or does a dangerous operation: that is the
 owner's (`422 owner_only`). The engineer's extra choice `call_owner` leaves the status as it is, sets
@@ -147,8 +148,8 @@ registry never holds a task. The owner's answer to the poll is recorded as a reg
 
 **Physical kinds (D34, [robotics.md](robotics.md)).** They are new `blockKind` values, no new task state. Their exit is
 always ASSIGNED and never the old attempt: no physical operation is retried (below), and a lease, a qualification and the
-runtime's own checks are asked again. A release from them is refused only for a missing new hardware check or new
-permission, never for an unconfirmed state. A platform in `reserved` (equipment busy, charging) does not block the task: it
+runtime's own checks are asked again. A release from them is refused only for a missing self check of this boot or a
+pending re-enrolment (`release_requires_check`), never for an unconfirmed state (robotics.md Table 1). A platform in `reserved` (equipment busy, charging) does not block the task: it
 stays ASSIGNED with the reason and its queue position.
 
 A block whose handler is the chief engineer also has the choice `call_owner` for it (the status stays, the handler
@@ -231,7 +232,7 @@ Worker sets `enableNonLocalActivities: false` and workflow code reaches these st
 | `RunAssessment` | local; phase 8 | agent + period | S C | infra | below the minimum facts (result "not enough data") | none; the result is stored, a repeat returns it |
 | `ApplyMeasureTerm` | local; phase 8 | measure id + term end | S C | infra | none | none; lifts a limit whose term ended, audited |
 | `ObservePhysicalState` | local, reads the robot's confirmed state through the API; D34, when robotics starts | robot id + request id | S C | infra | none | read only; the state it returns is the confirmed state (also whether the robot confirmed the end of its last lease), never a request |
-| `IssuePhysicalCommand` | local, through the API to the robot gateway; D34 | `command_id` (the runtime deduplicates by it) | S | physical | stale or ended lease, configuration or qualification; a lease that is not the active one; a gate-3 reference that is not exactly one of qualification and admission | no retry: an unknown outcome is BLOCKED `physical_unknown` and ends the lease in the same transaction, recalling the commands not yet fetched; the next action is formed after `ObservePhysicalState`, under a new lease issued only after the robot confirmed the end (or the local expiry plus the clock tolerance has passed), and gets a new `command_id` |
+| `IssuePhysicalCommand` | local, through the API to the robot gateway; D34 | `command_id` (the runtime deduplicates by it) | S | physical | stale or ended lease, configuration or qualification; a lease that is not the active one; a gate-3 reference that is not exactly one of qualification and admission | no retry: an unknown outcome is BLOCKED `physical_unknown` and ends the lease in the same transaction, recalling the commands not yet fetched; the next action is formed after `ObservePhysicalState`, under a new lease issued only as Table 1 of robotics.md allows (`lease_ending` otherwise), and gets a new `command_id` |
 | `RecordPrecedent` | local; writes through `RegistryService` | task id + run id + case (settled dispute, resolved block, answered question) | S C | infra | none | none; a lost write is repeated by its key. Writes only an agent `precedent` or a `draft`, never an active owner record |
 
 Heartbeat details of `MonitorExecution` and `RunGpuJob` are the log offset and the execution id, so a retry attaches. The
@@ -313,7 +314,7 @@ confirmed safe; the `resolve_block` of such a kind goes to PLANNING instead of A
 every case only after the platform's state is confirmed by the robot. **No retry of a physical operation:** `retry` is
 not a choice of any physical kind, and the activity class `physical` never repeats; after a stop, a restart or an unknown
 outcome the next step is `ObservePhysicalState`, then a new action with a new `command_id` under a new lease (issued
-only once the old one is confirmed ended or its local expiry has certainly passed, else `lease_ending`) and a new check
+only as robotics.md Table 1 allows, else `lease_ending`) and a new check
 of the qualification or admission. An unknown outcome, a safe stop, a stop request and a change of agent each end the
 lease and recall its unfetched commands in one transaction, before any later step. `approve`, `reject`,
 `request_changes` and `resolve_block` carry the revision the deciding actor saw; `revise_requirements` carries the revision it

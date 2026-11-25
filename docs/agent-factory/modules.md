@@ -98,7 +98,7 @@ Migrations, in order (foreign keys decide the order; each table is in exactly on
 
 Count: 9+3+12+5+4+6+6+1+4+5 = 55 tables, each in exactly one file (see Verification).
 
-The robotics migration (D34) is separate and not part of the 55: it adds the seventeen robotics tables (working names in
+The robotics migration (D34) is separate and not part of the 55: it adds the eighteen robotics tables (working names in
 [database.md](database.md), Robotics tables) and is built only when robotics starts (Phase R1 below). Numbers are forward
 only and follow build order: 0010 (personnel, phase 8) and the robotics migration are independent, each depends only on
 0001-0009, and the one built first takes the next free number (database.md, Robotics tables, Migration order). The
@@ -310,12 +310,12 @@ admission of the owner's regulation; missing hardware is never reported as done.
 | Path | Purpose | Depends on |
 |---|---|---|
 | `F/robotics/registry.ts` | Platforms, capabilities, configurations and calibrations as records; the abstraction over a platform (R1) | repo, `registry/service.ts` |
-| `F/robotics/lease.ts`, `F/robotics/command.ts` | One active controlling lease per platform, with its signed package (lease number, gate-3 reference, limits, stage, zone, presence, expiry) and its end in the same transaction as the recall of unfetched commands; a new lease only after the robot confirmed the end or the local expiry passed; commands with `command_id`, per-lease sequence, lease number, exactly one of qualification or admission, expiry and preconditions; receipts deduplicate; a physical operation is never retried (R1, bench R3) | registry, rights |
-| `F/robotics/qualification.ts` | Qualification bound to platform, configuration, controller version, calibration, control software, agent model, zone and skill and to its physical evidence rows, each covered by a review of another run and provider (D20); reviews with one subject (evidence set, experiment plan, stage exit, unattended policy) and a content hash; the experiment admission (consumed at lease issue) and its restricted mode; the stage exits D0-D10 with their own evidence and the standing-exit rule; zones, start presses and unattended policies | registry, `personnel/` |
+| `F/robotics/lease.ts`, `F/robotics/command.ts` | The server side of robotics.md Table 1: one active controlling lease per platform with its signed package, the gateway's answer to the robot's challenge (once per counter, an `active` lease only), the bound `B`, the end in the same transaction as the recall of unfetched commands, the diagnostic route; commands with `command_id`, per-lease sequence, lease number, exactly one of qualification or admission, expiry and preconditions; receipts deduplicate; a physical operation is never retried (R1, bench R3) | registry, rights |
+| `F/robotics/qualification.ts` | The records of robotics.md Table 2 and their writers: qualification and evidence, reviews of another run and provider (D20) with their content hash, the experiment admission and its restricted mode, the stage exits D0-D10 and the standing-exit rule, zones, start presses, unattended policies and the start confirmation with its reasons | registry, `personnel/` |
 | `F/robotics/gates.ts` | The five gates; gates 4 and 5 live on the robot, the server only reads their state | lease, command |
 | `F/workflows/physical-dev.ts` | `PhysicalDevelopmentWorkflow`, a separate workflow, id `physical-dev-<program id>`; the physical BLOCKED kinds and their handlers (temporal.md) | `workflows/task.ts` |
 | `F/api/handlers/robotics.ts` | The robotics routes and role `B` of api.md; a stop in the client is a request, the confirmed state comes from the robot | api, robotics |
-| `F/db/migrations/<next free number>` | The seventeen robotics tables; not in the 55; independent of 0010 | built when robotics starts |
+| `F/db/migrations/<next free number>` | The eighteen robotics tables; not in the 55; independent of 0010 | built when robotics starts |
 | Robot runtime and controller (outside `F/`) | Runtime, controller and independent safety circuit; R2-R4, need hardware | the owner's hardware |
 
 Stages and checks: R0 audit and threat model, check `robot-no-regression` from here on, at every stage; R1 registry,
@@ -325,28 +325,11 @@ simulator and data (`robot-lease`, `robot-command`, `robot-unknown`, `robot-five
 `robot-qualification`, `robot-evidence`); R5 (`robot-privacy`); R6 with the client (`robot-stop-view`); R7-R9 as their gates
 pass. The 12 check ids are those of testing.md Robot checks: `robot-lease`, `robot-command`, `robot-unknown`,
 `robot-five-gates`, `robot-qualification`, `robot-safety`, `robot-injection`, `robot-evidence`, `robot-stop-view`,
-`robot-privacy`, `robot-owner-load`, `robot-no-regression`. Each of the seven corrections to the physical gate fails a
-named check on the old text: evidence bound to its qualification, an admission for the first physical test, a release that
-the state `unconfirmed` must not block, the stage exits, an ordinary qualified action that asks no owner, and
-`physical_unknown` handled by the chief engineer are extended into `robot-qualification`, `robot-evidence` and
-`robot-owner-load`. The nine corrections that followed fail named checks too: a review with one subject and a hash, a
-minimum of evidence and reviews, D0 with no predecessor and a configuration change reopening from the earliest stage it
-touches (`robot-qualification`, `robot-evidence`); the chief engineer's `physical_decision` run and its limits
-(`robot-owner-load`); exactly one gate-3 reference on lease and command, and an admission consumed at lease issue
-(`robot-five-gates`, `robot-lease`, `robot-command`); the signed lease package checked on the robot (`robot-command`,
-`robot-safety`); the end of a lease with the recall and the order of a new lease (`robot-lease`, `robot-unknown`); people
-in the zone and the interlock (`robot-safety`); the unattended policy (`robot-safety`, `robot-owner-load`). The six
-corrections to revocation, restart and the owner's confirmation fail named checks on the old text too: revocation by a
-signed per-lease heartbeat with a rising sequence, a lease ended by stopped heartbeats, a new lease only after the
-confirmed end or heartbeat age plus clock tolerance, and an offline robot moving at most one heartbeat period
-(`robot-lease`, `robot-unknown`); the boot nonce and lease number in every signature, a refused pre-restart package, lower
-lease number or repeated heartbeat, and no lease after lost persistent memory until the chief engineer's recorded
-re-enrolment (`robot-command`, `robot-unknown`); the D23 two-press `robot_start` confirmation bound to task, zone,
-equipment and expiry for people in the zone and for an unattended start without a valid policy, and a lease check that
-accepts a valid policy or a spent confirmation of that start, every guard naming both (`robot-safety`, `robot-lease`,
-`robot-owner-load`); an admission that needs only the confirming plan review, with evidence minimums only on qualifications
-and stage exits, and one creation order (the pending state) for every pair (`robot-qualification`). The migration
-order is `migration-order`.
+`robot-privacy`, `robot-owner-load`, `robot-no-regression`. The behaviour of the lease, its challenge answers, a restart
+and a diagnostic is robotics.md Table 1 (`robot-lease`, `robot-command`, `robot-unknown`); the life of a review, a
+qualification, a stage exit, an admission, a confirmation and a policy is robotics.md Table 2 (`robot-qualification`,
+`robot-evidence`, `robot-safety`, `robot-owner-load`); the state-space check of both is `robot-lease-model` of testing.md.
+Nothing here restates them. The migration order is `migration-order`.
 
 Migrations: the robotics migration (the next free number, separate, not in the 55). Rig files: none. Risks: a software path that raises a limit or lets one gate
 stand in for another; a repeat of a physical command after a lost answer (never retried, `robot-unknown`); a stale state
@@ -386,7 +369,7 @@ shown as current in the client (`robot-stop-view`); a camera recording outside i
 | 28 | client.md says a device never gets an agent role, the API reads a device session as the owner for the client routes | Settled: the role name `device` (owner rights for the client routes only, no token management, no new device); the hub is a separate role `hub` |
 | 29 | D33 put robotics in phase 9 as an extension point (worker kind `device`); D34 makes it a design with its own stages | Settled by D34: phase 9 holds push and voice only; the stages R0-R9 and their place are the owner's decision (robotics.md Phases, Robotics stages above) |
 | 30 | robotics.md says "no new task state", yet the physical BLOCKED kinds are new enum values | Settled: the states of the task are unchanged; only the BLOCKED kind enum grows (four kinds, exits all to ASSIGNED); a revise in a physical BLOCKED stores the revision and the task stays BLOCKED (temporal.md) |
-| 31 | The seventeen robotics tables vs the 55 totals | Settled: outside the 55, own migration numbered by build order, independent of 0010, built when robotics starts; the totals and the ten factory migrations stay as they are |
+| 31 | The eighteen robotics tables vs the 55 totals | Settled: outside the 55, own migration numbered by build order, independent of 0010, built when robotics starts; the totals and the ten factory migrations stay as they are |
 | 32 | robotics.md Coverage of the source maps source sections 8 and 9 both to "Safety and Development programme" and 24 to "Safety and Devices" | Read as the rows below; the mapping is loose, no section is dropped |
 | 33 | robotics.md says D0 to D10, the first prototype names only D0, D1 | Not a conflict: the first prototype starts with D0 and D1; the rest follow as gates pass |
 
@@ -507,7 +490,7 @@ reachable before a server exists.
 ## Verification done
 
 - Tables: 55 tables in database.md (`outbox_events` and `execution_policies` counted once; 28 of the architecture plus the
-  six registry tables, the six rights tables, the nine personnel tables and the six client tables). Migrations 0001-0010 hold 9+3+12+5+4+6+6+1+4+5 = 55 tables; the seventeen robotics tables (D34) are in their own migration, outside this count. Each of the 54 first-column names plus
+  six registry tables, the six rights tables, the nine personnel tables and the six client tables). Migrations 0001-0010 hold 9+3+12+5+4+6+6+1+4+5 = 55 tables; the eighteen robotics tables (D34) are in their own migration, outside this count. Each of the 54 first-column names plus
   `task_transitions` appears in exactly one migration row, compared by name.
 - Phase deliverables: every spec phase 1-7 criterion has a module row and a proving check above. The Rig change list
   (feature, command, installer, autostart, codex-run.py) is fully assigned to phase 4, with the audit items (the five
