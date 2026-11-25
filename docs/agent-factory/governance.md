@@ -175,7 +175,7 @@ beside the rights, not a right: a role, record or grant gives the right of the t
 never a qualification, and a qualification gives no right. An ordinary qualified physical action is
 not a dangerous operation (D23) and needs no owner; the owner's full list for physical work is in robotics.md, Ordinary
 physical work (limits and circuits, quarantine, purchases outside a budget, people in the zone unless the zone is fenced
-with a closed, fresh interlock, unattended start without a valid unattended policy). Actions on people, animals, dangerous tools, chemicals, hot
+with a closed, fresh interlock, unattended start without a valid unattended policy; the last two are the owner's two-press `robot_start` confirmation, D23, and the lease check accepts a valid policy or that spent confirmation). Actions on people, animals, dangerous tools, chemicals, hot
 surfaces and mains voltage are prohibited in the first implementation and refused, never offered for a press.
 
 **The chief engineer.** A request names the run, the action, the target, the reason and what was tried. Code first:
@@ -190,10 +190,10 @@ records `refuse` with the failed check as its reason, and the owner is not calle
 regulation is empty (G6) the chief engineer can only refuse or call the owner.
 
 The chief engineer has a second kind of run, for a routine physical decision (D34: assign a platform, release one from
-`stopped`, `unknown` or `maintenance`, admit an experiment, qualify a skill, bookkeeping, or `call_owner`). It is no
+`stopped`, `unknown` or `maintenance`, admit an experiment, qualify a skill, record a re-enrolment of a robot that lost its persistent memory after a hardware check, bookkeeping, or `call_owner`). It is no
 request: it is its own run, and its one decision row is a `task_decisions` row of kind `physical_decision` on the
 standing task or the physical task. The limits stay those of G15: the owner's list (limits and circuits, quarantine,
-purchases, people in the zone, unattended start without a valid policy) is answered `call_owner`, and no such run
+purchases, people in the zone, unattended start without a valid policy and no spent `robot_start` confirmation) is answered `call_owner`, and no such run
 grants a right or a clause.
 
 **Every step is a row, none is final.** A request is an immutable `right_requests` row; each step that answers it is one

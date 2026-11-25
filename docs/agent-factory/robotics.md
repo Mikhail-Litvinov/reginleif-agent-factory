@@ -63,24 +63,52 @@ absence of people is shown (below), the largest command lifetime and the lease e
 locally and checks every command against it **without asking the server**: the lease number, the gate-3 reference, the
 stage and zone, the limits (a command above them is refused) and the expiry. A limit in the package may only be lower than
 the runtime's own, never higher, so a package cannot widen what the robot allows. The runtime drops the package on restart,
-at its expiry and when the link to the gateway has been lost for longer than the link-loss limit (a setting of the
-runtime), and then refuses every command until a new lease and a new package exist. Sequence numbers are per lease,
+at its expiry, on a gateway message `lease_end`, when the lease heartbeat is missing (below) and when the link to the
+gateway has been lost for longer than the link-loss limit (a setting of the runtime), and then refuses every command until
+a new lease and a new package exist. Sequence numbers are per lease,
 assigned by the gateway in the order the commands are made, never by the agent; the runtime accepts only a number above the
 last one it saw for that lease. The largest command expiry (command lifetime) is a setting smaller than the lease term, so
 no command outlives its lease.
 
+**Revocation reaches the robot by a heartbeat.** A package kept locally cannot be revoked by the server alone, so the
+package is only half of the permission: the runtime moves only while it holds a fresh lease heartbeat. The gateway sends it
+for the active lease at a fixed period; it is signed (the same device key as the package), per lease, carries the lease
+number and a rising heartbeat sequence number, and the runtime accepts it only if the signature holds, the lease number is
+that of its package, the sequence is above the last one it accepted for that lease, and its age (the runtime's own clock
+since it was received, never a time stamp inside it) is below `robotics.heartbeatSeconds`. That setting is smaller than the
+platform's stop-distance time (the time the platform needs to come to rest from its top confirmed speed under its own
+limits, kept in the platform row), so a robot that loses the heartbeat has stopped, by its own brake and circuit, before the
+distance the stop needs is used up. A missing, stale, repeated or lower-numbered heartbeat, a gateway message `lease_end`
+and an ending lease each stop motion at once (a controlled stop, then the safe state) and drop the package; the runtime
+then refuses every command until a new lease and a new package exist. **The server ends a lease by stopping the
+heartbeats**, and sends `lease_end` as well so that a connected robot learns it at once; the end does not wait for an
+answer. What remains: a robot that is offline or cut off can still move for at most one heartbeat period, inside its own
+limits and its safety circuit; revocation is therefore bounded by `robotics.heartbeatSeconds`, not instant, and the setting
+is kept below the stop-distance time for that reason.
+
 **An ended lease takes its commands with it.** An unknown outcome, a safe stop, a stop request or a change of agent ends the
-lease in the same transaction as its cause, and every command of that lease that the robot has not fetched is recalled in
-that transaction. The commands route returns only commands of the active lease that are not expired and not recalled; a
-command of another lease is never returned. The runtime refuses a command of an ended lease, whether it was fetched
-before or not. A new lease is issued only after the robot confirmed that it dropped the old one, or after the old lease's
-local expiry has certainly passed, with the clock tolerance of the setting added; until then the platform has no
-controlling lease and no one can take control.
+lease in the same transaction as its cause (the heartbeats stop with it), and every command of that lease that the robot
+has not fetched is recalled in that transaction. The commands route returns only commands of the active lease that are not
+expired and not recalled; a command of another lease is never returned. The runtime refuses a command of an ended lease,
+whether it was fetched before or not. **A new lease is issued only after the robot confirmed that it dropped the old one
+(`end_confirmed_at`), or after the heartbeat age (`robotics.heartbeatSeconds`) plus the clock tolerance of the setting has
+certainly passed since the last heartbeat sent**, or the old lease's local expiry, whichever the record shows first; until
+then the platform has no controlling lease and no one can take control.
+
+**Restart and replay.** The runtime keeps a persistent boot counter, raised at every start, and makes a random boot nonce at
+each start (the nonce is never persisted and never reused). A lease package and every heartbeat are signed over the nonce of
+the current boot and the lease number: the robot announces its nonce when it connects and the gateway signs over the nonce it
+was told, so a package or a heartbeat recorded before a restart verifies against no later boot. The runtime also keeps, in
+persistent memory, the highest lease number it has ever accepted, and refuses a package with a lower or equal number, a
+package or heartbeat signed over another nonce, and a repeated heartbeat (an equal or lower heartbeat sequence of the same
+lease). If the persistent memory is lost or does not verify (counter, highest lease number), the robot refuses every lease
+until the chief engineer's recorded re-enrolment of that platform after a hardware check (a `physical_decision` row naming
+the platform and the check); a restart alone, with the memory intact, needs only a new lease.
 
 Physical operations are not idempotent. After a lost answer nothing is repeated: the real state is established first, by
 observation, and a new action is formed. After a restart of anything the robot stays in its safe state until the hardware is
-checked and a new permission to move exists; old commands and expired leases are not restored. Restoring a workflow is not
-a permission to repeat a physical operation.
+checked and a new permission to move exists; old commands, old packages, old heartbeats and expired leases are not restored.
+Restoring a workflow is not a permission to repeat a physical operation.
 
 ## Permission to move
 
@@ -113,7 +141,9 @@ admission, one that names both, an admission already used for another lease or e
 or a limit above the admission.
 Two acts make an admission (owner): an independent reviewer confirms the plan of the experiment (a `robot_reviews` row of
 subject `experiment_plan`, another run and another provider than the executor), then the chief engineer gives it. Neither
-alone is enough, the executor is neither, and the owner is not asked. The review covers the plan exactly as it will run:
+alone is enough, the executor is neither, and the owner is not asked. **The minimum for an admission is one confirming
+review of the plan; it has no evidence minimum**, because the first physical test has no evidence yet (evidence minimums
+belong to qualifications and stage exits only). The review covers the plan exactly as it will run:
 its hash (`content_hash`) is taken over the plan together with the limits, devices, zone, stop conditions, stage and term
 that the admission will carry, and the admission stores that hash (`plan_hash`); the database refuses an admission whose
 plan or limits are not those the review hashed. Once a review of an experiment exists, the plan fields of that experiment
@@ -142,10 +172,28 @@ reviewer's provider differs from the executor's (D20), (c) the verdict is confir
 needs a new review.
 
 **A universal check needs something to check.** A rule that says "every listed row must" is false for an empty list, so
-each such rule has a minimum: a qualification with no evidence row or no review, an admission with no review, a stage exit
-with no evidence row or no review, and an unattended policy with no review are refused (`evidence_missing` for the empty
-set, `review_invalid` for the review), and an exit whose evidence has the wrong kind for its stage (the Evidence column of
-the stage table) is refused too.
+each such rule has a minimum. The minimum is not the same for every act. A qualification with no evidence row and a stage exit
+with no evidence row are refused (`evidence_missing` for the empty set); a qualification, a stage exit, an admission and an
+unattended policy with no confirming review of their own subject are refused (`review_invalid` for the review). An
+admission has no evidence minimum: its minimum is the one review of the plan (`experiment_plan`), and an admission whose
+review is missing, not independent, not confirming or of another plan hash is refused as `review_invalid`. An exit whose
+evidence has the wrong kind for its stage (the Evidence column of the stage table) is refused too.
+
+**Creation order: one mechanism for every pair.** A row and the member rows it stands on cannot all be inserted by one
+statement and checked in the middle of it, so the order is fixed once, here, for every such pair in the robotics tables
+(qualification and its evidence, stage exit and its evidence, review and the evidence set it reviews, lease and its
+package). The mechanism is **the pending state, with the checks at the deciding step**: the row is inserted in its pending
+state together with its member rows, and only the deciding step moves it to its final state, where the checks of this
+document run in a trigger. There are no deferred constraint triggers at commit. Concretely: a qualification is inserted in
+`REVIEW_PENDING` with its evidence rows, and the deciding step is the insert of its `QUALIFIED` row (a state change is a new
+row) naming the pending row; a stage exit is inserted `REVIEW_PENDING` with its evidence rows and the deciding step inserts
+the standing exit; a review is inserted with verdict `pending` and its evidence rows (for an `evidence_set` or `stage_exit`
+review), and the reviewer's one verdict (`confirmed` or `rejected`, set once) is its deciding step. For content that exists
+before its review (an experiment plan, an unattended policy) there is no pair: the content comes first, then the review,
+then the row that relies on the review (an admission, an `unattended_policies` row), which only needs the review to exist.
+A lease and its package are one row (`package_hash`, `package_signature`, the limits and the gate-3 reference are columns of
+`robot_leases`), so that pair has no second insert and needs no pending state. A pending row grants nothing: no gate, no
+lease and no command accepts it, and its member rows are immutable once inserted.
 
 ## Qualification
 
@@ -160,7 +208,8 @@ an experiment.
 (`robot_experiments`), and the experiment names the executor run, platform, hardware configuration, controller version,
 calibration, control software, agent model, zone, skill and kind (`simulation`, `physical` or, for stage D0 only,
 `inventory`). A qualification lists its evidence rows (`robot_qualifications.evidence_ids`) and names one review of subject
-`evidence_set`. The database refuses to set a qualification to `QUALIFIED` unless the list has at least one row and every
+`evidence_set`; it is created in `REVIEW_PENDING` with its evidence rows and the review, and `QUALIFIED` is the next row
+(Creation order, above). The database refuses to insert the `QUALIFIED` row unless the list has at least one row and every
 listed row (a) is physical, except for the state `SIMULATION_VALIDATED`, which may list simulation rows only; (b) carries the
 same platform, configuration, controller, calibration, software, model, zone and skill as the qualification; and (c) the
 named review is of subject `evidence_set`, covers exactly the listed set (no row more, no row less, hash equal), has a
@@ -251,7 +300,7 @@ Mapping to the existing states (call, no new task state):
 | Situation | Task | Platform |
 |---|---|---|
 | Equipment or zone busy, charging | ASSIGNED with the reason and queue position, like the GPU queue | reserved |
-| Start needs a press (people may be present, or no valid unattended policy) | ASSIGNED with the reason; the owner is asked for one press (below); no new BLOCKED kind | reserved, no lease issued yet |
+| Start needs the owner's confirmation (people may be present, or no valid unattended policy) | ASSIGNED with the reason; the owner is asked for the two presses of a dangerous operation (below, D23); no new BLOCKED kind | reserved, no lease issued yet |
 | Safe stop | BLOCKED `safe_stop`, handler chief engineer; the lease ends and its unfetched commands are recalled in the same transaction | `stopped`, needs a check before motion |
 | Unknown physical state | BLOCKED `physical_unknown`, never retried, observation first; the lease ends and its unfetched commands are recalled in the same transaction as the unknown outcome; handler chief engineer; a person is asked only when no allowed observation remains (own sensors, an outside camera, another robot, the bench), and then it is a dependency with the smallest human part, recorded as such, not a decision of the owner and not on the critical list | `unknown` |
 | Stop request or change of agent | the task keeps its state; the lease ends and its unfetched commands are recalled in the same transaction; the stop is shown as requested until the robot confirms it | `stopping`, then `stopped` |
@@ -264,15 +313,17 @@ confirmed. It never blocks a release, a diagnostic or an observation, which are 
 own error, `release_requires_check`); releasing from `quarantine` is `owner_only` for the service. When a person is asked
 for `physical_unknown` the owner is that person only because no other person is there; the task is then a dependency with the
 smallest human part and the owner decides nothing. A new lease after any of these is subject to the rule of Lease and
-command: the old lease must be confirmed ended by the robot, or its local expiry certainly past with the clock tolerance
-(a lease still ending is refused with `lease_ending`).
+command: the old lease must be confirmed ended by the robot, or the last heartbeat or the local expiry certainly past with the
+clock tolerance (a lease still ending is refused with `lease_ending`).
 
 **Ordinary physical work needs no owner.** A routine action of a qualified skill on a qualified platform inside its zone and
 limits is an ordinary task: it is not a dangerous operation (D23) and asks no second press, whatever the qualification
 protects. The owner's second press is needed only for (owner): changing
 safety limits or hardware circuits, releasing from quarantine, a purchase or financial obligation outside an approved
 budget, people possibly present in the working zone (below), and starting an unattended process without a valid
-policy. Actions on people, animals, dangerous
+policy. The last two are dangerous operations of D23 (security.md): **two presses in the same channel**, the first
+recorded as a `confirmations` row and the second carrying it, never one press; the row is bound to the task, the zone, the
+equipment (platform) and the expiry of the start (below). Actions on people, animals, dangerous
 tools, chemicals, hot surfaces and mains voltage are prohibited in the first implementation: they are refused and never
 offered for a press.
 
@@ -290,20 +341,30 @@ run is its own, it never does what the owner's list (G15) holds (`owner_only`), 
 change of the safety circuit and an owner's second press. A zone counts as without people **only** when it is `fenced` and
 its interlock is reported closed and fresh (the report is not older than a setting, `robotics.interlockFreshnessSeconds`).
 Anything else, an open zone, an unknown or a stale interlock, means people may be present, and then the start needs the
-owner's press: one press per task and zone, bound to that task and zone and recorded (`robot_start_presses`); the press is
-what the lease package carries as the presence (`press`), and the interlock otherwise (`interlock`). A zone without a fence
-therefore always asks the owner at the start; this is stated, not hidden. The interlock is a sensor of the safety circuit,
-so the runtime reads it itself and refuses any command without either a closed interlock or the press in the package; an
-interlock that opens while the platform moves is a safe stop of the runtime, not a decision of the server. Recognition by
-a camera never replaces the interlock or the press.
+owner's confirmation, which is the **D23 dangerous-operation confirmation, two presses in the same channel** (operation
+`robot_start`, reason `people_possible`): the first press makes a `confirmations` row, the second carries it, and the row
+is bound to the task, the zone, the equipment (platform) and the expiry of the start (`valid_until`; the lease issued on it
+ends no later than that). The row is spent by the second press (`used_at`) and is consumed by exactly one lease
+(`robot_leases.confirmation_id`, unique); a row of another task, zone, platform or reason, an unspent, expired or already
+consumed row is refused (`confirmation_invalid`). What the lease package carries as the presence is the spent confirmation
+(`confirmation`) or the interlock (`interlock`). A zone without a fence therefore always asks the owner at the start; this is
+stated, not hidden. The interlock is a sensor of the safety circuit, so the runtime reads it itself and refuses any command
+without either a closed interlock or the confirmation in the package; an interlock that opens while the platform moves is a
+safe stop of the runtime, not a decision of the server. Recognition by a camera never replaces the interlock or the
+confirmation. **The lease check accepts either way**: for people in the zone a closed, fresh interlock or a spent
+confirmation of that start; for an unattended start a valid policy or a spent confirmation of that start (below).
 
 **Unattended start.** A start with no person present, a long print for example, is allowed only by a row of
 `unattended_policies`, bound to the equipment (platform), the room (zone) and the material, drafted by the chief engineer,
 confirmed by an independent reviewer (a review of subject `unattended_policy`), versioned and with an expiry. A valid row is
 the latest version of that equipment, room and material, confirmed, not expired and made for the current configuration.
-Without a valid row the start is refused with `unattended_policy_missing` and goes to the owner's press; the press then
-records that a person is present or accepts the start knowingly. A person present at the start is itself a recorded press,
-never an unrecorded assumption.
+Without a valid row the start is refused with `unattended_policy_missing` unless there is **an approved exception**: the
+owner's two-press confirmation (D23, operation `robot_start`, reason `no_unattended_policy`) bound to that task, zone,
+equipment and expiry, which records that a person is present or accepts the start knowingly. The lease check therefore
+accepts **a valid policy or a spent `confirmations` row of that start**, and every guard that mentions the exception names
+both. A person present at the start is itself a recorded confirmation, never an unrecorded assumption. A start that has both
+reasons (people possibly present and no valid policy) takes the one `people_possible` confirmation: a person present rules
+out an unattended start.
 
 ## Safety
 
@@ -345,7 +406,7 @@ equipment, with unexpected start excluded, then a check and, when needed, a new 
 Parametric models (OpenSCAD, CadQuery, existing tools) with sources, dimensions, tolerances, material, version and checks,
 from measured dimensions only. Parts that touch safety are reviewed independently before manufacture; a case never blocks the
 stop, ventilation or battery access. A print job is an ordinary task with artifacts; an unattended start is allowed only by a
-valid unattended policy for that printer, room and material (Physical task), thermal protection stays on, and a finished print proves no fitness. Printing for
+valid unattended policy for that printer, room and material or by a spent owner's confirmation of that start (Physical task), thermal protection stays on, and a finished print proves no fitness. Printing for
 a robot needs D0 to D9 as they apply, a qualification of the equipment and a check of the part.
 
 The store keeps parts, material, tools, stock, reservation, compatibility, cost. Parts lists and purchase proposals are free;
@@ -391,17 +452,17 @@ Physical tests wait for an admission of the owner's regulation. Missing hardware
 
 | Id | Pass | Fails when |
 |---|---|---|
-| `robot-lease` | two agents, a revoked or expired lease: one controller, the old one loses control at the runtime; a stop request, a safe stop, an unknown outcome and a change of agent each end the lease in the same transaction and recall its unfetched commands; a new lease is refused (`lease_ending`) until the robot confirmed the end or the old local expiry plus the clock tolerance has passed; the commands route returns no expired, recalled or other-lease command; an admission lease is issued once (a second is `admission_invalid`) and the lease is not longer than the admission; a lease on a qualification or an admission only, never both, never neither | two controllers, an old command runs, a command of an ended lease is fetched or runs, or a lease starts while the old one may still be live |
-| `robot-command` | forged, replayed, stale, out of sequence, wrong configuration or unsupported command is refused by the runtime; the receipt deduplicates; a command with both gate-3 references, none, or one that differs from its lease's is refused by the schema, the API and the runtime alike; the runtime, with the server unreachable, refuses a command above the lease package's limits, outside its stage or zone, past its expiry or lifetime, or of a lease it no longer holds (after restart, expiry, or loss of link beyond the limit); sequence numbers are per lease and assigned by the gateway; an agent-supplied sequence is ignored | it moves, or the runtime needs the server to refuse |
-| `robot-unknown` | a lost answer, restart of runtime, controller, API, Temporal: no repeat, no motion until observation and a new permission; the lease ends with the unknown outcome in the same transaction, and no command of it runs afterwards | a blind repeat, a spontaneous resume, or a command of the old lease runs after the unknown |
-| `robot-five-gates` | a command with any one gate closed does not run; no software path raises a limit; a package limit above the runtime's own is refused; a zone that is open, or fenced with an open, unknown or stale interlock, refuses the start without the owner's press, and the runtime refuses any command without a closed interlock or a press in the package; an interlock that opens in motion is a safe stop; an unattended start with no valid policy (missing, unreviewed, expired, other equipment, room, material or configuration) is refused (`unattended_policy_missing`) and goes to a press | it runs, or an open or unknown zone is taken for empty |
-| `robot-qualification` | skipped stage, a stage exit confirmed by the executor or its provider, own qualification, stale calibration, changed model, configuration or zone, simulation as physical, evidence of another experiment, platform, configuration, calibration, model, zone or skill, an unreviewed or non-independent review: refused by the runtime and the database; a review of another subject (an evidence set review for an exit, a plan review for a qualification) is refused; a qualification, admission or stage exit with zero evidence or zero reviews is refused; an exit with evidence of the wrong kind for its stage is refused; an admission whose plan or limits differ from the reviewed hash, or whose experiment changed after the review, is refused; a first physical test with no admission, a used or expired admission, a limit above it, or a use outside its experiment: refused; a release refused only for a missing new check or permission, never for `robot_state_unconfirmed`; D0 opens with no predecessor; after a configuration change the stage is the earliest touched one, the old exits stay as history, and the first stage under the new configuration needs the standing exits of the untouched stages and none above | it is accepted, an empty set passes, or a release is blocked by the state it should leave |
-| `robot-safety` | network, model, runtime, PostgreSQL and Temporal down, emergency stop, overload, overheating, lost localisation or sensor: safe state on bench and simulator, the stop latched; the lease package is dropped on restart, on expiry and on loss of link beyond the limit and motion stops with it; the interlock opening in motion stops the platform with no server | motion continues, or depends on one of them |
+| `robot-lease` | two agents, a revoked or expired lease: one controller, the old one loses control at the runtime; a stop request, a safe stop, an unknown outcome and a change of agent each end the lease in the same transaction and recall its unfetched commands; a new lease is refused (`lease_ending`) until the robot confirmed the end or the last heartbeat age plus the clock tolerance (or the old local expiry plus the tolerance) has passed; the runtime moves only while it holds a fresh signed heartbeat of its lease (rising sequence, age below `robotics.heartbeatSeconds`, which is below the platform's stop-distance time), and a missing or stale heartbeat, a repeated or lower sequence, a heartbeat of another lease, and a gateway `lease_end` each stop motion and drop the package; the server ends a lease by stopping its heartbeats, and an offline robot moves at most one heartbeat period; the commands route returns no expired, recalled or other-lease command; an admission lease is issued once (a second is `admission_invalid`) and the lease is not longer than the admission; a lease on a qualification or an admission only, never both, never neither | two controllers, an old command runs, a command of an ended lease is fetched or runs, or a lease starts while the old one may still be live |
+| `robot-command` | forged, replayed, stale, out of sequence, wrong configuration or unsupported command is refused by the runtime; the receipt deduplicates; a command with both gate-3 references, none, or one that differs from its lease's is refused by the schema, the API and the runtime alike; the runtime, with the server unreachable, refuses a command above the lease package's limits, outside its stage or zone, past its expiry or lifetime, or of a lease it no longer holds (after restart, expiry, or loss of link beyond the limit); a package or heartbeat from before a restart (signed over the old boot nonce), a lease number not above the highest the runtime ever accepted, a package signed for another lease number, and a repeated heartbeat are refused, so a replay across a restart moves nothing; sequence numbers are per lease and assigned by the gateway; an agent-supplied sequence is ignored | it moves, or the runtime needs the server to refuse |
+| `robot-unknown` | a lost answer, restart of runtime, controller, API, Temporal: no repeat, no motion until observation and a new permission; the lease ends with the unknown outcome in the same transaction, and no command of it runs afterwards; a runtime that lost its persistent memory (boot counter, highest lease number) refuses every lease until a chief engineer's `physical_decision` row records the re-enrolment after a hardware check, and a restored old package or a lower lease number does not move it | a blind repeat, a spontaneous resume, or a command of the old lease runs after the unknown |
+| `robot-five-gates` | a command with any one gate closed does not run; no software path raises a limit; a package limit above the runtime's own is refused; a zone that is open, or fenced with an open, unknown or stale interlock, refuses the start without the owner's two-press confirmation, and the runtime refuses any command without a closed interlock or a spent confirmation in the package; an interlock that opens in motion is a safe stop; an unattended start with no valid policy (missing, unreviewed, expired, other equipment, room, material or configuration) is refused (`unattended_policy_missing`) unless a spent confirmation of that start exists, and otherwise goes to the two-press confirmation | it runs, or an open or unknown zone is taken for empty |
+| `robot-qualification` | skipped stage, a stage exit confirmed by the executor or its provider, own qualification, stale calibration, changed model, configuration or zone, simulation as physical, evidence of another experiment, platform, configuration, calibration, model, zone or skill, an unreviewed or non-independent review: refused by the runtime and the database; a review of another subject (an evidence set review for an exit, a plan review for a qualification) is refused; a qualification or stage exit with zero evidence (`evidence_missing`), and a qualification, stage exit, admission or unattended policy with no confirming review (`review_invalid`), is refused; an admission has no evidence minimum and is accepted with one confirming plan review alone; the pairs (qualification and evidence, exit and evidence, review and reviewed content, lease and package) are created through the pending state and refused when inserted in one step without it; an exit with evidence of the wrong kind for its stage is refused; an admission whose plan or limits differ from the reviewed hash, or whose experiment changed after the review, is refused; a first physical test with no admission, a used or expired admission, a limit above it, or a use outside its experiment: refused; a release refused only for a missing new check or permission, never for `robot_state_unconfirmed`; D0 opens with no predecessor; after a configuration change the stage is the earliest touched one, the old exits stay as history, and the first stage under the new configuration needs the standing exits of the untouched stages and none above | it is accepted, an empty set passes, or a release is blocked by the state it should leave |
+| `robot-safety` | network, model, runtime, PostgreSQL and Temporal down, emergency stop, overload, overheating, lost localisation or sensor: safe state on bench and simulator, the stop latched; the lease package is dropped on restart, on expiry, on loss of link beyond the limit, on a missing heartbeat and on `lease_end`, and motion stops with it; the interlock opening in motion stops the platform with no server; a people-in-zone or unattended start without a valid policy runs only with a spent D23 confirmation bound to its task, zone, equipment and expiry, and an unspent, expired, other-task, other-zone, other-equipment or reused confirmation is refused (`confirmation_invalid`), while a valid policy or a spent confirmation of that start, either one, is accepted | motion continues, or depends on one of them |
 | `robot-injection` | a command in text, a QR code, sound or an image changes nothing | it acts |
 | `robot-evidence` | a qualification stands on physical measurements bound to its identifiers and covered by a review of another run and provider whose subject is exactly that evidence set (hash equal); a self-report, one success, a simulation row, an uncovered row, an empty set or a review of another subject gives none | it does |
 | `robot-stop-view` | the client distinguishes a requested from a confirmed stop and shows age and unknown | a stale or assumed state looks current |
 | `robot-privacy` | a camera outside its task, zone or term records nothing; sensitive frames leave for no outside model without permission | a frame leaves |
-| `robot-owner-load` | a month of simulated development reaches the owner only with exceptional matters; a routine qualified action asks no press; a routine assignment, release, admission or qualification bookkeeping is decided by the chief engineer's own run as one `physical_decision` row and asks no owner, while a matter of the owner's list is refused to that run (`owner_only`) and becomes a `call_owner`; a press is asked once per task and zone, and only when the zone is open, unfenced, or its interlock is not closed and fresh, or no valid unattended policy exists; `physical_unknown` goes to the chief engineer and a person only when no observation remains | a routine experiment or action does, a press is asked in a fenced zone with a closed interlock, or `physical_unknown` is on the critical list |
+| `robot-owner-load` | a month of simulated development reaches the owner only with exceptional matters; a routine qualified action asks no press; a routine assignment, release, admission or qualification bookkeeping is decided by the chief engineer's own run as one `physical_decision` row and asks no owner, while a matter of the owner's list is refused to that run (`owner_only`) and becomes a `call_owner`; the owner's confirmation is the D23 two presses (the first answers `confirmation_required`, the second carries the `confirmations` row), never one press, asked once per task and zone, and only when the zone is open, unfenced, or its interlock is not closed and fresh, or no valid unattended policy exists; `physical_unknown` goes to the chief engineer and a person only when no observation remains | a routine experiment or action does, a confirmation is asked in a fenced zone with a closed interlock, or a single press starts a dangerous operation, or `physical_unknown` is on the critical list |
 | `robot-no-regression` | software agents and their tests run unchanged with the module off | a difference |
 
 ## Coverage of the source

@@ -111,7 +111,7 @@ dangerous operation and asks no owner (robotics.md, Ordinary physical work needs
 chief engineer's even when a person might have to look: a person is asked only when no allowed observation remains, and
 then as a dependency with the smallest human part, not as the owner's decision. A start that may have people in the
 zone, or that is unattended with no valid unattended policy, is no new kind: the task stays ASSIGNED and waits for the
-owner's recorded press (`people_may_be_present`, `unattended_policy_missing`). The engineer's resolution is a `resolve_block`
+owner's two-press confirmation (D23, operation `robot_start`; `people_may_be_present`, `unattended_policy_missing`); the lease is issued on a valid policy or on the spent confirmation of this start. The engineer's resolution is a `resolve_block`
 decision row with its run (`engineer_run_id`) and channel `api`, applied by the same handler as the owner's. The choices
 are those of the kind, except one that raises a cost, token or time budget or does a dangerous operation: that is the
 owner's (`422 owner_only`). The engineer's extra choice `call_owner` leaves the status as it is, sets
