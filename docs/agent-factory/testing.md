@@ -152,8 +152,8 @@ as their gates pass). A new check is first shown failing on the broken code or a
 | `robot-lease-model` | model check, no hardware: the exhaustive search of robotics.md Table 1 (two leases, a delayed, duplicated, reordered or lost message, a restart with and without memory, bounded time) and the creation-order search of Table 2, passing on the rules of the tables and failing on each old rule named below | R0 on, rerun at every change of either table |
 | `robot-no-regression` | the whole existing suite and S1 to S6 run unchanged with the robotics module off and on; the robotics tables do not enter the counts of the earlier migrations | R0 on, every stage |
 
-**The model check `robot-lease-model`** is one standard-library Python file (no network) that searches every
-reachable state; it is a project check like the others, it runs in seconds to minutes on one core, and the spec depends
+**The model check `robot-lease-model`** (`models/robot-lease-model.py`) is one standard-library Python file (no network)
+that searches every reachable state; it is a project check like the others, it runs in seconds to minutes on one core, and the spec depends
 on its rules, not on where the file lives. Table 1 part: two leases, a robot with a monotonic clock and a boot nonce, the
 challenge, answer, package, command and report messages in a network that may lose, duplicate and reorder them, a restart
 with intact memory and with lost memory, quarantine and a stop request, and bounded discrete time (`H` = 2, `TOL` = 1,
