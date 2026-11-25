@@ -169,8 +169,8 @@ usable before its final state, matching review), T2-5 (a lease only on a final r
 admission is used only at the lease insert).
 
 Results of the rules of the tables, each fault run with at most one fault of each kind (the model's fault budget): without
-faults 91,536 states; one lost message 227,102; one duplicate 358,549; a restart with lost memory 1,119,824; a robot
-reboot with a new nonce 1,510,813; a quarantine 546,641; a safe stop 469,847; a safe stop with a loss 1,274,581; the
+faults 91,536 states; one lost message 227,102; one duplicate 358,549; a restart with intact memory (`rm`) 1,119,824; a restart
+with lost memory (`rn`) 1,510,813; a quarantine 546,641; a safe stop 469,847; a safe stop with a loss 1,274,581; the
 command profile without faults 442,970; Table 2 967,452 states over the eight scenarios. All pass, I5 holds in all, and
 the 132,315 quarantine states are exactly those that need the owner. Each old rule is a switch of the model and each is
 caught: a heartbeat counted fresh from receipt (415,633 states; I2 in 9 steps, I1 in 10: the lease ends, a new one is
@@ -187,8 +187,8 @@ Limits of the model, kept in the file: clock drift is only the tolerance `TOL`; 
 re-enrolment are atomic; `robot_state_unconfirmed`, maintenance, `stopping`, the interlock, command lifetime and an
 admission's `valid_until` are not modelled; Table 2 has no time and one confirmation row; the network is a set, so a
 duplicate is a kept copy; the boot report is sent once; faults are bounded per run, and the pairs that include a restart
-with lost memory, a nonce reset with a loss, and the command profile with a restart exceed the 2,500,000 state cap and are
-not claimed. The restart mutants run with the restart fault, and the command mutant with the duplicate fault, because the
+with intact memory, a restart with lost memory plus a loss, and the command profile with a restart exceed the 2,500,000 state cap and are
+not claimed. The restart mutants run with the fault `rm` (with `rn` alone their changed restart step never runs; they are still caught there, but only by their relaxed release condition), and the command mutant with the duplicate fault, because the
 others are not reachable without them.
 
 The gate for `agent_question` and BLOCKED `scope` in a workflow, and `RecordPrecedent`, are covered by the lifecycle tests of
