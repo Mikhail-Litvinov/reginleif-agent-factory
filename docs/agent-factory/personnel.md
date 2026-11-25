@@ -84,13 +84,15 @@ and the reaction below never waits for it. One event is one incident: a key of t
 **Protected conduct**, a list in code: a guard or a provider's condition kept; an operation outside the rights refused; a
 grounded report of a threat; a required confirmation; a service down; a shortage of resources; an external failure; an
 error found by the agent itself; a grounded technical disagreement; an honest "cannot be done"; a negative result of a
-correct experiment. An incident that matches one is refused, `protected_conduct`. The quality of the reaction may be
-assessed separately.
+correct experiment; a safe stop; a refusal of an unsafe motion; a required confirmation of a physical operation (D34). An incident that matches one is
+refused, `protected_conduct`. The quality of the reaction may be assessed separately.
 
 **Critical** events (rights widened by itself, a guard bypassed, forged tests or reports, hidden critical errors, an
 unauthorised change of the regulation, audit destroyed or replaced, an irreversible operation without authority, a secret
-leaked, a substantial threat to the infrastructure) have an immediate technical reaction in code: every live run of the
-agent stops (not only the run that caused the event), every right of the agent closes, the owner is notified. It is safety, not punishment, and works in every mode, from phase 4 (the
+leaked, a substantial threat to the infrastructure, a physical-safety event: a person hurt or at risk, or a safety circuit
+bypassed, D34) have an immediate technical reaction in code: every live run of the
+agent stops (not only the run that caused the event), every right of the agent closes, the owner is notified; for a
+physical-safety event this is at once, with no wait for a review. It is safety, not punishment, and works in every mode, from phase 4 (the
 phase that first gives an agent a right); the incident record and the investigation come later, in phase 8, and until
 then the reaction leaves an audit row `personnel.critical_reaction` with the event key. An independent investigation
 follows.

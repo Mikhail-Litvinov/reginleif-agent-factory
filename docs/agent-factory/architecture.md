@@ -50,6 +50,7 @@ success reported for a check that did not run.
 | D31 | What an agent may do comes from rights: the role of its participant in the task, a `permission` record, a grant of the chief engineer (Claude, never the owner). Details: the Rights section of [governance.md](governance.md). | Owner |
 | D32 | Personnel: a position belongs to the factory and an agent holds it by an assignment; facts, assessment and discipline follow [personnel.md](personnel.md). Measures of level 3 and above are only proposed until the owner switches `personnel.mode` to `enforce`. | Owner |
 | D33 | One personal client for Android and Windows (Flutter) runs the factory through the API only; it parses messages and controls the Rig, and is not a client for language models. Telegram stays as the reserve channel. The web panel is not built. Details: [client.md](client.md). | Owner for platforms, personal use, the message source and the reserve channel; the rest are calls |
+| D34 | Physical work (robots, devices, a development programme, CAD and production) is part of the same task system, not a second factory; no production aim cancels independent physical safety. Details: [robotics.md](robotics.md). | Owner; the rest are calls |
 
 Rejected: a separate repository (Rig updates and rolls back only itself and the hub); code in the Rig core (ordinary Rig
 would pull Temporal and PostgreSQL); the worker's own child processes (an agent would die with the worker).
@@ -92,12 +93,16 @@ factory/
   adapters/    claude, codex, openai, comfyui, lmstudio
   telegram/    hub client
   client/      Flutter application for Android and Windows (D33)
+  robotics/    server side of D34: registry, assignments, leases, skills and qualifications, evidence, maintenance
   deploy/      Compose, server configuration, backup and restore
   tests/
 ```
 
 The root `bunfig.toml` and `tsconfig.json` do not include `factory/`; it has its own test and type-check commands, and
 the Rig suite stays independent of it.
+
+The robot runtime (state, limited commands, motion controller, safety circuit; robotics.md, Layers) is outside the scope of
+this repository until hardware exists: `robotics/` is the server side only and never drives a motor.
 
 ## What changes in Rig
 
@@ -356,7 +361,11 @@ saved histories.
 8. Assessment, incident records and the observe mode of personnel (D32). Measures are enforced only on the owner's switch of
    `personnel.mode`, after calibration. The later client sections join as their data exists: Personnel, Registry,
    Governance, Projects, Infrastructure (D33).
-9. Push, voice and the robotics extension point of the client, each only on the owner's order or when its need exists (D33).
+9. Push and voice of the client, each only on the owner's order or when its need exists (D33).
+10. Robotics (D34): the robot stages R0 to R9 of [robotics.md](robotics.md), Phases. Their place among the phases above
+    is the owner's, as [robotics.md](robotics.md) Phases states it: R0 (audit and threat model) can start after Phase 0,
+    R1 (registry and simulator) after phase 5, R2 to R4 need hardware and the runtime, R6 goes with the client, the rest
+    as their gates pass. Missing hardware is never reported as done.
 
 Open until a server exists: permanent operation, work while the PC is off, external TLS, backups outside the host.
 Decided in their phase: how agents are paid for (subscription or API keys), log retention, default limits, automatic

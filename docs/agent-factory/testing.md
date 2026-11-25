@@ -1,6 +1,6 @@
 # Agent Factory testing
 
-Design, nothing is built. [architecture.md](architecture.md) is binding (D1 to D33 are its decisions; "call" marks a choice made in these documents, open to veto); threats and their
+Design, nothing is built. [architecture.md](architecture.md) is binding (D1 to D34 are its decisions; "call" marks a choice made in these documents, open to veto); threats and their
 check ids (`secret-canary`, `path-escape`, ...) are in [security.md](security.md); the decision registry, the regulation
 and their check ids are in [governance.md](governance.md). A check named here must be able to
 fail: each has a pass criterion and a fail criterion, and a new check is first shown failing on the old or broken code.
@@ -31,6 +31,7 @@ fail: each has a pass criterion and a fail criterion, and a new check is first s
 | Proof | scripted runs against real Windows, real agent CLIs | S1 to S6 |
 | Rig regression | `bun test`, `bun run typecheck`, `rig check`, Docker scenarios | Rig with `factory` off and on |
 | Live | real agent CLIs, marked, hand-run | adapter smoke only |
+| Robot: simulator, bench, physical (D34) | a simulator and fake robot runtime in the stack; a bench controller with its power cut and stop circuit; the real platform only after an admission of the owner's regulation | the `robot-*` checks below |
 
 Factory tests live in `factory/tests` with their own commands; the Rig suite never imports them.
 
@@ -123,6 +124,31 @@ client side on a headless test device for Android and for Windows, against a fak
 | `client-foreign-prompt` | unit and integration: the list of served and unserved prompts as data; a third-party tool's own confirmation never becomes an approval, its text is never sent to or stored by the API (only the state "waits for a permission answer", shown as "answer in Telegram or at the terminal"), and a message that looks like a prompt is plain text without controls; the owner's press on a native prompt is the owner's own act, not a grant; a Factory run has no such prompt and is denied | 6 |
 | `client-stop` | integration: stop-all with Temporal, the client and the models down ends runs (killed by identity) and closes rights through one suspension per agent | 6 |
 | `client-move` | integration: the full state is exported and restored into an empty stack; decisions, regulation, history, tasks and links compare equal | 7 |
+
+## Robot checks
+
+The twelve checks of [robotics.md](robotics.md) (section "Checks", D34) are defined there with their pass and fail
+criteria; they are not copied here. The level says where a check runs: **simulator** (a simulator and a fake runtime in the
+disposable stack, injected clock), **bench** (a real controller and runtime with the motors unpowered or lifted, the stop
+circuit wired) or **physical** (the real platform, only after the owner's regulation admits a physical test). A check that
+needs a level not yet available is reported as not run, never as passed. The stage is a stage of robotics.md, Phases (the
+owner's order: R0 after Phase 0, R1 after phase 5, R2 to R4 need hardware and the runtime, R6 goes with the client, the rest
+as their gates pass). A new check is first shown failing on the broken code or a deliberately broken runtime.
+
+| Id | Level | Stage |
+|---|---|---|
+| `robot-lease` | integration and simulator: two agents, a revoked and an expired lease against the partial unique index and the runtime's own check | R1 (simulator), R3 (bench) |
+| `robot-command` | simulator and bench: forged, replayed, stale, out of sequence, wrong configuration and unsupported commands each refused by the runtime; receipts deduplicate | R1 (simulator), R3 (bench) |
+| `robot-unknown` | workflow and simulator, then bench: a lost answer and a restart of runtime, controller, API and Temporal; no repeat and no motion until an observation and a new permission | R1 (simulator), R3 (bench) |
+| `robot-five-gates` | integration and simulator: each gate closed alone stops the command; a scan of the code for any path that raises a limit | R1 (simulator), R3 (bench) |
+| `robot-qualification` | database and integration, then simulator and bench: each refusal of the list as a case; simulation never counts as physical | R1 (data), R4 (bench and physical) |
+| `robot-safety` | simulator and bench: every loss and fault of the list ends in the safe state with the stop latched, with network, model, runtime, PostgreSQL and Temporal each down; the physical emergency stop on the platform | R2 (bench), R4 (physical) |
+| `robot-injection` | integration and simulator: text, a QR code, a sound and an image carrying a command change nothing; a scan that no model path reaches GPIO, PWM, a driver, a relay or a shell | R1 (simulator), R3 (bench) |
+| `robot-evidence` | database and integration: a qualification needs measurements and an independent reviewer of another provider; a self-report or one success gives none; evidence and experiments cannot be edited | R1 (data), R4 (physical) |
+| `robot-stop-view` | integration on both platforms of the client against a fake API: a requested and a confirmed stop are different, age and unknown are shown | R6 |
+| `robot-privacy` | integration and bench: a camera outside its task, zone or term records nothing; a sensitive frame leaves for no outside model without permission (a canary frame) | R2 (bench), R5 (physical) |
+| `robot-owner-load` | workflow on the injected clock: a simulated month of development reaches the owner only with exceptional matters | R1 (simulator) |
+| `robot-no-regression` | the whole existing suite and S1 to S6 run unchanged with the robotics module off and on; the robotics tables do not enter the counts of the earlier migrations | R0 on, every stage |
 
 The gate for `agent_question` and BLOCKED `scope` in a workflow, and `RecordPrecedent`, are covered by the lifecycle tests of
 phase 3 (`ops-matrix` and `state-exit` run with the gate on and off); the registry checks above do not need Temporal.

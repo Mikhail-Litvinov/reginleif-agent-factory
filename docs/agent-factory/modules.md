@@ -98,12 +98,16 @@ Migrations, in order (foreign keys decide the order; each table is in exactly on
 
 Count: 9+3+12+5+4+6+6+1+4+5 = 55 tables, each in exactly one file (see Verification).
 
+Migration 0011 (robotics, D34) is separate and not part of the 55: it adds the twelve robotics tables (working names in
+[database.md](database.md), Robotics tables) and is built only when robotics starts (Phase R1 below). The `migration-order`
+check then covers 0001-0011.
+
 Rig files changed: the command `rig factory registry` (the registry client above; the rest of the `rig factory` commands
 are phase 4) and the permission hook of the `factory` feature, which the owner installs at the PC (D31). Separate repository: the gate command option in raf-hub. Open check of this phase: whether the Codex sandbox
 reaches the loopback API; if not, the launcher does the search ([governance.md](governance.md) Access).
 
 Proving check: `ops-matrix`, `decision-recorded`, `decision-kinds`, `second-press`,
-`state-exit`, `api-authz-matrix`, `second-machine-refused`, `sql-param`, `migration-order` (applies every migration that exists, 0001-0010 when all have landed, to an empty database, and the
+`state-exit`, `api-authz-matrix`, `second-machine-refused`, `sql-param`, `migration-order` (applies every migration that exists, 0001-0010 when all have landed, and 0011 only once robotics has started, to an empty database, and the
 regeneration test shows the schema files and the generated migrations agree), the openapi regeneration test, and the
 registry checks of governance.md "Checks" (testing.md): `registry-first`, `registry-fail-open`, `registry-capture`,
 `registry-scope`, `registry-authority`, `permission-by-record`, `permission-second-press`, `role-rights` (the
@@ -283,14 +287,47 @@ punished (the protected list in code, `personnel-protected`); too little data gi
 weights never redistributed, `personnel-score`); the chief engineer assesses itself (an evaluator of another provider, no
 route to its own drafts, `personnel-chief`); a measure without evidence or by the accused (`personnel-decision`).
 
-## Phase 9: push, voice and the robotics point
+## Phase 9: push and voice
 
 Criterion: each item only on the owner's order or when its need exists ([client.md](client.md) Phases). Push through an
 external service starts only after the owner's order (until then Telegram and the open client deliver; critical notices
-stay unswitchable); voice recognition stays on the device or on the owner's machine; the robotics point is a worker kind
-`device` with capabilities and telemetry as events, nothing physical is built, and the emergency stop is a hardware
-circuit outside the client. Files: named when the order comes; migrations: none planned. Proving check: `client-no-secret`
-and `client-no-model` again with the new paths in place.
+stay unswitchable); voice recognition stays on the device or on the owner's machine. Files: named when the order comes;
+migrations: none planned. Proving check: `client-no-secret` and `client-no-model` again with the new paths in place.
+Robotics is no longer an extension point of this phase: it has its own stages R0-R9 (D34), below.
+
+## Robotics stages R0-R9 (D34)
+
+Design: [robotics.md](robotics.md). Physical work is part of the same task system; the server never drives a motor (three
+layers: server, compute, robot with runtime, controller and an independent safety circuit). Nothing is built in phase 0.
+The place of the stages is the owner's decision (robotics.md Phases): R0 (audit and threat model, documents and an
+inventory the owner helps with) can start after phase 0; R1 (registry and simulator) after phase 5, because it uses
+workers, reviews and rights; R2-R4 need hardware and the runtime; R6 goes with the client; the rest as their gates pass.
+The stages R0-R9 and the physical gates D0-D10 are independent of the calendar and of phases 1-9. Physical tests wait for an
+admission of the owner's regulation; missing hardware is never reported as done.
+
+| Path | Purpose | Depends on |
+|---|---|---|
+| `F/robotics/registry.ts` | Platforms, capabilities, configurations and calibrations as records; the abstraction over a platform (R1) | repo, `registry/service.ts` |
+| `F/robotics/lease.ts`, `F/robotics/command.ts` | One active controlling lease per platform; commands with `command_id`, lease number, expiry and preconditions; receipts deduplicate; a physical operation is never retried (R1, bench R3) | registry, rights |
+| `F/robotics/qualification.ts` | Qualification bound to platform, configuration, controller version, calibration, control software, agent model, zone and skill; the reviewer differs from the executor and is of another provider (D20) | registry, `personnel/` |
+| `F/robotics/gates.ts` | The five gates; gates 4 and 5 live on the robot, the server only reads their state | lease, command |
+| `F/workflows/physical-dev.ts` | `PhysicalDevelopmentWorkflow`, a separate workflow, id `physical-dev-<program id>`; the physical BLOCKED kinds and their handlers (temporal.md) | `workflows/task.ts` |
+| `F/api/handlers/robotics.ts` | The robotics routes and role `B` of api.md; a stop in the client is a request, the confirmed state comes from the robot | api, robotics |
+| `F/db/migrations/0011` | The twelve robotics tables; not in the 55 | built when robotics starts |
+| Robot runtime and controller (outside `F/`) | Runtime, controller and independent safety circuit; R2-R4, need hardware | the owner's hardware |
+
+Stages and checks: R0 audit and threat model, check `robot-no-regression` from here on, at every stage; R1 registry,
+simulator and data (`robot-lease`, `robot-command`, `robot-unknown`, `robot-five-gates`, `robot-injection`,
+`robot-qualification`, `robot-evidence`, `robot-owner-load`); R2 bench (`robot-safety`, `robot-privacy`); R3 bench commands
+(`robot-lease`, `robot-command`, `robot-unknown`, `robot-five-gates`, `robot-injection`); R4 physical (`robot-safety`,
+`robot-qualification`, `robot-evidence`); R5 (`robot-privacy`); R6 with the client (`robot-stop-view`); R7-R9 as their gates
+pass. The 12 check ids are those of testing.md Robot checks: `robot-lease`, `robot-command`, `robot-unknown`,
+`robot-five-gates`, `robot-qualification`, `robot-safety`, `robot-injection`, `robot-evidence`, `robot-stop-view`,
+`robot-privacy`, `robot-owner-load`, `robot-no-regression`.
+
+Migrations: 0011 (separate, not in the 55). Rig files: none. Risks: a software path that raises a limit or lets one gate
+stand in for another; a repeat of a physical command after a lost answer (never retried, `robot-unknown`); a stale state
+shown as current in the client (`robot-stop-view`); a camera recording outside its task (`robot-privacy`).
 
 ## Contradictions and holes between spec, Rig and tools
 
@@ -324,6 +361,11 @@ and `client-no-model` again with the new paths in place.
 | 26 | The panel of phase 6 vs the client (D33) | Settled by D33: the web panel is not built; the Windows build of the client takes its place; no cookies, no CSRF layer, the `client-*` checks cover the interface |
 | 27 | Registry polls (`POST /registry/polls`, `registry_inquiries` side) and the chat `polls` table share a word | Settled: different tables and routes; the chat table holds the poll of a conversation and its first answer, the registry captures a press only as before; database.md Client tables |
 | 28 | client.md says a device never gets an agent role, the API reads a device session as the owner for the client routes | Settled: the role name `device` (owner rights for the client routes only, no token management, no new device); the hub is a separate role `hub` |
+| 29 | D33 put robotics in phase 9 as an extension point (worker kind `device`); D34 makes it a design with its own stages | Settled by D34: phase 9 holds push and voice only; the stages R0-R9 and their place are the owner's decision (robotics.md Phases, Robotics stages above) |
+| 30 | robotics.md says "no new task state", yet the physical BLOCKED kinds are new enum values | Settled: the states of the task are unchanged; only the BLOCKED kind enum grows (four kinds, exits all to ASSIGNED); a revise in a physical BLOCKED stores the revision and the task stays BLOCKED (temporal.md) |
+| 31 | The twelve robotics tables vs the 55 totals | Settled: outside the 55, migration 0011, built when robotics starts; the totals and 0001-0010 stay as they are |
+| 32 | robotics.md Coverage of the source maps source sections 8 and 9 both to "Safety and Development programme" and 24 to "Safety and Devices" | Read as the rows below; the mapping is loose, no section is dropped |
+| 33 | robotics.md says D0 to D10, the first prototype names only D0, D1 | Not a conflict: the first prototype starts with D0 and D1; the rest follow as gates pass |
 
 ## Risks
 
@@ -382,7 +424,7 @@ reachable before a server exists.
 | 3.1 Remote server | `F/deploy/`, phases 1 to 3 (PostgreSQL, the embedder, then Temporal); permanent operation not reachable before a server exists |
 | 3.2 Local machine | `F/worker/`, `F/runner/`, Rig changes (phase 4) |
 | 3.3 Network model | `F/deploy/proxy/` (mTLS plus method allowlist, S6), phase 3; security.md |
-| 4.1 Tables | `F/db/schema/`, `F/db/migrations/` (0001-0010), database.md |
+| 4.1 Tables | `F/db/schema/`, `F/db/migrations/` (0001-0010; 0011, robotics, separate), database.md |
 | 4.2 Database requirements | triggers and constraints in the migrations; D24 for deletion; Contradictions row 1 |
 | 5.1 Main workflow | `F/workflows/task.ts`, phase 3 |
 | 5.2 Activities | `F/control/activities/`, `F/worker/activities/` |
@@ -412,7 +454,7 @@ reachable before a server exists.
 | Client, Approvals | `F/client/`, decisions with the second press; `client-approval`, `client-foreign-prompt` |
 | Client, Notifications | `F/client/`, `notifications`, `GET /events/stream`; push is phase 9 |
 | Client, Projects, Registry, Governance, Infrastructure, Personnel | `F/client/lib/screens/` (extended), phase 8, as their data exists |
-| Client, Robotics | extension point only (worker kind `device`), phase 9 |
+| Client, Robotics | `F/client/`, stage R6 (robotics.md Client); `robot-stop-view`; a stop is a request, the confirmed state comes from the robot |
 | Client, metrics | `F/api/metrics.ts`, phase 7, shown on the Dashboard |
 | Migration readiness | `F/ops/export.ts`, storage interface, restore check, phase 7; `client-move` |
 | 15.1 Command execution | `F/worker/git/`, `F/adapters/*`, security.md |
@@ -430,7 +472,8 @@ reachable before a server exists.
 | 20.2 Integration tests | `F/tests/replay/`, `F/tests/fakes/`, lifecycle runs |
 | 20.3 Failure tests (14) | `F/tests/failures/f01..f14`, phase 7 |
 | 20.4 Rig regression | the existing Rig suite after phase 1 and phase 4; Windows covered by recorded checks (row 12) |
-| 21 Phases 0-7 | this file (phase 8, personnel, is added by D32; phase 9, push, voice and the robotics point, by D33) |
+| 21 Phases 0-7 | this file (phase 8, personnel, is added by D32; phase 9, push and voice, by D33; the robotics stages R0-R9, by D34) |
+| Robotics source, sections 1-30 | robotics.md and the Robotics stages above. 1, 2 Intent and Principles in code; 3 Phases, First prototype; 4 Layers; 5, 7 Registry and abstraction; 6 Lease and command, Qualification; 8, 9, 30 Development programme, Safety; 10, 11, 14, 15 Safety; 12 Physical task; 13 Lease and command; 16 Diagnostics, charging, maintenance; 17, 18, 21 CAD, manufacturing, store, economics; 19 Knowledge; 20 Fleet; 22 database.md and api.md; 23 Client; 24 Safety, Devices and credentials; 25, 28, 29 Checks (the 12 `robot-*` ids in testing.md) and Phases; 26 First prototype; 27 Phases |
 | Owner's document on assessment and discipline | personnel.md; `F/personnel/` in phases 5 and 8; checks `personnel-facts`, `personnel-score`, `personnel-protected`, `personnel-decision`, `personnel-effect`, `personnel-chief`, `personnel-safety` (phase 4), `personnel-load` |
 | 22 Development organisation | one branch per phase, lanes named in each phase above |
 | 23 Documents | this folder; deployment and recovery in phase 1 (extended in 3), operations in phase 4, extended in 7; the roadmap is this file plus the order of work in architecture.md |
@@ -441,7 +484,7 @@ reachable before a server exists.
 ## Verification done
 
 - Tables: 55 tables in database.md (`outbox_events` and `execution_policies` counted once; 28 of the architecture plus the
-  six registry tables, the six rights tables, the nine personnel tables and the six client tables). Migrations 0001-0010 hold 9+3+12+5+4+6+6+1+4+5 = 55 tables. Each of the 54 first-column names plus
+  six registry tables, the six rights tables, the nine personnel tables and the six client tables). Migrations 0001-0010 hold 9+3+12+5+4+6+6+1+4+5 = 55 tables; the twelve robotics tables (D34) are in migration 0011, outside this count. Each of the 54 first-column names plus
   `task_transitions` appears in exactly one migration row, compared by name.
 - Phase deliverables: every spec phase 1-7 criterion has a module row and a proving check above. The Rig change list
   (feature, command, installer, autostart, codex-run.py) is fully assigned to phase 4, with the audit items (the five

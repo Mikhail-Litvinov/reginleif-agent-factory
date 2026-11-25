@@ -25,7 +25,7 @@ closed; a notification per routine event; rewriting a part that works.
 |---|---|---|
 | Dashboard, Chat, Tasks, Agents, Workers, Approvals, Notifications | MVP | |
 | Projects, Decision Registry, Governance, Infrastructure, Personnel | | by dependency, after the MVP |
-| Robotics | | extension point only (below) |
+| Robotics | | by the stages of [robotics.md](robotics.md), Phases; R6 goes with the client (below) |
 
 The API already serves the MVP: tasks, revisions, decisions with the second press, agents, workers, notifications, the
 registry, rights. New for it: conversations, devices and sessions, an event stream (below). The server-rendered web panel
@@ -135,9 +135,13 @@ S3 possible), a restore check, and an export of the full state that a test resto
 
 ## Robotics
 
-Only the extension point: a worker kind `device` with capabilities, telemetry as events, physical tasks as ordinary tasks
-with dangerous operations, hardware limits that no record or grant can change. The emergency stop never depends on a model,
-a cloud, Temporal or this client.
+The content is defined by [robotics.md](robotics.md) (D34) and arrives by its stages, in the client's own sections as the
+data exists: the robot registry and state, assignments and leases, skills and qualifications, diagnostics, maintenance, the
+stop view and evidence. Physical tasks are ordinary tasks with dangerous operations; hardware limits that no record or
+grant can change stay on the robot. The client sends no motor command and has no motor screen; a stop pressed in it is a
+request, and the screen shows the confirmed state reported by the robot, never the request (api.md, Robotics). The
+emergency stop never depends on a model, a cloud, Temporal or this client. The checks of this part are the `robot-*` ids
+of [testing.md](testing.md), not the `client-*` ones below.
 
 ## Interface
 
@@ -158,7 +162,8 @@ given. It is measured with its error and its sample; nobody splits tasks or hide
 | 6 | the hub's second output to the API (the owner's hub fork) before the client's chat |
 | 6 | the client MVP for Android and Windows: login, Dashboard, Chat, Tasks, Agents, Workers, Approvals, Notifications; it takes the place of the panel |
 | 8 | Personnel, Registry, Governance, Projects, Infrastructure sections, as their data exists |
-| 9 | push, voice, the robotics point, each on the owner's order or when its need exists |
+| 9 | push and voice, each on the owner's order or when its need exists |
+| with R6 | the robotics sections by the stages of [robotics.md](robotics.md), Phases (the owner's order: R6 goes with the client) |
 
 ## Checks
 

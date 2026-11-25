@@ -1,6 +1,6 @@
 # Agent Factory: Temporal design
 
-Binding: [architecture.md](architecture.md) (D1-D33, the state table, state ownership); the registry and the regulation:
+Binding: [architecture.md](architecture.md) (D1-D34, the state table, state ownership); the registry and the regulation:
 [governance.md](governance.md). Facts: [audit.md](audit.md).
 Spec sections: "spec 5.2". Numbers are named settings; defaults are set in the measuring phase. "Call" marks a design
 choice made here, open to veto. Table and column names are those of [database.md](database.md).
@@ -12,7 +12,11 @@ choice made here, open to veto. Table and column names are those of [database.md
 | `TaskWorkflow` | `control` | `task-<task uuid>` | The only writer of task progress. One per task, child tasks included (they are ordinary tasks, not Temporal child workflows). |
 | `MachineLivenessWorkflow` | `control` | `machine-liveness` | Started by a Temporal Schedule; reads last-seen times from the API, marks a silent machine OFFLINE, raises one notice per outage. |
 
-No other workflow exists. The outbox relay is a loop in the Control Worker process, not a workflow. Priorities, queues of
+| `PhysicalDevelopmentWorkflow` | `control` | `physical-dev-<program id>` | D34 (call: a separate workflow). The development programme of one platform or skill, beside `TaskWorkflow` with the same acceptance and audit: its life is months, so it is not one task. Stage, hypotheses, experiments, evidence, reviews and limits are rows in PostgreSQL ([database.md](database.md), Robotics tables); the workflow only sequences and waits. After a restart it resumes an unfinished experiment only after the real state of the robot is established, never from its history alone. Each physical task it makes is an ordinary task. Built when robotics starts; stages and gates in [robotics.md](robotics.md), Phases. |
+
+No other workflow exists. A physical task is an ordinary task: a child task of a `TaskWorkflow` like any other (same
+state table, same operation matrix), with dangerous operations and the physical BLOCKED kinds below; it has no workflow of
+its own. The outbox relay is a loop in the Control Worker process, not a workflow. Priorities, queues of
 tasks and concurrency limits (spec 17) are checked in `SelectAgent` against PostgreSQL, not by a second scheduler. The
 relay starts a workflow only after it reads the task's state in PostgreSQL: a task in a final state, or one whose
 workflow already ran, never starts again, so an expired history cannot restart it (architecture, state ownership).
@@ -86,6 +90,7 @@ infrastructure faults. A new agent attempt is a workflow loop bounded by `attemp
 | `usageLimit` | no; workflow sleeps until the reset time when known (`limit.maxWait`) | outcome `limit` | BLOCKED `usage_limit` |
 | `invalid` | no | `ValidationError`, `PermissionDenied`, `BudgetExceeded`, `BadInput` (non-retryable) | FAILED when no attempt can make the input valid (only in PLANNING, RUNNING and VERIFYING); otherwise BLOCKED `execution` (permission, budget) or `scope` |
 | `external` | only after checking the target by idempotency key | `PublishFailed` | BLOCKED `execution` |
+| `physical` (D34) | **never**: maximum attempts 1, no activity or workflow retry | a command to a robot, a stop request, a lease change | an unknown outcome is BLOCKED `physical_unknown`; a refusal by the runtime is a typed result, not an error |
 
 Every exhaustion into BLOCKED goes to the handler of its kind first (below): the chief engineer, unless the cause needs
 the owner.
@@ -98,8 +103,9 @@ settle a technical cause (D18).
 
 **Who handles a block first.** The task also carries `blockHandler` (`chief_engineer` or `owner`, `tasks.block_handler`),
 set with the kind by a rule in code when the task enters BLOCKED. `scope` and `agent_question` enter with `owner`. The
-other five kinds (`dependency`, `execution`, `usage_limit`, `check_environment`, `rework_limit`) enter with
-`chief_engineer`, unless the cause needs the owner: a requirement, the scope, a cost, a dangerous operation, or an
+other five kinds (`dependency`, `execution`, `usage_limit`, `check_environment`, `rework_limit`) and the physical kinds
+`safe_stop`, `physical_unknown` and `maintenance` enter with `chief_engineer`, and `quarantine` with `owner`, unless the
+cause needs the owner: a requirement, the scope, a cost, a dangerous operation, a person who must look at the robot, or an
 owner's own credential such as a login; then they enter with `owner`. The engineer's resolution is a `resolve_block`
 decision row with its run (`engineer_run_id`) and channel `api`, applied by the same handler as the owner's. The choices
 are those of the kind, except one that raises a cost, token or time budget or does a dangerous operation: that is the
@@ -115,7 +121,7 @@ agent's question go through the gate on the server before the owner is asked: th
 a verdict on every found record, and a second search by the real text. A failed check or a verdict
 `applies` sends the found records to the agent in a new run of the same attempt budget (`attempt.max`); when that budget
 is spent, the task goes to the owner with the question and the records. The other kinds (`dependency`, `execution`,
-`usage_limit`, `check_environment`, `rework_limit`) are not questions of an agent: they never pass the gate and go to the
+`usage_limit`, `check_environment`, `rework_limit` and the physical ones) are not questions of an agent: they never pass the gate and go to the
 chief engineer first (above). After `registry.gateTimeoutMs` the question passes (fail open), so a down
 registry never holds a task. The owner's answer to the poll is recorded as a registry record by the API from the press
 (not by the workflow), and the next run's inquiry finds it.
@@ -129,13 +135,22 @@ registry never holds a task. The owner's answer to the poll is recorded as a reg
 | `agent_question` | the agent asked the owner | owner | `answer` | ASSIGNED |
 | `check_environment` | a mandatory check could not run after repair (D26); no reviewer of another provider (D20) | chief engineer; the owner when the fix is an owner's credential or a cost | `retry` (after the cause is fixed, for example an agent enabled) | VERIFYING |
 | `rework_limit` | `rework.maxRounds` reached | chief engineer | `raise_limit` (the owner's if it raises a cost) | REWORK_REQUIRED |
+| `safe_stop` (D34) | a safe stop of the platform: a request, a safety event or a lost link | chief engineer | `release_after_check` (a new hardware check, then a new permission), `call_owner` | ASSIGNED, never a retry; the platform is `stopped` until checked |
+| `physical_unknown` (D34) | the real physical state is unknown after a command, a restart or a lost link | chief engineer; the owner when a person must look | `observe` (read the real state first), `call_owner` | ASSIGNED with a new action formed from the observed state; the platform leaves `unknown` only by observation |
+| `maintenance` (D34) | repair, calibration or a part change; power isolated | chief engineer (or the handler the record names) | `finish_maintenance` (calibration and check recorded) | ASSIGNED after a new check and a new permission |
+| `quarantine` (D34) | after an incident: the platform cannot take a lease | owner (the notice is on the critical list) | `release_quarantine` (owner only) | ASSIGNED after a new check and a new permission |
+
+**Physical kinds (D34, [robotics.md](robotics.md)).** They are new `blockKind` values, no new task state. Their exit is
+always ASSIGNED and never the old attempt: no physical operation is retried (below), and a lease, a qualification and the
+runtime's own checks are asked again. A platform in `reserved` (equipment busy, charging) does not block the task: it
+stays ASSIGNED with the reason and its queue position.
 
 A block whose handler is the chief engineer also has the choice `call_owner` for it (the status stays, the handler
 becomes the owner), and the owner may resolve any row. A block entered as `owner` (a cause that needs the owner) shows
 the owner as its handler from the start and the engineer has no choice on it.
 
 **A right request (G7, G13-G17, D31, governance.md "Rights").** A run that needs a right it does not have asks the check
-and waits for the answer without holding a machine; the task stays RUNNING or VERIFYING, and no new BLOCKED kind exists.
+and waits for the answer without holding a machine; the task stays RUNNING or VERIFYING, and the right request adds no BLOCKED kind.
 The wait for the chief engineer is a run of role `chief_engineer`, and its server steps are local activities (D28). Each
 step of the answer is its own immutable `right_answers` row (the chief engineer's, the code's, the owner's), so
 `call_owner` is not the final word: the owner's answer is recorded as a further row and the grant points at the row that
@@ -159,7 +174,7 @@ control component (`af_control`): the suspension, the grants ended `critical`, t
 with the same `StopExecution` and `NotifyUser` activities carrying out the outbox orders. It never waits for a workflow
 or the Temporal server. A measure or a replacement decided by the owner is an ordinary recorded decision read by
 `ReadDecision`. Nothing is added to the
-operation matrix and no new BLOCKED kind exists.
+operation matrix and personnel adds no BLOCKED kind.
 
 Cancel is open to every kind. The owner's feedback and revision are open too (matrix below).
 
@@ -209,6 +224,8 @@ Worker sets `enableNonLocalActivities: false` and workflow code reaches these st
 | `RecordPersonnelFact` | local; phase 5 | event key | S C | infra | none | none; a lost write is repeated by its key. Written by the server from a recorded run, check or review, never from an agent's report |
 | `RunAssessment` | local; phase 8 | agent + period | S C | infra | below the minimum facts (result "not enough data") | none; the result is stored, a repeat returns it |
 | `ApplyMeasureTerm` | local; phase 8 | measure id + term end | S C | infra | none | none; lifts a limit whose term ended, audited |
+| `ObservePhysicalState` | local, reads the robot's confirmed state through the API; D34, when robotics starts | robot id + request id | S C | infra | none | read only; the state it returns is the confirmed state, never a request |
+| `IssuePhysicalCommand` | local, through the API to the robot gateway; D34 | `command_id` (the runtime deduplicates by it) | S | physical | stale lease, configuration or qualification | no retry: an unknown outcome is BLOCKED `physical_unknown`; the next action is formed after `ObservePhysicalState` and gets a new `command_id` |
 | `RecordPrecedent` | local; writes through `RegistryService` | task id + run id + case (settled dispute, resolved block, answered question) | S C | infra | none | none; a lost write is repeated by its key. Writes only an agent `precedent` or a `draft`, never an active owner record |
 
 Heartbeat details of `MonitorExecution` and `RunGpuJob` are the log offset and the execution id, so a retry attaches. The
@@ -282,7 +299,13 @@ X; `flag` sets a flag, no move; `stop` stops a live run first (rule L). `*` see 
 PLANNING instead of ASSIGNED (call: a new run must never start beside a run that may be alive). `resolve_block` of kind
 `execution` is the handler's word that the old run ended (the chief engineer's, or the owner's after `call_owner`). The
 same holds in PAUSED entered from such a BLOCKED: cancel follows
-rule L, and `resume` returns to BLOCKED with the revision stored. `approve`, `reject`,
+rule L, and `resume` returns to BLOCKED with the revision stored. The same holds for the physical kinds `safe_stop`,
+`physical_unknown` and `quarantine` (D34): a revise is stored and the task stays BLOCKED, because the platform is not
+confirmed safe; the `resolve_block` of such a kind goes to PLANNING instead of ASSIGNED when a revision is stored, and in
+every case only after the platform's state is confirmed by the robot. **No retry of a physical operation:** `retry` is
+not a choice of any physical kind, and the activity class `physical` never repeats; after a stop, a restart or an unknown
+outcome the next step is `ObservePhysicalState`, then a new action with a new `command_id` under a new check of the
+lease and the qualification. `approve`, `reject`,
 `request_changes` and `resolve_block` carry the revision the deciding actor saw; `revise_requirements` carries the revision it
 builds on; a stale one is refused `revision_stale`. In ASSIGNED, if `StartAgentExecution` is already scheduled the intent
 may exist: pause is a `flag`, cancel is CANCELLING, and a started run takes the RUNNING cell. RUNNING with `stopping` set
@@ -304,7 +327,7 @@ started.
 | VERIFYING | AWAITING_APPROVAL, REWORK_REQUIRED, BLOCKED, FAILED | pause (held), revise | cancel |
 | AWAITING_APPROVAL | none; waits for the owner | approve, reject, request_changes, revise, pause | cancel |
 | REWORK_REQUIRED | ASSIGNED | pause, revise | cancel |
-| BLOCKED | `resolve_block` by the chief engineer when `blockHandler = chief_engineer`; otherwise waits for the owner | `resolve_block`, revise, pause | cancel |
+| BLOCKED | `resolve_block` by the chief engineer when `blockHandler = chief_engineer`; otherwise waits for the owner (`quarantine` and a `physical_unknown` that needs a person: the owner) | `resolve_block`, revise, pause | cancel |
 | PAUSED | none; waits for the owner | resume, revise | cancel |
 | CANCELLING | CANCELLED when the machine confirms | `force_close` | none needed |
 

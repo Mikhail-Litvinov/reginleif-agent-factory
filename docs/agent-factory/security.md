@@ -1,6 +1,6 @@
 # Agent Factory security
 
-Design, nothing is built. [architecture.md](architecture.md) is binding (D1 to D33 are its decisions; "call" marks a choice made in these documents, open to veto); the Decision Registry and
+Design, nothing is built. [architecture.md](architecture.md) is binding (D1 to D34 are its decisions; "call" marks a choice made in these documents, open to veto); the Decision Registry and
 the regulation are in [governance.md](governance.md); facts about Rig and
 the hub are in [audit.md](audit.md); tests are in [testing.md](testing.md). This file states weakness classes and defences,
 never steps to exploit the existing hub.
@@ -19,6 +19,7 @@ text only; never counted as a defence). A threat with only prompt text is listed
 | Release of the worker and runner | code that holds all credentials |
 | Policy files (profiles, allowlists, roles) | define what agents may do |
 | Backups, logs, artifacts | may hold code and leaked secrets |
+| Physical equipment, people and surroundings near a robot, hardware limits, qualifications (D34) | a wrong command can injure, destroy or leak what a camera saw |
 
 ## Actors and trust borders
 
@@ -29,6 +30,8 @@ text only; never counted as a defence). A threat with only prompt text is listed
 | Hub (on the PC, loopback, no authentication today) and the Telegram client (relay role) | carrying owner buttons if the fork adds per-client keys | any request reaching it from a local process (class: unauthenticated local service) |
 | Agents (Claude, Codex, OpenAI, tools) | producing a report | everything else: they read untrusted text, so their output is untrusted |
 | Client (Android, Windows; D33) | owner views and presses through the API, with a device session | any text or markup from tasks, logs, agent output or chat messages; a secret, a database or Temporal account |
+| Robot: runtime, controller, independent safety circuit (D34, [robotics.md](robotics.md)) | executing a command it has checked itself, and stopping on its own circuit | deciding a right, a qualification or a limit; being reachable from the internet; trusting a command for its form alone |
+| Compute for robots (a local or remote machine running a model or a simulator) | proposing an action | driving a motor, a pin, a driver or a relay; a shell on the robot |
 | Repositories | content | their hooks, configuration and instructions (class: repository-controlled execution) |
 | Generated files (rules, settings, policy written by Rig or Factory) | being regenerated | being edited by an agent in a task |
 | Temporal UI | diagnostics for the owner | being published |
@@ -84,6 +87,14 @@ There is no border between an agent and the Windows user who runs it (D4, D13).
 | T41 | A press is replayed, changed or sent from another place: an offline queue, a revoked device, another channel (D23, D33) | a press is bound by hash to operation and parameters in a `confirmations` row; a changed parameter, a used or expired one, a revoked device session or another channel is refused (`confirmation_invalid`); a dangerous press is never sent from an offline queue; every mutation carries an idempotency key; audit records device and session | code | `client-approval`, `client-retry`, `second-confirm` |
 | T42 | A third-party tool's own prompt (Claude Code, Codex) is shown or answered as a client approval, or a poll is answered twice (D33) | tool permission prompts are never displayed or answered in the client and the hub does not send their text to the API: the API records only that the session waits for a permission answer (a state, no text), and the client shows "answer in Telegram or at the terminal"; a message cannot become a prompt, text that merely looks like one is ordinary text without controls; no route answers one and the list of served and not served prompts is in code; only the hooks of governance.md Rights answer them; each poll kind has one arbiter: the hub for an ordinary session (the client's answer is a request row sent with an idempotency key and retried until the hub confirms; the API never decides it), the API for a Factory decision (`task_decisions`); the first answer the arbiter takes wins and a late one is refused (`poll_closed`) | code | `client-foreign-prompt`, `client-sessions`, `poll-arbiter` |
 | T43 | The factory cannot be stopped when the client, Temporal or a model is down, or a stop is forged (D33) | stop-all is served by the API and a button on the PC without the client, Temporal or a model; it ends runs and closes rights; it is a dangerous operation (two presses) and audited | code | `client-stop` |
+| T44 | A forged, replayed or late command reaches a robot (D34) | the robot's runtime checks authenticity, freshness, sequence and lease number of every command and keeps receipts, so a used `command_id` runs nothing; a device has its own identity, TLS and minimal rights and is revoked alone; a physical operation is never retried, the real state is observed first and a new action gets a new `command_id`; after a restart the robot stays safe until hardware is checked and a new permission exists | code on the robot and the API | `robot-command`, `robot-unknown` |
+| T45 | Two controllers drive one platform, or an old agent keeps control after a change (D34) | at most one active controlling lease per platform, enforced by a partial unique index and again by the runtime; a change of agent is safe stop, handover, revoked old lease, checked new assignment; watching needs no lease | code | `robot-lease` |
+| T46 | A model or an agent pushes a safety limit, a qualification or a gate (D34) | gates 4 and 5 (runtime limits, safety circuit) live on the robot and nobody makes them from software; a limit is changed only by the owner with two presses and a written record, never by a task, a token of an agent or a grant; a qualification is bound to platform, configuration, controller version, calibration, control software, agent model, zone and skill, and needs a reviewer other than the executor and of another provider (D20) | code on the robot and the API | `robot-five-gates`, `robot-qualification`, `robot-safety` |
+| T47 | Physical injection: text, a QR code, a sign, a sound or a screen seen by the robot becomes an instruction (D34) | what a sensor reads is data about the world, never a command, a right or a limit; the only way to an action is a task with a command checked by the five gates; the model has no path to GPIO, PWM, motor drivers, relays or a shell on the robot (the interfaces are RobotAdapter, SensorAdapter, ActuatorAdapter, SafetyStatusProvider only) | code | `robot-injection` |
+| T48 | A camera or microphone is used beyond the task, or its recording leaks (D34) | a sensor is read only under a lease for a task; recordings and video are kept in their own store, not in the application PostgreSQL, with a stated retention; no sensor of a robot is shown or kept for another purpose | code plus config | `robot-privacy` |
+| T49 | A robot controller is reachable from the internet, or a device identity is stolen (D34) | controllers are never served outside the private network, with no port published (a non-loopback bind stays the owner's two presses, D6, T25); a device certificate is revoked alone and at once; a robot in `quarantine` takes no lease | config plus code | `robot-lease`, `deploy-ports` |
+| T50 | A stale map, a stale state or a lost link is treated as the real world (D34) | the state shown and used is what the robot last confirmed, with its time; older than its freshness setting it is `unknown`; `unknown` blocks every physical task (`physical_unknown`) until a hardware check and a new permission; a stop pressed in the client is a request, the confirmed state comes from the robot | code | `robot-unknown`, `robot-stop-view` |
+| T51 | Evidence is edited or invented to qualify a skill, or the owner is drowned in physical approvals (D34) | experiments and evidence are immutable (a trigger and grants); a physical result is never counted from simulation; the load on the owner is measured | code | `robot-evidence`, `robot-owner-load`, `robot-no-regression` |
 
 ## Roles and rights
 
@@ -100,7 +111,8 @@ There is no border between an agent and the Windows user who runs it (D4, D13).
 | chief engineer (a fresh Claude run with no tools, never the owner, G14) | give a participant its role; answer a right request with `grant` (with a clause), `refuse` or `call_owner` | change what a role contains (the regulation does); grant without a clause, wider than the request, on the owner's list or for its own run (code refuses it, or calls the owner for the owner's list); decide anything else; hold a token |
 | evaluator (a fresh run of another provider, no tools, D32) | read the facts of the chief engineer and write its assessment | read drafts of, change or stop its own assessment; decide a measure; hold a token |
 | permission through the check and requests (the `registry` token) | ask the rights check and file a right request for its own run or session | give itself a right, read other runs' requests, activate a `permission` record or revoke a grant |
-| agent | nothing else against the API | holds a token of any role except `registry` |
+| robot (`B`, D34; not the client's device session) | report state, receipts, safety events and telemetry artifacts; fetch and acknowledge commands addressed to it | create or end a lease or an assignment, qualify a skill, change its own configuration or limits, read another robot's data, read a secret, start a task, call any route but its own report and command routes (api.md, Robotics); the independent stop and the hardware limits do not depend on it at all |
+| agent | nothing else against the API | holds a token of any role except `registry`; reach a robot route, a lease, a qualification, a limit or a motor |
 
 Temporal roles follow this table (T2). Temporal admin and UI access are held by the owner only and are not reachable
 from the PC.
@@ -183,6 +195,9 @@ the other to be reachable).
 | Create, rotate or revoke an API token or certificate | changes who may decide |
 | Add a device (a one-time code, made on the PC) | a new place that can press for the owner (D33) |
 | Stop-all | ends every run and closes the rights in force; two presses, though it needs neither the client nor Temporal (D33) |
+| Change a safety limit or a hardware circuit of a robot, or switch one off (D34) | the only guard against injury; two presses and a record, and the limit stays on the robot; no task, token or grant can do it |
+| Release a robot from `quarantine`, or from `stopped` or `unknown` after a safety event (D34) | a new hardware check and a new permission first; `quarantine` is the owner's, two presses |
+| Start an unattended print or another unattended physical process (D34) | nobody watches the result; allowed only by a verified policy for that printer and room, with thermal protection on; a finished print proves no fitness (robotics.md) |
 | Switch on a non-loopback bind of the API | reach from outside; refused until TLS is configured, then the owner's switch (D6, T25) |
 | Raise a budget or limit; change a profile to a wider one | spend and reach |
 | Change directory, repository or machine allowlists | scope |

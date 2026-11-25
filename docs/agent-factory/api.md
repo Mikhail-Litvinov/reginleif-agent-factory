@@ -8,7 +8,7 @@ section 12. Tables: [database.md](database.md).
 - JSON over HTTPS only. Times are RFC 3339 UTC. Ids are UUIDs. Unknown request fields are refused.
 - A task mutation is *recorded*, never *applied*: decision, event and outbox row commit in one PostgreSQL
   transaction; `delivery_state` shows the delivery to Temporal.
-- Roles: `owner`, `worker`, `relay`, `reader`, `registry`, `hub`; the client holds a device session, which the API reads as
+- Roles: `owner`, `worker`, `relay`, `reader`, `registry`, `hub`, `robot` (D34, column `B` of Robotics); the client holds a device session, which the API reads as
   the owner for the client routes (see Client). An agent process has no token except `registry`, bound to one
   session or run (see Registry). A Temporal outage never fails a mutation; a PostgreSQL outage does (`503`, nothing
   recorded). "Call" marks a design choice made here, open to veto.
@@ -291,6 +291,44 @@ incident or a measure, its own or another's. The critical reaction (stop the run
 not a route: it runs in the Control Worker from a list in code, in both modes, from phase 4, and writes the suspension and
 an audit row (Roles and rights, above); the incident record of phase 8 is attached to it.
 
+### Robotics (D34)
+
+Design: [robotics.md](robotics.md); tables: [database.md](database.md), Robotics tables. Paths are a call, open to veto;
+built when robotics starts, by the stages of robotics.md, Phases. Role `B` is a robot (below), never the client's device session `D`; that one reads the routes `O R` here and calls `stop`. **There is no
+endpoint that moves a motor, sets a limit of the hardware, or reaches a pin, a driver or a relay**, and none can be added
+through a setting: the server never drives a motor. A command reaches a robot only through the gateway as a command with
+a `command_id`, a lease number, a configuration version, an expiry and preconditions, and the robot's runtime decides
+whether to run it.
+
+| Method and path | Role | Body and answer |
+|---|---|---|
+| `GET /robots`, `GET /robots/{id}` | O R | The registry: platform, zone, configuration version, state (`reserved`, `stopped`, `unknown`, `maintenance`, `quarantine`, ...), the assignment and the lease. The state is what the robot last confirmed, with its time (`confirmed_at`); a state older than its freshness setting is shown as `unknown`. |
+| `POST /robots`, `PATCH /robots/{id}` | O | Register a platform or change its description. A change of hardware is a new configuration (below), never a patch. |
+| `GET /robots/{id}/configurations`, `POST /robots/{id}/configurations` | O R / O | The configuration history; a new version (parts, firmware, controller and runtime versions, calibration). A new version suspends the qualifications bound to the old one. |
+| `GET /robots/{id}/state` | O R | Confirmed state, link and power, last safety events, last receipts. Telemetry and video are not served here (they stay in their own store). |
+| `POST /robots/{id}/assignments`, `DELETE /robots/{id}/assignments/{aid}` | service, O | Assign a platform to an agent or end the assignment (reversible; a platform has no owner agent): the chief engineer's decision through the Control Worker's service account, the owner's when the owner makes it. A change of agent follows the handover below. |
+| `GET /robots/{id}/leases` | O R | Leases with number, agent, task, term, end and reason. |
+| `POST /robots/{id}/leases` | service | The Control Worker asks a controlling lease for a task after the five gates of robotics.md are checked on the server side (right, assignment, qualification). `409 lease_held` when another is active. Watching needs no lease. |
+| `DELETE /robots/{id}/leases/{number}` | service, O | End or revoke a lease. A change of agent is: safe stop, handover, revoke the old lease, check the new assignment. |
+| `POST /robots/{id}/stop` | O D service | A **request** to stop; 202 `recorded` with a request id. The answer is never "stopped": the stop is done by the robot's own circuit and runtime, and `GET /robots/{id}/state` shows `stopped` only after the robot confirmed it. The independent emergency stop does not depend on this route, Temporal, a model or the client. |
+| `POST /robots/{id}/release` | service, O | Leave `stopped`, `unknown` or `maintenance`: the chief engineer's decision through the service account, valid only after a new hardware check and a new permission. `quarantine` and a change of safety limits are the owner's (`422 owner_only` for the service) and take two presses; a release never raises a limit. |
+| `GET /robots/{id}/diagnostics`, `POST /robots/{id}/diagnostics` | O R / service | Read results; ask a diagnostic run (a task, with a lease). Diagnostics read, they do not move beyond the qualified skill. |
+| `GET /robot-skills`, `GET /robot-skills/{id}` | O R | Skills with state (`UNKNOWN` to `REVOKED`), their qualifications and evidence. |
+| `POST /robot-skills/{id}/qualifications` | service | A qualification, a suspension or a revocation: refused `422 qualification_invalid` unless every identifier is named (platform, configuration, controller version, calibration, control software, agent model, zone, skill), evidence is attached, and the reviewer differs from the executor and is of another provider (D20). Written by the Control Worker's service account after the code check, never by the agent that holds the skill. |
+| `GET /robots/{id}/maintenance`, `POST /robots/{id}/maintenance`, `GET /inventory` | O R / O, service | Repairs, calibrations, parts, inventory, purchases within a budget. A maintenance record puts the platform in `maintenance` (power isolated) until it is finished. |
+| `GET /robot-experiments`, `.../{id}`, `GET /robot-evidence/{id}` | O R | The development programme: hypotheses, experiments and evidence, simulation and physical kept apart. Never an edit route (immutable). |
+
+**The robot (role `B`).** A robot's runtime or gateway has its own identity (certificate, minimal rights, revocable at
+once; security.md). It may: report state, receipts and safety events, send telemetry artifacts, fetch commands addressed to
+it, and acknowledge them. It can never: create or end a lease or an assignment, qualify a skill, change its own
+configuration or limits record, read another robot's data, read a secret, start a task, or call any route above except its
+own report routes (`POST /robots/{id}/reports`, `GET /robots/{id}/commands`). Its reports are data about a robot, never a
+decision of the owner. A command or a report with a stale expiry, a repeated sequence number or a used `command_id` is
+refused (`command_stale`, `command_replayed`).
+
+**No agent token reaches these routes.** An agent holds only `registry`; a physical action is a task whose command the
+Control Worker sends after the gates, never an agent's own call.
+
 ### Worker and artifact endpoints
 
 The worker holds no database access: everything it leaves on the server goes here. All W endpoints check that the run
@@ -356,7 +394,7 @@ Every error is `application/problem+json` with `type`, `title`, `status`, `code`
 | `request_closed` | 409 | An answer to a request already answered, a restore of a suspension already restored, a result for a poll answer request already decided differently, or a request for a task or session that has ended. |
 | `request_not_owner` | 409 | An owner's answer to a right request that no `call_owner` row (of the chief engineer or of the code) handed to the owner. |
 | `block_handled` | 409 | A resolution of a block already resolved or already handed to the owner (an engineer's resolution after `call_owner`, or a second one). |
-| `owner_only` | 422 | A chief engineer run's `resolve-block` that raises a cost, token or time budget or does a dangerous operation. |
+| `owner_only` | 422 | A chief engineer run's `resolve-block` that raises a cost, token or time budget or does a dangerous operation, or its release of a robot from `quarantine` or change of a safety limit. |
 | `permission_by_poll` | 409 | A `permission` record made from a poll press; it needs the owner's button. |
 | `regulation_conflict`, `regulation_too_large` | 409, 422 | A version conflicts with an active clause or owner decision (the body lists them); a version over the clause-size setting. |
 | `rule_needs_regulation` | 409 | A single activation of a `rule` record. |
@@ -365,6 +403,10 @@ Every error is `application/problem+json` with `type`, `title`, `status`, `code`
 | `replacement_not_approved` | 409 | A replacement of the chief engineer without a procedure the owner approved; the owner decides. |
 | `calibration_missing` | 409 | `personnel.mode` to `enforce` before the criteria have enough facts. |
 | `registry_scope_required` | 422 | An inquiry or record without a project or `global` scope. |
+| `lease_held` | 409 | A controlling lease for a platform that already has an active one; the body names its number and holder. |
+| `qualification_invalid` | 422 | A qualification missing an identifier, evidence, or an independent reviewer of another provider; or one bound to another configuration, controller version, calibration, agent model, zone or skill than the request names. |
+| `robot_state_unconfirmed` | 409 | An operation that needs a confirmed state (a release, a lease, a command) while the platform is `unknown`, `stopped`, `maintenance` or `quarantine`, or its state is older than the freshness setting. |
+| `command_stale`, `command_replayed` | 409 | A command or report with an expired time, an old sequence number or lease number, or a `command_id` already used; nothing runs and an audit row is written. |
 | `contract_unsupported` | 426 | The worker's contract version is outside the supported range; the machine gets no work. |
 
 `revision_stale` and `task_closed` are not HTTP errors: they are refusal reasons of a recorded decision (see Answers of a mutation).
@@ -415,7 +457,8 @@ clients hold those, and the worker never passes them into the agent's environmen
 its own run; security.md T5); it can never activate, revoke or supersede a record, change a regulation version or a
 role, answer a request, grant or revoke, write or restore a suspension, post a poll result or a result of a poll answer
 request (those are the `hub` token's alone), record a press, or write or read a fact, profile draft, assessment, incident or
-measure ([personnel.md](personnel.md)). Even a worker token can never: record any decision, create, rotate or revoke a token,
+measure ([personnel.md](personnel.md)), and it reaches no robot route (Robotics): no stop, lease, assignment, command,
+qualification or limit. Even a worker token can never: record any decision, create, rotate or revoke a token,
 write a project, agent, policy or routing rule, create a task other than through `proposals` of a run it owns, change
 a confirmed artifact, read another machine's runs, or read the audit log. Acceptance needs an owner actor in code and
 in the database. Residual risk (D13): a same-user process could read the worker's credentials.

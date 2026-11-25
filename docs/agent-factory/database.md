@@ -1,6 +1,6 @@
 # Agent Factory database
 
-The application database of Agent Factory. Binding sources: [architecture.md](architecture.md) (decisions D1-D33, the
+The application database of Agent Factory. Binding sources: [architecture.md](architecture.md) (decisions D1-D34, the
 task states, state ownership), [governance.md](governance.md) (the Decision Registry and the regulation, whose tables
 are listed below) and the task specification section 4. Status: design. Types are PostgreSQL 16. The
 Temporal database is separate and not described here. "Call" marks a design choice made here, open to veto. The schema
@@ -39,7 +39,7 @@ is written in Drizzle (D27): the table definitions live in `factory/db/schema/` 
 | Table | Columns (type; key, constraint) |
 |---|---|
 | `projects` | `id`; `name text` unique among live rows; `description`; `repository_url`; `default_branch`; `workspace_policy` enum (`worktree`); `settings jsonb`; `priority int` (project priority, spec 17); `created_at`; `updated_at`; `archived_at`; `deleted_at`; `row_version` |
-| `tasks` | `id`; `project_id` FK; `parent_task_id` FK nullable; `title`; `description`; `priority int`; `status` enum (the 16 states of the architecture: CREATED, PLANNING, READY, WAITING_DEPENDENCIES, ASSIGNED, RUNNING, VERIFYING, AWAITING_APPROVAL, REWORK_REQUIRED, BLOCKED, ACCEPTED, REJECTED, CANCELLED, FAILED, PAUSED, CANCELLING); `current_revision int` (the applied revision, see Revisions); `created_by` (owner id); `assigned_agent_id` FK nullable (the current assignee; the history is in `task_runs`); `workflow_id text` unique, `check (workflow_id = 'task-' \|\| id)`; `workflow_run_id` nullable; `block_kind` enum nullable (`scope`, `dependency`, `execution`, `usage_limit`, `agent_question`, `check_environment`, `rework_limit`); `block_reason text`; `block_handler` enum nullable (`chief_engineer`, `owner`: who the block waits for, see Block handler); `resume_to` enum nullable (the state RESUME goes to); `pause_requested bool`; `stopping bool` (a run is being stopped for new requirements, shown as RUNNING); `end_unconfirmed bool` (set by a force-close: CANCELLED without the machine's confirmation); `origin_type` (a value of the list in Child tasks; `standing` marks the standing task), `origin_task_id`, `origin_run_id` (a foreign key to `task_runs`, added by an `alter table` in the migration that creates `task_runs`, see Creation order), `depth` (see Child tasks); `created_at`; `updated_at`; `completed_at` (set once, on a final state); `deleted_at`; `row_version`. Checks: `(status = 'BLOCKED') = (block_kind is not null)`, `(status = 'BLOCKED') = (block_handler is not null)`, `(status = 'PAUSED') = (resume_to is not null)`. A partial unique index on `project_id` where `origin_type = 'standing'` keeps one standing task per project (see Standing tasks). |
+| `tasks` | `id`; `project_id` FK; `parent_task_id` FK nullable; `title`; `description`; `priority int`; `status` enum (the 16 states of the architecture: CREATED, PLANNING, READY, WAITING_DEPENDENCIES, ASSIGNED, RUNNING, VERIFYING, AWAITING_APPROVAL, REWORK_REQUIRED, BLOCKED, ACCEPTED, REJECTED, CANCELLED, FAILED, PAUSED, CANCELLING); `current_revision int` (the applied revision, see Revisions); `created_by` (owner id); `assigned_agent_id` FK nullable (the current assignee; the history is in `task_runs`); `workflow_id text` unique, `check (workflow_id = 'task-' \|\| id)`; `workflow_run_id` nullable; `block_kind` enum nullable (`scope`, `dependency`, `execution`, `usage_limit`, `agent_question`, `check_environment`, `rework_limit`; with D34 also `safe_stop`, `physical_unknown`, `maintenance`, `quarantine`, added by the robotics migration, see Robotics tables); `block_reason text`; `block_handler` enum nullable (`chief_engineer`, `owner`: who the block waits for, see Block handler); `resume_to` enum nullable (the state RESUME goes to); `pause_requested bool`; `stopping bool` (a run is being stopped for new requirements, shown as RUNNING); `end_unconfirmed bool` (set by a force-close: CANCELLED without the machine's confirmation); `origin_type` (a value of the list in Child tasks; `standing` marks the standing task), `origin_task_id`, `origin_run_id` (a foreign key to `task_runs`, added by an `alter table` in the migration that creates `task_runs`, see Creation order), `depth` (see Child tasks); `created_at`; `updated_at`; `completed_at` (set once, on a final state); `deleted_at`; `row_version`. Checks: `(status = 'BLOCKED') = (block_kind is not null)`, `(status = 'BLOCKED') = (block_handler is not null)`, `(status = 'PAUSED') = (resume_to is not null)`. A partial unique index on `project_id` where `origin_type = 'standing'` keeps one standing task per project (see Standing tasks). |
 | `task_revisions` | `id`; `task_id` FK; `revision_number int`, unique with `task_id`, contiguous from 1; `requirements text`; `acceptance_criteria jsonb` (a list of items, each with a stable `id` that proposals cite); `constraints jsonb`; `change_reason text not null`; `author_id` (owner); `decision_id` FK nullable (the decision that asked for it); `created_at`. Immutable. |
 | `task_dependencies` | `task_id` FK; `depends_on_task_id` FK; `dependency_type` enum (`requires_accepted`); primary key `(task_id, depends_on_task_id)`; `check (task_id <> depends_on_task_id)`; both tasks in one project (a trigger refuses otherwise, architecture: dependencies stay inside one project); `created_at`; `removed_at` (removal is a mark, the row stays for history); `removed_by` |
 | `task_runs` | `id`; `task_id` FK; `attempt_number int`, unique with `task_id` (counts all roles, never reused); `role` enum (`planner`, `implementer`, `tester`, `reviewer`; `chief_engineer` is added by the rights migration, see Rights tables; it is not a task role of a `role_assignments` row; a `chief_engineer` run for an ordinary session belongs to the standing task, see Standing tasks); `agent_id` FK; `worker_id` FK nullable; `temporal_activity_id`; `execution_id uuid` unique (created on the server before the activity is scheduled); `session_id` nullable; `workspace_id` FK nullable; `task_revision int` (the revision the run works on); `policy_id` FK (the policy version in force); `regulation_version_id` FK nullable (the regulation version the run started with) and `regulation_seen_id` FK nullable (the last version delivered to it, G10); both null while the registry is off; the columns are added by the registry migration, see Creation order); `contract_version int`; `status` enum (`created`, `starting`, `running`, `finished`, `failed`, `died`, `unclear`, `cancelling`, `cancelled`); `gpu_wait_since timestamptz` nullable (set while the run waits for the GPU slot); `started_at`; `heartbeat_at`; `finished_at`; `exit_code`; `error_code`; `error_message`; `result_summary`; `usage_metrics jsonb`; `created_at`; `row_version` |
@@ -206,6 +206,47 @@ Creation order. Every key target exists in 0001 and 0002. In 0003: `devices` and
 `polls`, `poll_answer_requests` (they point to `projects`, `tasks`, `task_decisions`, `task_artifacts` only by id list, `device_sessions`), then
 `audit_log.device_session_id` and the `hub` role value by `alter`.
 
+## Robotics tables (D34)
+
+Design in [robotics.md](robotics.md); the names are working names and the columns are settled when the stage that needs
+them starts. Nothing here is built. The tables are **not counted** in the 55 above or in the table counts of any phase
+(call): they belong to the robotics migration, which exists only when robotics starts, so every total in this document and
+in [modules.md](modules.md) stays as it is. Existing rows (tasks, agents, workers, artifacts, confirmations, audit) are
+reused; high-rate telemetry and video stay out of this database, only aggregates and artifact links are kept.
+
+| Table | Why | Key columns, immutability |
+|---|---|---|
+| `robots` | The platform: identity, serial numbers, zone, state (`reserved`, `stopped`, `unknown`, `maintenance`, `quarantine`, ...), link and power state, current assignment | `id`; state and timestamps change, with `row_version`; the state is what the robot last confirmed, with its time |
+| `robot_configurations` | Hardware configuration history: parts, firmware, driver, runtime and controller versions, calibrations, confirmed limits | `id`; `robot_id` FK; `version`, unique with `robot_id`; immutable, a change is a new version |
+| `robot_assignments` | Which agent holds which platform, reversible | `id`; `robot_id`, `agent_id` FK; `ended_at`; only the end changes |
+| `robot_leases` | The controlling lease: a number, a term, a state | `id`; `robot_id` FK; `lease_number` unique with `robot_id`; `agent_id`; `task_id`; `expires_at`; `ended_at`; `revoked_at`; the identity and term are immutable |
+| `robot_skills` | A skill and its state (`UNKNOWN` to `REVOKED`, see robotics.md, Qualification) | `id`; `name`; `state`; `row_version`; each state change is a row of `robot_qualifications` |
+| `robot_qualifications` | A qualification or its suspension or revocation, bound to platform, hardware configuration, controller version, calibration, control software, agent model, zone and skill | `id`; all those identifiers, not null; `reviewer_run_id` and `executor_run_id` FK; `evidence_ids`; immutable |
+| `robot_experiments` | A hypothesis, its safe plan, limits set before the test, expected result, stop conditions | `id`; `robot_id`, `task_id`, stage; immutable once started; a result is an evidence row |
+| `robot_evidence` | Measurements, simulation or physical (counted apart), negative results included, with artifact links | `id`; `experiment_id` FK; `kind` (`simulation`, `bench`, `physical`); `artifact_id`; immutable |
+| `robot_commands` | A command as sent: command id, robot, task, lease number, configuration version, expiry, preconditions | `id`; `command_id` unique; immutable |
+| `robot_receipts` | The runtime's receipt of a command and its outcome | `id`; `command_id` FK unique; immutable |
+| `robot_safety_events` | A stop, a safety circuit or a nociception event, an injury risk, a quarantine | `id`; `robot_id`; level; `confirmed_at`; immutable |
+| `robot_maintenance` | A repair, a calibration, a part, an inventory item, a purchase within a budget | `id`; `robot_id` nullable; `kind`; `row_version` |
+
+Constraints (the design decisions; each has a check in [testing.md](testing.md)):
+- **One active controlling lease per platform:** a partial unique index on `robot_leases (robot_id)` where `ended_at is
+  null and revoked_at is null`. A second one cannot be inserted; the old one is ended first (`robot-lease`).
+- **One receipt per command id:** unique `robot_receipts (command_id)` and unique `robot_commands (command_id)`; a repeat is
+  deduplicated, never run twice (`robot-command`).
+- **Experiments and evidence are immutable:** `update` and `delete` on `robot_experiments` once started, on
+  `robot_evidence`, `robot_qualifications` and `robot_safety_events` are refused by a trigger and by the grants of the
+  application role (see Immutable rows and soft delete); a correction is a new row (`robot-evidence`).
+- **A qualification binds all its identifiers and has an independent reviewer:** every identifier is `not null`; a trigger
+  checks that `reviewer_run_id` differs from `executor_run_id` and that their providers differ (D20); a missing value is
+  refused (`robot-qualification`).
+
+Migration 0011 (a later number continuing 0010; the next after it follows from this document) adds these tables, the four
+`block_kind` values and the `task_transitions` rows for them. It is built only when robotics starts, so `migration-order`
+covers it only then. Creation order: `robots`, `robot_configurations`, `robot_assignments`, `robot_leases`, `robot_skills`,
+`robot_experiments`, `robot_evidence`, `robot_qualifications`, `robot_commands`, `robot_receipts`, `robot_safety_events`,
+`robot_maintenance`; every target (`agents`, `tasks`, `task_runs`, `task_artifacts`) exists since 0001 to 0004.
+
 ## Revisions and the version of a row
 
 - **Task row.** `tasks` has two writers: the API (create, archive, soft delete; title and description are never edited:
@@ -223,13 +264,16 @@ Creation order. Every key target exists in 0001 and 0002. In 0003: `devices` and
   `task_transitions(from_status, to_status)` loaded by a migration, which includes the cancel, pause and block rows of
   the architecture). A final state never leaves: FAILED too, work goes on in a new task (call, see Child tasks).
 - **BLOCKED exit** is decided by `block_kind` (architecture): `scope` to PLANNING; `dependency` to READY; `execution`,
-  `usage_limit`, `agent_question` to ASSIGNED; `check_environment` to VERIFYING; `rework_limit` to REWORK_REQUIRED. The
-  table `task_transitions` carries these rows and the trigger checks the pair of kind and target.
+  `usage_limit`, `agent_question` to ASSIGNED; `check_environment` to VERIFYING; `rework_limit` to REWORK_REQUIRED; the four physical kinds of D34 (`safe_stop`,
+  `physical_unknown`, `maintenance`, `quarantine`) to ASSIGNED, only after a new check and a new permission to move, never
+  as a retry of the physical operation (temporal.md, BLOCKED kinds). The table `task_transitions` carries these rows and
+  the trigger checks the pair of kind and target.
 - **Block handler.** `block_handler` says who the block waits for and is set with the kind when the task enters BLOCKED,
   by a rule in code, never by an agent: `scope` and `agent_question` enter with `owner`; the other five kinds
   (`dependency`, `execution`, `usage_limit`, `check_environment`, `rework_limit`) enter with `chief_engineer`, except when
   the cause itself needs the owner (a new requirement, scope or cost, a dangerous operation, an owner's own credential such
-  as a login), which enter with `owner`. The chief engineer resolves a block it handles by a `resolve_block` row of
+  as a login), which enter with `owner`. The physical kinds of D34 enter with `chief_engineer` (`safe_stop`,
+  `maintenance`; `physical_unknown` too, with `owner` when a person must look at the robot) and `quarantine` with `owner`. The chief engineer resolves a block it handles by a `resolve_block` row of
   `task_decisions` with `engineer_run_id` (the choices of the kind, except one that raises a cost, token or time budget or does a dangerous
   operation, which is the owner's), or calls the owner with the choice `call_owner`: that row
   leaves the status as it is, sets `block_handler = 'owner'` once, and raises the owner's notice. The owner may resolve
@@ -487,6 +531,7 @@ poll, takes the `pending` rows of `poll_answer_requests` and confirms or refuses
   | 0008 | `gpu_leases` to `workers.machine_id`, `task_runs.execution_id`, `tasks` | all exist since 0001, 0002, 0004; phase 5 |
   | 0009 | the personnel tables of phase 5 (`agent_versions`, `positions`, `position_assignments`, `personnel_facts`) point to `agents`, `tasks`, `task_runs`, `roles`; `task_runs.agent_version_id` points to `agent_versions` | all targets exist since 0001 to 0008; `agent_versions` first, then `positions`, `position_assignments`, `personnel_facts`; `task_runs.agent_version_id` is nullable (an expand step) and is added by an `alter table` after `agent_versions`; phase 5 |
   | 0010 | the personnel tables of phase 8 (`assessments`, `incidents`, `qualification_reviews`, `corrective_actions`, `measures`) point to the 0009 tables, `task_reviews`, `task_runs`; `position_assignments.measure_id` points to `measures`; `incidents.suspension_id` points to `rights_suspensions` (0007) | `assessments`, `incidents`, `qualification_reviews`, `corrective_actions`, `measures` in this order (a measure needs the other three); `position_assignments.measure_id` is nullable and added by an `alter table` after `measures`; `incidents.suspension_id` is an ordinary nullable key, the target exists since 0007; phase 8 |
+  | 0011 | the robotics tables (D34, 12 tables, not counted in the 55) point to `agents`, `tasks`, `task_runs`, `task_artifacts`; the four physical `block_kind` values and their `task_transitions` rows | all targets exist since 0001 to 0004; order as in Robotics tables; built when robotics starts (order of the stages: robotics.md, Phases) |
 
   A test applies the migrations one by one to an empty database and checks the schema after each file; it fails when a
   table of this document is in no file or in two (`migration-order`).

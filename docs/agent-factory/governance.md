@@ -168,6 +168,12 @@ The split is a list in the code by exact action and target; what it does not nam
 needs a clause, so with an empty regulation this part waits too. Cancel, reject, acceptance and force-close of a task stay
 the owner's.
 
+The owner's list (G15) also holds two items of D34 ([robotics.md](robotics.md), Permission to move): changing safety limits
+or hardware circuits (switching off a guard), and a purchase or any financial obligation outside an approved budget. The
+code answers a request for either `call_owner`, and no grant covers them. A qualification of a physical skill is a gate
+beside the rights, not a right: a role, record or grant gives the right of the task (the first of the five gates) and
+never a qualification, and a qualification gives no right.
+
 **The chief engineer.** A request names the run, the action, the target, the reason and what was tried. Code first:
 a right already held (role, record, live grant) is answered at once and makes no request row; a request for something on the owner's list (G15) is answered
 `call_owner` by the code itself (a `code` step, not final: it puts the request on the owner's list and the owner's step
