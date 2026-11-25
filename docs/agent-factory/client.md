@@ -141,8 +141,11 @@ stop view and evidence. Physical tasks are ordinary tasks; a routine action of a
 press (the list of cases that do is in robotics.md, Ordinary physical work; actions on people, animals, dangerous tools, chemicals, hot
 surfaces and mains voltage are refused, never offered for a press); hardware limits that no record or
 grant can change stay on the robot. The client sends no motor command and has no motor screen; a stop pressed in it is a
-request, and the screen shows the confirmed state reported by the robot, never the request (api.md, Robotics). The
-emergency stop never depends on a model, a cloud, Temporal or this client. The checks of this part are the `robot-*` ids
+request, and the screen shows the confirmed state reported by the robot, never the request (api.md, Robotics): after a
+stop request the platform shows `stopping` until the robot confirms `stopped`, and its lease is already ended. The
+client also shows the zones (`fenced` with the interlock and its last report, or `open`), and asks the owner's press
+(one per task and zone, bound to them) for a start that may have people in the zone or that is unattended without a
+valid unattended policy; changing a zone's access is a second press. The emergency stop never depends on a model, a cloud, Temporal or this client. The checks of this part are the `robot-*` ids
 of [testing.md](testing.md), not the `client-*` ones below.
 
 ## Interface

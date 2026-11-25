@@ -174,8 +174,8 @@ code answers a request for either `call_owner`, and no grant covers them. A qual
 beside the rights, not a right: a role, record or grant gives the right of the task (the first of the five gates) and
 never a qualification, and a qualification gives no right. An ordinary qualified physical action is
 not a dangerous operation (D23) and needs no owner; the owner's full list for physical work is in robotics.md, Ordinary
-physical work (limits and circuits, quarantine, purchases outside a budget, people in the zone, unattended start without a
-verified policy). Actions on people, animals, dangerous tools, chemicals, hot
+physical work (limits and circuits, quarantine, purchases outside a budget, people in the zone unless the zone is fenced
+with a closed, fresh interlock, unattended start without a valid unattended policy). Actions on people, animals, dangerous tools, chemicals, hot
 surfaces and mains voltage are prohibited in the first implementation and refused, never offered for a press.
 
 **The chief engineer.** A request names the run, the action, the target, the reason and what was tried. Code first:
@@ -189,6 +189,13 @@ wider than the request, and is not for the chief engineer's own run. Otherwise t
 records `refuse` with the failed check as its reason, and the owner is not called: a failed check is routine. While the
 regulation is empty (G6) the chief engineer can only refuse or call the owner.
 
+The chief engineer has a second kind of run, for a routine physical decision (D34: assign a platform, release one from
+`stopped`, `unknown` or `maintenance`, admit an experiment, qualify a skill, bookkeeping, or `call_owner`). It is no
+request: it is its own run, and its one decision row is a `task_decisions` row of kind `physical_decision` on the
+standing task or the physical task. The limits stay those of G15: the owner's list (limits and circuits, quarantine,
+purchases, people in the zone, unattended start without a valid policy) is answered `call_owner`, and no such run
+grants a right or a clause.
+
 **Every step is a row, none is final.** A request is an immutable `right_requests` row; each step that answers it is one
 immutable `right_answers` row (`step_kind` `code`, `chief_engineer` or `owner`). `call_owner`, from the chief engineer or from the code, is therefore
 not the end: the owner's answer is a further `owner` row, which may be a grant, and the grant refers to the row it
@@ -197,7 +204,8 @@ a grant of the owner after `call_owner` stands on the owner's own act and needs 
 confirmation instead (`owner_act_ref`). A request is closed by a final answer, never edited. The run of the chief engineer
 belongs to a task: that of the request, or, for an ordinary session that has none, the project's standing task
 (database.md, Standing tasks); the request row names it (`handling_task_id`), and a run on a task that no request
-names is refused.
+names is refused, except a run for a routine physical decision, whose decision row (`physical_decision`) names the
+task it stands on.
 
 A request waits without holding a machine. The chief engineer unavailable (limit, outage): the request waits until it is
 back. No routine message goes to the owner and nobody else answers (G13, G14); the client shows the waiting requests. The

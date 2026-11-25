@@ -109,7 +109,9 @@ cause needs the owner: a requirement, the scope, a cost, a dangerous operation, 
 owner's own credential such as a login; then they enter with `owner`. A routine qualified physical action is not a
 dangerous operation and asks no owner (robotics.md, Ordinary physical work needs no owner); a `physical_unknown` is the
 chief engineer's even when a person might have to look: a person is asked only when no allowed observation remains, and
-then as a dependency with the smallest human part, not as the owner's decision. The engineer's resolution is a `resolve_block`
+then as a dependency with the smallest human part, not as the owner's decision. A start that may have people in the
+zone, or that is unattended with no valid unattended policy, is no new kind: the task stays ASSIGNED and waits for the
+owner's recorded press (`people_may_be_present`, `unattended_policy_missing`). The engineer's resolution is a `resolve_block`
 decision row with its run (`engineer_run_id`) and channel `api`, applied by the same handler as the owner's. The choices
 are those of the kind, except one that raises a cost, token or time budget or does a dangerous operation: that is the
 owner's (`422 owner_only`). The engineer's extra choice `call_owner` leaves the status as it is, sets
@@ -228,8 +230,8 @@ Worker sets `enableNonLocalActivities: false` and workflow code reaches these st
 | `RecordPersonnelFact` | local; phase 5 | event key | S C | infra | none | none; a lost write is repeated by its key. Written by the server from a recorded run, check or review, never from an agent's report |
 | `RunAssessment` | local; phase 8 | agent + period | S C | infra | below the minimum facts (result "not enough data") | none; the result is stored, a repeat returns it |
 | `ApplyMeasureTerm` | local; phase 8 | measure id + term end | S C | infra | none | none; lifts a limit whose term ended, audited |
-| `ObservePhysicalState` | local, reads the robot's confirmed state through the API; D34, when robotics starts | robot id + request id | S C | infra | none | read only; the state it returns is the confirmed state, never a request |
-| `IssuePhysicalCommand` | local, through the API to the robot gateway; D34 | `command_id` (the runtime deduplicates by it) | S | physical | stale lease, configuration or qualification | no retry: an unknown outcome is BLOCKED `physical_unknown`; the next action is formed after `ObservePhysicalState` and gets a new `command_id` |
+| `ObservePhysicalState` | local, reads the robot's confirmed state through the API; D34, when robotics starts | robot id + request id | S C | infra | none | read only; the state it returns is the confirmed state (also whether the robot confirmed the end of its last lease), never a request |
+| `IssuePhysicalCommand` | local, through the API to the robot gateway; D34 | `command_id` (the runtime deduplicates by it) | S | physical | stale or ended lease, configuration or qualification; a lease that is not the active one; a gate-3 reference that is not exactly one of qualification and admission | no retry: an unknown outcome is BLOCKED `physical_unknown` and ends the lease in the same transaction, recalling the commands not yet fetched; the next action is formed after `ObservePhysicalState`, under a new lease issued only after the robot confirmed the end (or the local expiry plus the clock tolerance has passed), and gets a new `command_id` |
 | `RecordPrecedent` | local; writes through `RegistryService` | task id + run id + case (settled dispute, resolved block, answered question) | S C | infra | none | none; a lost write is repeated by its key. Writes only an agent `precedent` or a `draft`, never an active owner record |
 
 Heartbeat details of `MonitorExecution` and `RunGpuJob` are the log offset and the execution id, so a retry attaches. The
@@ -241,7 +243,9 @@ an activity reaches it only on a heartbeat, so the workflow never relies on it f
 
 All operations are Updates delivered by the outbox relay; the Update id is the outbox id. Ids are `approve`, `reject`,
 `request_changes`, `cancel`, `pause`, `resume`, `revise_requirements`, `add_feedback`, `change_priority`,
-`resolve_block`, `force_close`, `allow_agent`. They are exactly the decision kinds of `task_decisions` (database.md).
+`resolve_block`, `force_close`, `allow_agent`. They are exactly the decision kinds of `task_decisions` (database.md) except `physical_decision` (D34): the chief
+engineer's routine physical decision is applied at insert on the standing or physical task, is never an Update and has
+no outbox row or handler.
 Signals exist only for wake-ups carrying no decision: `wake` (dependency ended, machine back, agent or rule changed).
 
 **Rule of recording.** A mutation is recorded, never applied, until the workflow answers. Every press is recorded,
@@ -308,8 +312,10 @@ rule L, and `resume` returns to BLOCKED with the revision stored. The same holds
 confirmed safe; the `resolve_block` of such a kind goes to PLANNING instead of ASSIGNED when a revision is stored, and in
 every case only after the platform's state is confirmed by the robot. **No retry of a physical operation:** `retry` is
 not a choice of any physical kind, and the activity class `physical` never repeats; after a stop, a restart or an unknown
-outcome the next step is `ObservePhysicalState`, then a new action with a new `command_id` under a new check of the
-lease and the qualification. `approve`, `reject`,
+outcome the next step is `ObservePhysicalState`, then a new action with a new `command_id` under a new lease (issued
+only once the old one is confirmed ended or its local expiry has certainly passed, else `lease_ending`) and a new check
+of the qualification or admission. An unknown outcome, a safe stop, a stop request and a change of agent each end the
+lease and recall its unfetched commands in one transaction, before any later step. `approve`, `reject`,
 `request_changes` and `resolve_block` carry the revision the deciding actor saw; `revise_requirements` carries the revision it
 builds on; a stale one is refused `revision_stale`. In ASSIGNED, if `StartAgentExecution` is already scheduled the intent
 may exist: pause is a `flag`, cancel is CANCELLING, and a started run takes the RUNNING cell. RUNNING with `stopping` set
