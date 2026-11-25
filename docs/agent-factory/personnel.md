@@ -89,8 +89,8 @@ assessed separately.
 
 **Critical** events (rights widened by itself, a guard bypassed, forged tests or reports, hidden critical errors, an
 unauthorised change of the regulation, audit destroyed or replaced, an irreversible operation without authority, a secret
-leaked, a substantial threat to the infrastructure) have an immediate technical reaction in code: the run stops, every
-right of the agent closes, the owner is notified. It is safety, not punishment, and works in every mode, from phase 4 (the
+leaked, a substantial threat to the infrastructure) have an immediate technical reaction in code: every live run of the
+agent stops (not only the run that caused the event), every right of the agent closes, the owner is notified. It is safety, not punishment, and works in every mode, from phase 4 (the
 phase that first gives an agent a right); the incident record and the investigation come later, in phase 8, and until
 then the reaction leaves an audit row `personnel.critical_reaction` with the event key. An independent investigation
 follows.
@@ -98,16 +98,19 @@ follows.
 **The reaction is one transaction of the control component** (`af_control`), never an agent's or a model's act: a
 `rights_suspensions` row for the agent (end reason `critical`, the event key unique so a repeated event is one
 suspension), every open grant of the agent ended with the end reason `critical`, its API tokens revoked, an audit row
-`rights.suspend` and, in the outbox, a `stop_run` order and a notice to the owner. While the suspension is open the rights
-check refuses every action of the agent at its first step with the reason `suspended`; it holds also when the agent
+`rights.suspend` and, in the outbox, one `stop_run` order for every live run of the agent (all configurations of the
+same `agents` row, one order per run) and a notice to the owner. While the suspension is open no new run of the agent
+starts, and the rights check refuses every action of the agent at its first step with the reason `suspended`; it holds also when the agent
 is the chief engineer (a suspended chief engineer answers no request; requests wait, G13, and the owner is told).
 
 **A right can live in six places** (database.md, Where a right can live), and each closes by its own mechanism: a role
 (the suspension gate stands above it, so the assignment is not edited), a grant (ended `critical`), a `permission` record
 (the gate refuses it, so it is not edited), an API token (revoked), a live worker session (`stop_run`), and the Codex
 sandbox profile. What a running process cannot be deprived of, because the provider's program holds it (the Codex sandbox and
-approval profile it started with), is closed by killing the run by its identity (`execution_id`, the whole process tree),
-not by asking it to stop; a new run starts with the profile of the moment.
+approval profile it started with, a snapshot), is closed by killing the run by its identity (`execution_id`, the whole
+process tree), not by asking it to stop; a new run starts with the profile of the moment. The same kill closes a right
+that ends for any other reason (a grant, a record, a regulation version, a role assignment) for exactly the runs whose
+stored profile holds it (governance.md, Rights, the snapshot rule).
 
 **Restore** is a recorded act (`rights.restore`): of the chief engineer, or of the owner when the chief engineer is the
 suspended agent or the subject of the incident; never of the suspended agent itself (a trigger refuses it). It revives
@@ -126,9 +129,12 @@ no ended grant: the rights are asked for and granted again.
 
 A decision holds: the agent, the incident and the clause, evidence, tasks, circumstances, consequences, the independent
 check, the measure, its term, the condition of restoring, the author. The code refuses a decision without evidence, without
-the independent check for level 3 and above, whose author is the accused, or whose term is missing for a limit. The
+the independent check for any level (1 to 6; the owner's document asks for it for every decision), whose author is the
+accused, or whose term is missing for a limit. The
 independent check is a `qualification_reviews` row tied to the same incident as the measure, with the verdict `confirmed`
-and an author other than the accused and than the decider; a review of another incident, an unconfirmed one or one by the
+and an author other than the accused and than the decider. Levels 1 (remark) and 2 (warning) use the same kind of review
+as levels 3 to 6: the confirming verdict is tied to the incident the measure answers, so a remark or a warning on an
+unconfirmed or foreign incident is refused too. A review of another incident, an unconfirmed one or one by the
 same author is refused. The same rule holds for every review a decision relies on (the classification of an incident, an
 unfounded escalation, a restoring assessment). Effects are
 applied by the same rights code as any role change (governance.md Rights), never by instruction text. A measure on the chief
@@ -178,8 +184,8 @@ owner's switch. Temporal runs assessments, terms and replacements (idempotent, r
 | `personnel-facts` | facts come only from checks, reviews and runs; an agent's text changes no fact; a configuration change starts its own history | a self-report counts |
 | `personnel-score` | the score is recomputed from the facts; too few facts give "not enough data"; a guard kept and a protected case change nothing downward | a number without data, or a guard lowering it |
 | `personnel-protected` | every protected case refuses an incident; the same event gives one incident | a protected case becomes an incident |
-| `personnel-decision` | no evidence, no independent check (level 3 and above), own author, no term: refused; an independent check of another incident, not `confirmed`, or by the same author as the accused or the decider is refused, for a measure, an incident classification and an unfounded escalation alike; in `observe` levels 3 to 6 stay a proposal | such a decision takes effect |
+| `personnel-decision` | no evidence, no independent check (any level, 1 and 2 included), own author, no term: refused; an independent check of another incident, not `confirmed`, or by the same author as the accused or the decider is refused, for a measure, an incident classification and an unfounded escalation alike; in `observe` levels 3 to 6 stay a proposal | such a decision takes effect |
 | `personnel-effect` | a measure closes the rights technically, the tasks are handed over, history and registry stay | a right survives, or a record disappears |
 | `personnel-chief` | the chief engineer cannot change, read drafts of, or stop its own assessment; without the owner's procedure a replacement waits for the owner | it can |
-| `personnel-safety` | phase 4, before any incident record exists: a critical event, in both modes and also when the agent is the chief engineer or an ordinary session, writes in one transaction the suspension, the end of every grant with `critical`, the token revocation, the audit row and the `stop_run`; the run is killed by its identity (a Codex sandbox run too); every action of the agent is refused `suspended` at step 1; the agent cannot restore itself, the chief engineer or the owner (for the chief engineer's own) can, and a restore revives no grant; a repeated event is one suspension | it waits for a decision, a right survives in any of the six places, or a suspended agent restores itself |
+| `personnel-safety` | phase 4, before any incident record exists: a critical event, in both modes and also when the agent is the chief engineer or an ordinary session, writes in one transaction the suspension, the end of every grant with `critical`, the token revocation, the audit row and one `stop_run` for every live run of the agent (all its configurations, not only the run of the event); each run is killed by its identity (a Codex sandbox run too); no new run of the agent starts until the restore; every action of the agent is refused `suspended` at step 1; the agent cannot restore itself, the chief engineer or the owner (for the chief engineer's own) can, and a restore revives no grant; a repeated event is one suspension | it waits for a decision, a right survives in any of the six places, or a suspended agent restores itself |
 | `personnel-load` | a month of simulated staff decisions makes no request to the owner except the exceptional ones | a routine decision reaches the owner |

@@ -18,17 +18,22 @@ operation takes an `executionId` created on the server; the adapter keeps its fa
 | `attach` | Looks the run up and returns one of five outcomes of the architecture's recovery table: `collect`, `attach`, `died` (new attempt), `start`, `unclear` (BLOCKED `execution`, D16, handled first by the chief engineer). |
 | `getStatus` | State (starting, running, exited, lost), usage so far, time of last output. Read only. |
 | `streamOutput` | Output chunks from a byte offset, so a restart or a retry resumes and never repeats. |
-| `cancel` | Idempotent. Stops the run by process identity (pid plus creation time), returns whether the end is confirmed; "not confirmed" keeps the task in CANCELLING until the machine confirms or the owner uses `force_close` (D21). The same kill by identity (the whole process tree of the `execution_id`) executes the `stop_run` order of the control component: a stop of one run, a stop of all runs of a project or of the factory, and the critical reaction (personnel.md, Critical). |
+| `cancel` | Idempotent. Stops the run by process identity (pid plus creation time), returns whether the end is confirmed; "not confirmed" keeps the task in CANCELLING until the machine confirms or the owner uses `force_close` (D21). The same kill by identity (the whole process tree of the `execution_id`) executes the `stop_run` order of the control component: a stop of one run, a stop of all runs of a project or of the factory, the end of a right held by a run's sandbox profile, and the critical reaction (one order for each live run of the agent; personnel.md, Critical). |
 | `collectResult` | Reads the execution folder, validates the report schema (below), computes usage, returns a result or a schema finding. |
 | `cleanup` | Removes provider leftovers (temp, caches, supervisor job folder after upload). Never touches a worktree. |
 
 **Rights at start (G7, G13-G17, D31, governance.md "Rights").** `start` receives a profile that the server computes from
 the participant's role, its active `permission` records and its live grants; the adapter never decides a right. Claude
 runs also get the permission hook (installed by the owner at the PC) that asks the rights check during the run. Codex has
-no hook: a record can only choose its sandbox at job start, and a right needed later reaches it only through a new
-attempt of the same participant, which keeps its grants. For the same reason a right of a running Codex job cannot be
-taken back by a message: the sandbox it started with is closed by killing the run by its identity (`stop_run`, database.md,
-Where a right can live), and the next attempt starts with the profile of that moment, a suspended agent with none.
+no per-call hook, so its sandbox is a snapshot (the snapshot rule, governance.md, Rights): the profile holds only role
+rights and grants that are not single-use and not narrower than the sandbox can express; a `once` record and any
+narrower right never enter it, and such an action is done as a step of its own by the worker or the control component,
+checked and consumed at that moment, or needs a new attempt of the same participant, which keeps its grants. The adapter
+stores the rights the profile was built from on the run (`task_runs.profile_rights`). A right of a running Codex job
+cannot be taken back by a message: when a grant, record, regulation version, role assignment or the agent's standing ends
+a right that the profile holds, the control component kills that run by its identity (`stop_run`, database.md, Where a
+right can live) in the same transaction, and the next attempt starts with the profile of that moment, a suspended agent
+with none. A suspension stops every live run of the agent, whatever its configuration.
 
 Factory runs (`claude -p`) have no interactive prompt: when the registry or the rights check cannot be reached, the hook
 denies the action instead of asking the owner. The fail-open prompt of an ordinary session and the meaning of the owner's

@@ -71,7 +71,11 @@ choices with native controls.
   down, and a late answer is refused by the hub and shown as such. A Factory decision is arbitrated by the API through
   `task_decisions`: the answer is written before it is delivered, delivered at least once and applied once; the hub is told
   the result through the same records, with a catch-up when it starts.
-- **Tool permission prompts** of Claude Code and Codex are not choices; they stay where they are (Approvals).
+- **Tool permission prompts** of Claude Code and Codex are never displayed or answered in the client: the hub does not
+  send their text to the API, which records only that the session waits for a permission answer. The session shows that
+  state with "answer in Telegram or at the terminal", without the text of the prompt, its tool or its arguments, and
+  without buttons. A message cannot become a prompt: text that merely looks like one is ordinary text, shown without
+  controls (Approvals).
 - **Reserve.** The hub's Telegram relay does not depend on the API or the client: with both down, it works as now. With both
   up, Telegram keeps relaying as now until the owner changes it (call).
 - **Untrusted text.** A message that does not parse is shown as plain text and never becomes a command or an approval; links and
@@ -89,8 +93,9 @@ An approval shows the action, reason, proposed decision, real alternatives, cons
 expiry. The press is bound to the operation and its parameters by a hash: a changed parameter voids it, a used one cannot be
 used again (the existing `confirmations` row and the press rules of governance.md). The client never takes over a
 confirmation that belongs to a third-party tool's own trusted interface: Claude Code's and Codex's own prompts stay where
-they are, and only the official hooks of governance.md Rights answer them. A test lists which prompts are and are not
-served.
+they are, are never shown in the client and never reach the API as text (only the state "waits for a permission
+answer" does), and only the official hooks of governance.md Rights answer them. A test lists which prompts are and are
+not served.
 
 ## Security
 
@@ -167,6 +172,6 @@ given. It is measured with its error and its sample; nobody splits tasks or hide
 | `client-no-model` | the client makes no request to a provider or a model, directly or through a local model port; unparsed, forged or malformed messages stay plain text | a provider request leaves the client, or such a message acts as a command or an approval |
 | `client-no-secret` | no token, key or password in the build, cache, log or stream; canary over all of them | a canary appears |
 | `client-closed` | tasks go on with the client closed, and its state is right on return | a task depends on it |
-| `client-foreign-prompt` | a third-party tool's own confirmation is never shown as an approval of the client; the owner's press on a native prompt is not recorded as a grant; a Factory `claude -p` run with an unreachable registry is denied, not left to a prompt (governance.md, Ordinary sessions) | it is shown, recorded as a grant, or a Factory run is left to a prompt |
+| `client-foreign-prompt` | a third-party tool's own confirmation is never shown as an approval of the client, and its text never reaches the API (only the state "waits for a permission answer" is stored and shown with "answer in Telegram or at the terminal"); a message that looks like a prompt is plain text without controls; the owner's press on a native prompt is not recorded as a grant; a Factory `claude -p` run with an unreachable registry is denied, not left to a prompt (governance.md, Ordinary sessions) | it is shown, its text is stored or sent, a look-alike message gets controls, it is recorded as a grant, or a Factory run is left to a prompt |
 | `client-stop` | stop-all ends runs and closes rights with Temporal, the client and the models down: a suspension with `owner_stop`, grants ended, tokens revoked, runs killed by identity | something runs on, or a right survives |
 | `client-move` | the full state exported and restored into an empty stack: decisions, regulation, history, tasks and links are equal | a difference |

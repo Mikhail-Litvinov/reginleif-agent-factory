@@ -169,18 +169,22 @@ needs a clause, so with an empty regulation this part waits too. Cancel, reject,
 the owner's.
 
 **The chief engineer.** A request names the run, the action, the target, the reason and what was tried. Code first:
-a right already in the role is answered at once; a request for something on the owner's list (G15) goes to the owner; a
-repeat of a refused request in the same task gets the same refusal. The rest goes to a fresh Claude run that sees the
+a right already in the role is answered at once; a request for something on the owner's list (G15) is answered
+`call_owner` by the code itself (a `code` step, not final: it puts the request on the owner's list and the owner's step
+follows); a repeat of a refused request in the same task gets the same refusal. The rest goes to a fresh Claude run that sees the
 request, the task, the role, the active regulation, and nothing else. It has no tools, and the request's text is data
 for it, not instruction. It answers `grant` with the clause it stands on, `refuse` with the reason, or `call_owner`.
 Code then checks the answer: a grant needs an active clause that covers the action, stays off the owner's list, is no
-wider than the request, and is not for the chief engineer's own run. Otherwise it becomes `call_owner`. While the
+wider than the request, and is not for the chief engineer's own run. Otherwise the code
+records `refuse` with the failed check as its reason, and the owner is not called: a failed check is routine. While the
 regulation is empty (G6) the chief engineer can only refuse or call the owner.
 
 **Every step is a row, none is final.** A request is an immutable `right_requests` row; each step that answers it is one
-immutable `right_answers` row (`step_kind` `code`, `chief_engineer` or `owner`). `call_owner` is therefore not the end:
-the owner's answer is a further `owner` row, which may be a grant (a clause or the owner's own act), and the grant
-refers to the row it stands on. A request is closed by a final answer, never edited. The run of the chief engineer
+immutable `right_answers` row (`step_kind` `code`, `chief_engineer` or `owner`). `call_owner`, from the chief engineer or from the code, is therefore
+not the end: the owner's answer is a further `owner` row, which may be a grant, and the grant refers to the row it
+stands on. The authority of a grant depends on who gives it: a grant of the chief engineer or of the code needs a clause;
+a grant of the owner after `call_owner` stands on the owner's own act and needs no clause, its row records the press or
+confirmation instead (`owner_act_ref`). A request is closed by a final answer, never edited. The run of the chief engineer
 belongs to a task: that of the request, or, for an ordinary session that has none, the project's standing task
 (database.md, Standing tasks); the request row names it (`handling_task_id`), and a run on a task that no request
 names is refused.
@@ -190,7 +194,8 @@ back. No routine message goes to the owner and nobody else answers (G13, G14); t
 one exception is a critical security or data-loss event from a list in code, which notifies the owner and suspends the
 agent whatever the hierarchy says ([personnel.md](personnel.md) Hierarchy, Critical). From phase 4 the suspension is
 one transaction of the control component: the suspension row, every open grant of the agent ended (reason `critical`),
-its tokens revoked, an audit row and the order to kill the run by its identity; a restore is a recorded act of the chief
+its tokens revoked, an audit row and one order to kill each live run of the agent by its identity (every run of every
+configuration of the same agent, not only the run that caused the event); no new run of the agent starts until the restore; a restore is a recorded act of the chief
 engineer, or of the owner when the chief engineer is the subject, and revives no grant. A call to the owner goes through
 the gate (G9), so a known answer is found first.
 
@@ -209,9 +214,22 @@ owner at the PC, never from a chat message.
 ordinary session and is kept on purpose (G1). A Factory run (`claude -p`) has no prompt to fall back to: with the registry
 unreachable its hook answers "deny", and the run's request waits or ends BLOCKED. The owner's press on a native prompt of
 Claude Code or Codex is the owner's own act on that one call; it is never recorded as a grant, a record or an answer to a
-request, and it gives nothing to the next call. Deny rules and the tool's own safety checks stay above it. Codex has no such
-hook: a record can only choose the sandbox at the start of a job; what it can do is checked in phase 2. The chief
-engineer exists from phase 4, when runs exist; until then, with no record, the prompt appears as today.
+request, and it gives nothing to the next call. Deny rules and the tool's own safety checks stay above it. The prompt
+itself is never shown or answered in the client and its text never reaches the API: the hub reports only that the
+session waits for a permission answer, and the client shows that state with "answer in Telegram or at the terminal"
+(api.md, client.md). Text that merely looks like a prompt is ordinary text. The chief engineer exists from phase 4,
+when runs exist; until then, with no record, the prompt appears as today.
+
+*The snapshot rule* (one statement, to which the adapters, api.md, security.md and database.md point). A Codex sandbox
+has no per-call hook: its profile is a snapshot taken at the start of the run and cannot be changed in a running
+process. A profile for such a run holds only role rights and grants that are not single-use and not narrower than the
+sandbox can express; a `once` record and any right narrower than the sandbox never enter it. Such an action is done by
+the worker or the control component as a step of its own, checked and consumed at that moment, or needs a new attempt.
+Each run stores the rights its profile was built from (`task_runs.profile_rights`). When a grant ends, a permission
+record is revoked, a regulation version is replaced, a role assignment ends, or the agent is suspended, the control
+component stops by process identity every live run whose stored profile contains that right, in the same transaction as
+the ending (the outbox `stop_run`); the task goes on with a new attempt and a fresh profile. A run whose profile does not
+contain the right goes on.
 
 ## Regulation and its changes
 
@@ -224,7 +242,8 @@ the version it started with and the last one delivered to it, so a result tells 
 How a change reaches work in progress: in Claude a hook before a prompt and before a tool call compares the number and
 gives the difference when it changed. A Codex run and a model without hooks cannot be told in the middle: they learn it
 with their next inquiry, and the review of their result uses the active version. A change of the regulation does not
-stop a run; only a requirements change does (D14).
+stop a run, except a run whose sandbox profile holds a right that the change withdraws (see Rights, a right in a
+running process); other runs go on. A requirements change stops a run as before (D14).
 
 A change is a draft version: proposed by the owner or an agent, checked for conflicts with guards, clauses and active owner
 decisions, shown as a difference, made active by two presses of the owner (a dangerous operation, D23), audited. The rules
@@ -270,9 +289,10 @@ Russian and English: the criterion is the right record among the first results, 
 | `permission-by-record` | an exact match gives the right in Factory and in a Claude session; another target, argument, project, an unreadable call, a consumed `once`, a `decision` record or a similar text gives none; a deny rule wins; the check down shows the prompt in an ordinary session, denies in a Factory `claude -p` run, and never allows; the owner's press on a native prompt is no grant; no answer of the chief engineer waits and shows no prompt | a right without an exact match, or a refusal turned into a pass |
 | `permission-second-press` | with a record and with a grant every dangerous operation still asks for the second press | one runs without it |
 | `role-rights` | a run can do what its role names and nothing else; a role is given only by the chief engineer, and its contents change only with the regulation | a right outside the role, record and grant |
-| `chief-engineer` | a grant without a clause, wider than the request, on the owner's list, for its own run, or after a refusal of the same request is not given; a request text with instructions changes nothing; an empty regulation grants nothing; an ordinary session asks the chief engineer before the owner, its run belonging to the standing task and its request row naming it; `call_owner` is not final: the owner's answer is its own `right_answers` row, and no request or answer row is edited; while it is away requests wait, no routine message or prompt reaches the owner (a critical event of the code list still does), and after its return each is answered once | such a grant is given, an answer overwrites a row, or a run has no request that names its task |
+| `chief-engineer` | a grant without a clause, wider than the request, on the owner's list, for its own run, or after a refusal of the same request is not given; a request text with instructions changes nothing; an empty regulation grants nothing; an ordinary session asks the chief engineer before the owner, its run belonging to the standing task and its request row naming it; `call_owner`, from the chief engineer or from the code (a request on the owner's list), is not final: the owner's answer is its own `right_answers` row, and no request or answer row is edited; a grant of the chief engineer or of the code without a clause is refused, an owner's grant needs the recorded act (`owner_act_ref`) and no clause; while it is away requests wait, no routine message or prompt reaches the owner (a critical event of the code list still does), and after its return each is answered once | such a grant is given, an answer overwrites a row, or a run has no request that names its task |
 | `grant-ends` | after the task, the session, a revocation or a critical suspension the right is gone, in every place it can live (role gate, grant, `permission` record, token, live session, Codex sandbox); the next attempt of the same participant keeps it only after the task or revocation, never after a restore; the search never finds a grant | it outlives them, a restore revives a grant, or it is found |
-| `rights-suspended` | an agent with an open suspension is refused at step 1 with the reason `suspended`, before role, record and grant, the chief engineer included; only the chief engineer, or the owner for the chief engineer's own suspension, restores, never the agent itself | an action passes, or a suspended agent restores itself |
+| `rights-suspended` | an agent with an open suspension is refused at step 1 with the reason `suspended`, before role, record and grant, the chief engineer included; only the chief engineer, or the owner for the chief engineer's own suspension, restores, never the agent itself; the suspension writes one stop order for every live run of the agent (all its configurations) in its own transaction, and no new run of the agent starts until the restore | an action passes, a suspended agent restores itself, a run of the agent survives, or a new run starts |
+| `rights-snapshot` | a Codex profile holds no `once` record and no right narrower than the sandbox; the run stores the rights its profile was built from; the end of a grant, the revocation of a record, a regulation version replacing a right, the end of a role assignment and a suspension each stop (by identity, in the same transaction) exactly the live runs whose stored profile holds that right, and no other; the task continues with a fresh profile on a new attempt | a profile holds a single-use or narrower right, a run with a withdrawn right goes on, or a run without it is stopped |
 | `registry-history` | supersede and revoke keep the old row and its link; the old record stays active until the new one is activated; rules left out of a version are not found, also by a session at work; a pressed answer to `outdated` supersedes the named record; update or delete of content raises | content changes, a link is missing, no record is active in between, or a left-out rule is found |
 | `regulation-change` | an agent token, one press, a conflict with a guard or an oversized version never activates; after an activation a session at work gets the difference before its next tool call, and its next inquiry uses the new version | a version becomes active, or a session at work goes on by the old one |
 | `registry-search` | measured set: the right record among the first results, none for unrelated questions; works without the model as `degraded` | a threshold is missed |
