@@ -61,7 +61,7 @@ and the import work before Temporal exists ([governance.md](governance.md)).
 | `F/registry/import.ts` | One-time import of drafts from the Factory documents and the projects' memories (G4); source named, a second run adds nothing | service |
 | `F/api/handlers/registry.ts` | The registry and regulation routes of api.md; poll press capture on the relay role | service |
 | Rig command `rig factory registry find`, `verdict`, `propose`, `import` | The client of the `registry` role for Claude and Codex; the same command for both | api |
-| raf-hub (separate repository): gate command, poll registration, buttons | The hub's own question hook runs the gate command first, registers the poll, and only then sends it (hooks run in parallel, so a separate hook cannot go first); the generic button mechanism with per-client keys (D5) for confirming drafts; generic, off by default | gate command |
+| raf-hub (separate repository): gate command, poll registration, buttons | The hub's own question hook runs the gate command first, registers the poll (a failure or the timeout sends it unregistered), and only then sends it (hooks run in parallel, so a separate hook cannot go first); the generic button mechanism with per-client keys (D5) for confirming drafts; generic, off by default | gate command |
 | `F/telegram/client.ts`, `F/telegram/relay-role.ts` | The part the registry needs before Temporal: relay token, mapping of a Telegram user to an owner, polls, presses, the list of drafts with buttons; idempotent send, button ids, replay refusal | contracts, api |
 
 Boundary interfaces (names and purpose): `RouteTable` (contracts to api, client, openapi); `Repo` (api and control to
@@ -257,7 +257,7 @@ database. Parallel: one lane per scenario file.
 | Codex limit or orphan restarts | Reactive `limit` status, restart switch in codex-run.py | 4 | F10 |
 | A record is used as a permission | No guard reads the registry (G7); a draft in conflict with a guard is refused activation | 2 | `registry-not-a-guard`, `registry-authority` |
 | Registry down or slow stops work | The gate fails open after `registry.gateTimeoutMs` (G1); off by default | 2 | `registry-fail-open` |
-| Question skips the gate | The hub hook runs the gate first; a plain-text question at the end of a turn cannot be gated (stated limit) | 2, 3 | `registry-first` |
+| Question skips the gate | The hub hook runs the gate first; a plain-text question at the end of a turn and an interactive Codex session cannot be gated (stated limits) | 2, 3 | `registry-first` |
 | Forged press records a wrong decision | Press id and Telegram user checked as for a relay decision; the result is a project record, never a permission (D13) | 2 | `registry-capture` |
 | Text in a record steers an agent | Only owner-pressed fields bind; agent-written fields serve the search | 2 | `registry-capture`, `registry-authority` |
 | An agent changes the regulation | An agent's right ends at a draft; activation needs two presses; the rules on changing it are guards in code | 2 | `regulation-change` |

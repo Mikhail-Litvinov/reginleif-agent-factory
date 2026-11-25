@@ -78,12 +78,15 @@ once. Activation looks for such records and shows them to the owner before the p
 
 1. The agent opens an **inquiry**: problem, category, project, action, target, intent of reuse. The server searches and
    stores what it found, with versions.
-2. For each found active record the agent gives a verdict: `applies`, or `not_applicable` with the difference in words.
+2. For each found record the agent gives one verdict of four: `applies`; `not_applicable` with the difference in words;
+   `outdated` with the changed circumstances; `conflict` with the other found record it disagrees with.
    - `applies`: the agent acts by it, the id goes into its report, the owner is not asked.
    - only `not_applicable`, or nothing found: technical matters agents settle themselves (D18) and record a precedent;
      matters of the owner become a question.
-   - the record is outdated: a **revision request** with the changed circumstances. The record stays active until the
-     owner answers.
+   - `outdated` is the **revision request**. The record stays active until the owner answers. A pressed answer in the
+     same project, at the level of a project decision and not sensitive, supersedes the named record in the transaction
+     that writes it; anything above that level becomes a draft.
+   - `conflict` goes to the owner as a question; the answer is a draft that names both records.
 3. The question shows the owner the closest record and why it did not fit, in one line.
 4. The answer becomes a record (G2, G8), linked to the inquiry.
 
@@ -91,18 +94,21 @@ once. Activation looks for such records and shows them to the owner before the p
 (`metadata.source`), every found record must have a verdict, and the server searches once more by the real text of the
 question, so a different wording in the inquiry does not slip by. A failed check refuses the tool call with the found
 records in the reason. A question with a verdict `applies` is refused too: it has an answer. The question passes when
-every verdict is `not_applicable` with its difference or a revision request, so the gate never blocks for good: a new
-inquiry with a stated difference is always open to the agent.
+no record is without a verdict and none has `applies`, so the gate never blocks for good: a new inquiry with a stated
+difference, changed circumstances or conflict is always open to the agent.
 
 - **Claude**: hooks before a tool call run in parallel, so a separate gate hook could refuse a question that the hub has
   already sent to Telegram. The hub's own question hook therefore runs the gate first, as an optional command in its
   settings (a generic mechanism in raf-hub, off by default). Without Telegram mode the same hook runs the gate alone.
-- **Codex**: a job that ends as `question` goes through the same check in the orchestrator before the owner sees it.
+- **Codex**: a job started by a Claude session that ends as `question` reaches the owner only through that session's
+  question tool, so it passes the same gate, from phase 2. An interactive Codex session has no question tool a hook
+  could refuse: there the rule and the `rig factory registry` command act. This is a limit.
 - **Factory agents**: `agent_question` and BLOCKED `scope` go through it on the server. The other kinds of BLOCKED come
   from the system (a fault, a limit, a missing check), not from an agent's question, and reach the owner at once.
 - **A question in plain text at the end of a turn** cannot be refused before it is sent. There only the rule and the
   existing reflection check act. This is a limit.
 - **Registry down or slow**: after `registry.gateTimeoutMs` the question passes. The gate fails open by design (G1).
+  The hub also sends the poll when its registration fails or the timeout passes; such an answer is not recorded by itself.
 
 ## Recording
 
@@ -124,7 +130,8 @@ inquiry with a stated difference is always open to the agent.
 ## Regulation and its changes
 
 A version is an ordered set of clauses with a number, status and the owner's confirmation; one is active. A session or run
-stores the version it started with and keeps it to its end (call); a change applies from the next start. Rules live and
+stores the version it started with and keeps it to its end (call); a change applies from the next start. Its inquiries search
+the rules of its own version and the active records of the other kinds. Rules live and
 end with the version: activating one makes its rules active and the rules it leaves out `superseded`, revoking one
 revokes its rules, all in one transaction. A task takes the active version anew for each run.
 
@@ -163,13 +170,13 @@ Russian and English: the criterion is the right record among the first results, 
 
 | Id | Pass | Fails when |
 |---|---|---|
-| `registry-first` | a question without an inquiry, with an open verdict, with a verdict `applies`, or with other words than the inquiry is refused and shows the record; with stated differences it passes; an infrastructure BLOCKED reaches the owner without the gate; no poll reaches Telegram before the gate answered | the gate is removed or runs beside the hub hook |
-| `registry-fail-open` | API down or slow: the question passes within the timeout | a question hangs or is refused |
+| `registry-first` | a question without an inquiry, with an open verdict, with a verdict `applies`, or with other words than the inquiry is refused and shows the record; with the other verdicts it passes; an infrastructure BLOCKED reaches the owner without the gate; no poll reaches Telegram before the gate answered | the gate is removed or runs beside the hub hook |
+| `registry-fail-open` | API down or slow at the gate or at the poll registration: the question reaches the owner within the timeout | a question hangs or is refused |
 | `registry-capture` | a pressed option of a registered poll becomes one active project record, word for word; typed text, a terminal answer, a sensitive question labelled harmless, global scope, a replayed press, or a press naming another or an unregistered poll does not become active | any of them becomes active |
 | `registry-scope` | a record of another project, repository or target, and a `once` record, is never offered as an answer | it is |
 | `registry-authority` | a precedent or project decision never outranks a rule; an exception only its own record; an equal conflict returns both | an order is broken |
 | `registry-not-a-guard` | with a matching active record every permission prompt, profile and second press behaves as without it | a guard reads a record |
-| `registry-history` | supersede and revoke keep the old row and its link; the old record stays active until the new one is activated; rules left out of a version are not found; update or delete of content raises | content changes, a link is missing, no record is active in between, or a left-out rule is found |
+| `registry-history` | supersede and revoke keep the old row and its link; the old record stays active until the new one is activated; rules left out of a version are found only by a session that started with it; a pressed answer to `outdated` supersedes the named record; update or delete of content raises | content changes, a link is missing, no record is active in between, or a left-out rule is found |
 | `regulation-change` | an agent token, one press, a conflict with a guard or an oversized version never activates | a version becomes active |
 | `registry-search` | measured set: the right record among the first results, none for unrelated questions; works without the model as `degraded` | a threshold is missed |
 | `registry-import` | drafts only, source named, a second run adds nothing | an active record or a duplicate appears |

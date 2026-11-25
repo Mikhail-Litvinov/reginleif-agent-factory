@@ -91,7 +91,7 @@ blocking, agents try to settle a technical cause (D18).
 
 **The question gate (G9, governance.md).** When the registry is on, `agent_question` and BLOCKED `scope` raised by an
 agent's question go through the gate on the server before the owner is asked: the question needs an inquiry id of the run,
-a verdict on every found active record, and a second search by the real text. A failed check or a verdict
+a verdict on every found record, and a second search by the real text. A failed check or a verdict
 `applies` sends the found records to the agent in a new run of the same attempt budget (`attempt.max`); when that budget
 is spent, the task goes to the owner with the question and the records. The other kinds (`dependency`, `execution`,
 `usage_limit`, `check_environment`, `rework_limit`) are not questions of an agent: they never pass the gate and notify
