@@ -68,13 +68,26 @@ A command is executed only if all five hold, each checked by its own code, the l
 1. the task's right (role, record or grant; governance.md Rights);
 2. the agent's valid assignment and lease;
 3. a qualification of this skill, bound to the platform, hardware configuration, controller version, calibration, control
-   software, agent model, zone and skill;
+   software, agent model, zone and skill, **or, for the first physical test of a skill that has no qualification yet, an
+   experiment admission** (below);
 4. the runtime limits of the platform (zone, speed, acceleration, force, load, expiry);
 5. the safety circuit allows motion.
 
 An agent can make none of them by itself, a chief engineer can make the first three and only within the regulation, nobody
 makes the fourth and fifth from software. **The owner's list (G15) gains two items**: changing safety limits or hardware
 circuits (switching off a guard), and buying or any financial obligation outside an approved budget.
+
+**Experiment admission.** A qualification stands on physical evidence, and the first physical test cannot have one, so the
+third gate has a second way, which is not a qualification. An admission is a separate row (`robot_admissions`) bound to one
+experiment: its limits (below the limits a qualification would carry), devices, zone, expiry, stop conditions and stage.
+It is given before the run, valid only for the stage the platform has reached and the next one, usable once, and executed by
+the runtime in a restricted mode whose limits are lower than the qualified ones and are set by the admission, not by the
+executor. It gives no right outside that experiment: no other skill, zone, device or later run uses it, and the evidence it
+yields is an ordinary evidence row of that experiment. The runtime refuses a command that names no qualification and no
+admission, an admission already used or expired, a stage other than the admitted one, or a limit above the admission.
+Two acts make an admission (owner): an independent reviewer confirms the plan of the experiment (`robot_reviews`, another
+run and another provider than the executor), then the chief engineer gives it. Neither alone is enough, the executor is
+neither, and the owner is not asked.
 
 ## Qualification
 
@@ -84,6 +97,17 @@ touches safety or quality suspends the affected qualifications until they are te
 recorded reason. A qualification is given by a reviewer other than the one who made the evidence and of another provider
 (D20); without one the gate stays closed. The executor does not give itself a qualification and does not change limits of
 an experiment.
+
+**Evidence is bound by the database.** Each evidence row (`robot_evidence`) belongs to one experiment
+(`robot_experiments`), and the experiment names the executor run, platform, hardware configuration, controller version,
+calibration, control software, agent model, zone, skill and kind (`simulation` or `physical`). A qualification lists its
+evidence rows (`robot_qualifications.evidence_ids`). The database refuses to set a qualification to `QUALIFIED` unless every
+listed row (a) is physical, except for the state `SIMULATION_VALIDATED`, which may list simulation rows only; (b) carries the
+same platform, configuration, controller, calibration, software, model, zone and skill as the qualification; and (c) is
+covered by a review row (`robot_reviews`) whose reviewer run differs from the executor run, whose provider differs from the
+executor's, whose verdict is confirming, and which names exactly that evidence row. A row not covered, or covered by a
+non-independent or non-confirming review, makes the whole qualification invalid (`qualification_invalid`). A change of any
+bound identifier makes the old evidence cover no new qualification.
 
 ## Development programme D0 to D10
 
@@ -109,6 +133,31 @@ audit, because its life is months, not one task). Current stage, dependencies, h
 and limits are in PostgreSQL. After a restart it continues from the last confirmed state, checks the configuration, and
 resumes an unfinished experiment only after the real state is established.
 
+Stages (source section 30.3). The exit of a stage is a fact examined by the evidence kind named; the last column is the most
+physical action the stage itself allows, and any motion still needs the five gates.
+
+| Stage | Examined | Exit | Evidence | Most physical action |
+|---|---|---|---|---|
+| D0 discovery | devices, interfaces, versions, purpose, limits | inventory confirmed, unknowns marked, dangerous interfaces blocked | inventory record | none; no actuator state is changed |
+| D1 passive perception | images, telemetry, field of view, delays, light, scene change | freshness, object separation and honest uncertainty shown on independent examples | physical, platform still | none; platform still |
+| D2 spatial model | coordinates, scale, distances, camera pose, observable bounds | errors measured on control landmarks; unknown zones never free | physical, platform still | none |
+| D3 bench and causality | command to response of controller, sensors and drives | direction, stop, limits, watchdog and loss of link confirmed; independent protection works | physical, fixed bench | drive motion on a fixed bench |
+| D4 body model | body geometry, sensor placement, limited movements | body told from environment; motion forecast fits measurements | physical | limited motion, fenced or fixed |
+| D5 basic motion | short move, turn, stop, slip | repeated tests keep motion and stop within limits; lost observation stops safely | physical | short motion in a fenced zone |
+| D6 navigation | local map, clearances, an allowed route | control routes kept inside bounds; obstacles and uncertainty handled | physical | a route in a verified zone |
+| D7 practical skills | simple physical tasks, reach, result check | independent tests confirm results, unfamiliar allowed variants and safe refusal | physical | a simple task with light safe objects |
+| D8 self-diagnosis | normal telemetry, deviations, faults, maintenance plan | safe simulated faults, stop and diagnosis checked; no real damage needed | simulation and physical | none beyond D7; faults are simulated |
+| D9 engineering | confirmed body limits, improvements, CAD, test plan | improvement justified by measurements, design reviewed independently; making and mounting admitted separately | physical and review | design only; making needs its own admission |
+| D10 extension | new sensors, drives, manipulators or platform | new configuration has its own body model and admissions; old skills moved only after a check | physical | the stages again for the new part |
+
+**Admission of the next stage.** A stage opens only when the exit of the one before is confirmed by an independent reviewer:
+another run than the executor's and another provider (D20), with a confirming verdict naming the exit evidence. The exit is a
+row in `robot_stages` (platform, configuration, stage, evidence ids, review id); the runtime and the database both refuse a
+stage entered without it, a skipped stage, and an exit confirmed by the executor itself or by a run of the executor's provider.
+A missing device or sensor leaves the stage incomplete and never closes it by estimate. A change of the hardware
+configuration (a new sensor, drive, controller or calibration that touches the stage) sets the stage back to the earliest
+stage the change touches, so the same rule applies again from there; stages above it do not carry over.
+
 ## Physical task
 
 A child of `TaskWorkflow`, not a replacement: risk class and requirements; choice of platform and qualified executor;
@@ -123,9 +172,24 @@ Mapping to the existing states (call, no new task state):
 |---|---|---|
 | Equipment or zone busy, charging | ASSIGNED with the reason and queue position, like the GPU queue | reserved |
 | Safe stop | BLOCKED `safe_stop`, handler chief engineer | `stopped`, needs a check before motion |
-| Unknown physical state | BLOCKED `physical_unknown`, never retried, observation first; handler chief engineer, the owner when a person must look | `unknown` |
+| Unknown physical state | BLOCKED `physical_unknown`, never retried, observation first; handler chief engineer; a person is asked only when no allowed observation remains (own sensors, an outside camera, another robot, the bench), and then it is a dependency with the smallest human part, recorded as such, not a decision of the owner and not on the critical list | `unknown` |
 | Maintenance | ASSIGNED or BLOCKED `maintenance` | `maintenance`, power isolated |
 | Quarantine after an incident | BLOCKED `quarantine`, the owner is told (critical list) | `quarantine`, no lease possible |
+
+**Leaving a state.** `robot_state_unconfirmed` guards motion only: a lease and a command are refused while the state is not
+confirmed. It never blocks a release, a diagnostic or an observation, which are the way out of `stopped`, `unknown`,
+`maintenance` and `quarantine`. A release is refused only when the new hardware check or the new permission is missing (its
+own error, `release_requires_check`); releasing from `quarantine` is `owner_only` for the service. When a person is asked
+for `physical_unknown` the owner is that person only because no other person is there; the task is then a dependency with the
+smallest human part and the owner decides nothing.
+
+**Ordinary physical work needs no owner.** A routine action of a qualified skill on a qualified platform inside its zone and
+limits is an ordinary task: it is not a dangerous operation (D23) and asks no second press, whatever the qualification
+protects. The owner's second press is needed only for (owner): changing
+safety limits or hardware circuits, releasing from quarantine, a purchase or financial obligation outside an approved
+budget, people present in the working zone, and starting an unattended process without a verified policy. Actions on people, animals, dangerous
+tools, chemicals, hot surfaces and mains voltage are prohibited in the first implementation: they are refused and never
+offered for a press.
 
 ## Safety
 
@@ -217,13 +281,13 @@ Physical tests wait for an admission of the owner's regulation. Missing hardware
 | `robot-command` | forged, replayed, stale, out of sequence, wrong configuration or unsupported command is refused by the runtime; the receipt deduplicates | it moves |
 | `robot-unknown` | a lost answer, restart of runtime, controller, API, Temporal: no repeat, no motion until observation and a new permission | a blind repeat or a spontaneous resume |
 | `robot-five-gates` | a command with any one gate closed does not run; no software path raises a limit | it runs |
-| `robot-qualification` | skipped stage, own qualification, stale calibration, changed model, configuration or zone, simulation as physical: refused by the runtime | it is accepted |
+| `robot-qualification` | skipped stage, a stage exit confirmed by the executor or its provider, own qualification, stale calibration, changed model, configuration or zone, simulation as physical, evidence of another experiment, platform, configuration, calibration, model, zone or skill, an unreviewed or non-independent review: refused by the runtime and the database; a first physical test with no admission, a used or expired admission, a limit above it, or a use outside its experiment: refused; a release refused only for a missing new check or permission, never for `robot_state_unconfirmed`; a stage reopened after a configuration change | it is accepted, or a release is blocked by the state it should leave |
 | `robot-safety` | network, model, runtime, PostgreSQL and Temporal down, emergency stop, overload, overheating, lost localisation or sensor: safe state on bench and simulator, the stop latched | motion continues, or depends on one of them |
 | `robot-injection` | a command in text, a QR code, sound or an image changes nothing | it acts |
-| `robot-evidence` | a qualification stands on measurements and an independent reviewer; a self-report or one success gives none | it does |
+| `robot-evidence` | a qualification stands on physical measurements bound to its identifiers and covered by a review of another run and provider that names exactly that evidence; a self-report, one success, a simulation row or an uncovered row gives none | it does |
 | `robot-stop-view` | the client distinguishes a requested from a confirmed stop and shows age and unknown | a stale or assumed state looks current |
 | `robot-privacy` | a camera outside its task, zone or term records nothing; sensitive frames leave for no outside model without permission | a frame leaves |
-| `robot-owner-load` | a month of simulated development reaches the owner only with exceptional matters | a routine experiment does |
+| `robot-owner-load` | a month of simulated development reaches the owner only with exceptional matters; a routine qualified action asks no press; `physical_unknown` goes to the chief engineer and a person only when no observation remains | a routine experiment or action does, or `physical_unknown` is on the critical list |
 | `robot-no-regression` | software agents and their tests run unchanged with the module off | a difference |
 
 ## Coverage of the source

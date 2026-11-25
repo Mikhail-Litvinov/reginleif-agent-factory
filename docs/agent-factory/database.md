@@ -221,9 +221,12 @@ reused; high-rate telemetry and video stay out of this database, only aggregates
 | `robot_assignments` | Which agent holds which platform, reversible | `id`; `robot_id`, `agent_id` FK; `ended_at`; only the end changes |
 | `robot_leases` | The controlling lease: a number, a term, a state | `id`; `robot_id` FK; `lease_number` unique with `robot_id`; `agent_id`; `task_id`; `expires_at`; `ended_at`; `revoked_at`; the identity and term are immutable |
 | `robot_skills` | A skill and its state (`UNKNOWN` to `REVOKED`, see robotics.md, Qualification) | `id`; `name`; `state`; `row_version`; each state change is a row of `robot_qualifications` |
-| `robot_qualifications` | A qualification or its suspension or revocation, bound to platform, hardware configuration, controller version, calibration, control software, agent model, zone and skill | `id`; all those identifiers, not null; `reviewer_run_id` and `executor_run_id` FK; `evidence_ids`; immutable |
-| `robot_experiments` | A hypothesis, its safe plan, limits set before the test, expected result, stop conditions | `id`; `robot_id`, `task_id`, stage; immutable once started; a result is an evidence row |
-| `robot_evidence` | Measurements, simulation or physical (counted apart), negative results included, with artifact links | `id`; `experiment_id` FK; `kind` (`simulation`, `bench`, `physical`); `artifact_id`; immutable |
+| `robot_qualifications` | A qualification or its suspension or revocation, bound to platform, hardware configuration, controller version, calibration, control software, agent model, zone and skill | `id`; all those identifiers, not null; `reviewer_run_id` and `executor_run_id` FK; `evidence_ids` (the rows it stands on, a join table `robot_qualification_evidence (qualification_id, evidence_id)` in the migration); immutable |
+| `robot_experiments` | A hypothesis, its safe plan, limits set before the test, expected result, stop conditions; the identifiers its evidence will carry | `id`; `robot_id`, `task_id`, `stage`; `executor_run_id` FK; `kind` (`simulation`, `physical`); the platform, `configuration_id`, controller version, calibration, control software, agent model, zone and skill, all not null; immutable once started; a result is an evidence row |
+| `robot_evidence` | Measurements, simulation or physical (counted apart), negative results included, with artifact links; it takes every identifier and its kind from its experiment, never from the writer | `id`; `experiment_id` FK; `kind` equal to the experiment's; `artifact_id`; immutable |
+| `robot_reviews` | An independent review of one evidence row (a qualification and a stage exit both stand on reviewed evidence) | `id`; `evidence_id` FK; `reviewer_run_id` FK; `reviewer_provider`; `executor_run_id`; `verdict` (`confirmed`, `rejected`); immutable |
+| `robot_admissions` | The permission for one experiment when the skill has no qualification (robotics.md, Permission to move) | `id`; `experiment_id` FK unique; limits, devices, zone, `expires_at`, stop conditions, `stage`; `review_id` FK `robot_reviews` (the confirming review of this experiment's plan, by another run and provider than the executor); `granted_by_run_id` FK `task_runs` (the chief engineer's run, never the executor's or the reviewer's); `used_at`; the content is immutable, only `used_at` is set, once |
+| `robot_stages` | The exit of a stage of a platform in a configuration | `id`; `robot_id`, `configuration_id` FK; `stage` (D0 to D10); `evidence_ids` (every row covered by a confirming independent `robot_reviews` row, checked as for a qualification); unique `(robot_id, configuration_id, stage)`; immutable |
 | `robot_commands` | A command as sent: command id, robot, task, lease number, configuration version, expiry, preconditions | `id`; `command_id` unique; immutable |
 | `robot_receipts` | The runtime's receipt of a command and its outcome | `id`; `command_id` FK unique; immutable |
 | `robot_safety_events` | A stop, a safety circuit or a nociception event, an injury risk, a quarantine | `id`; `robot_id`; level; `confirmed_at`; immutable |
@@ -240,12 +243,32 @@ Constraints (the design decisions; each has a check in [testing.md](testing.md))
 - **A qualification binds all its identifiers and has an independent reviewer:** every identifier is `not null`; a trigger
   checks that `reviewer_run_id` differs from `executor_run_id` and that their providers differ (D20); a missing value is
   refused (`robot-qualification`).
+- **A qualification is bound to its evidence by the database:** a trigger on the insert of a `QUALIFIED` row (and of every
+  row of `robot_qualification_evidence`) requires, for each listed evidence row, (a) the kind of its experiment is
+  `physical` (only a `SIMULATION_VALIDATED` row may list `simulation`), (b) the experiment's platform, configuration,
+  controller, calibration, software, model, zone and skill equal the qualification's, and (c) a `robot_reviews` row with
+  verdict `confirmed` names exactly that evidence row, whose reviewer run differs from the experiment's executor run and
+  whose provider differs from the executor's. Any failure refuses the insert (`qualification_invalid`; `robot-qualification`,
+  `robot-evidence`). The same one rule as "One rule for every review a decision relies on" applies; the robotics review
+  table is used so that this migration does not depend on 0010's `qualification_reviews`.
+- **An admission is bound to one experiment and is used once:** `robot_admissions.experiment_id` is unique; a trigger
+  refuses a command row whose `admission_id` is expired, already used, of another experiment, of a stage other than the
+  stage reached or the next, or whose limits exceed the admission's; setting `used_at` twice is refused. An admission gives
+  no qualification and no right outside its experiment, and a skill's state is not changed by it (`robot-qualification`).
+- **A stage opens only on a confirmed exit:** a trigger refuses an experiment of stage N, or a `robot_stages` row, unless
+  the row of stage N-1 for the same platform and configuration exists, with every evidence row covered by a confirming
+  independent review (the same independence as above); a new `robot_configurations` version that touches a stage leaves no `robot_stages` row for it and
+  the stages above it (`robot-qualification`).
 
-Migration 0011 (a later number continuing 0010; the next after it follows from this document) adds these tables, the four
+**Migration order.** Forward-only numbers are given by build order, not by this document. The personnel migration of phase
+8 (0010) and the robotics migration are independent: each depends only on migrations 0001 to 0009, and whichever is built
+first takes the next free number, the other the one after it. The robotics migration adds these fifteen tables (the join
+table counts as part of `robot_qualifications`): `robots`, `robot_configurations`, `robot_assignments`, `robot_leases`,
+`robot_skills`, `robot_experiments`, `robot_evidence`, `robot_reviews`, `robot_admissions`, `robot_stages`,
+`robot_qualifications`, `robot_commands`, `robot_receipts`, `robot_safety_events`, `robot_maintenance`, plus the four
 `block_kind` values and the `task_transitions` rows for them. It is built only when robotics starts, so `migration-order`
-covers it only then. Creation order: `robots`, `robot_configurations`, `robot_assignments`, `robot_leases`, `robot_skills`,
-`robot_experiments`, `robot_evidence`, `robot_qualifications`, `robot_commands`, `robot_receipts`, `robot_safety_events`,
-`robot_maintenance`; every target (`agents`, `tasks`, `task_runs`, `task_artifacts`) exists since 0001 to 0004.
+covers it only then. Creation order is the list above; every target (`agents`, `tasks`, `task_runs`, `task_artifacts`)
+exists since 0001 to 0004. It refers to nothing in 0010.
 
 ## Revisions and the version of a row
 
@@ -273,7 +296,9 @@ covers it only then. Creation order: `robots`, `robot_configurations`, `robot_as
   (`dependency`, `execution`, `usage_limit`, `check_environment`, `rework_limit`) enter with `chief_engineer`, except when
   the cause itself needs the owner (a new requirement, scope or cost, a dangerous operation, an owner's own credential such
   as a login), which enter with `owner`. The physical kinds of D34 enter with `chief_engineer` (`safe_stop`,
-  `maintenance`; `physical_unknown` too, with `owner` when a person must look at the robot) and `quarantine` with `owner`. The chief engineer resolves a block it handles by a `resolve_block` row of
+  `maintenance`; `physical_unknown` too: the chief engineer observes first, and a person is asked only when no allowed
+  observation remains, as a dependency with the smallest human part, never as a decision of the owner or a critical
+  notice) and `quarantine` with `owner`. The chief engineer resolves a block it handles by a `resolve_block` row of
   `task_decisions` with `engineer_run_id` (the choices of the kind, except one that raises a cost, token or time budget or does a dangerous
   operation, which is the owner's), or calls the owner with the choice `call_owner`: that row
   leaves the status as it is, sets `block_handler = 'owner'` once, and raises the owner's notice. The owner may resolve
@@ -369,7 +394,7 @@ task, or the standing task of an ordinary session (Standing tasks, above), or th
 a trigger refuses a `chief_engineer` run on a task that has neither a request naming it nor that block.
 
 **One rule for every review a decision relies on.** A review (a `task_reviews` row, a `qualification_reviews` row, the
-independent check of a measure, the classifier review of an incident) counts for a decision only when a trigger finds it
+independent check of a measure, the classifier review of an incident, a `robot_reviews` row) counts for a decision only when a trigger finds it
 (a) tied to the same task or incident as the decision, (b) in the verdict that supports it (`confirmed` for a
 qualification, `pass` for a task review), and (c) authored by a run and an agent that are not the subject or the
 author of what is judged; of another provider where D20 or the personnel rules ask for it. The decision's row holds the
@@ -531,7 +556,7 @@ poll, takes the `pending` rows of `poll_answer_requests` and confirms or refuses
   | 0008 | `gpu_leases` to `workers.machine_id`, `task_runs.execution_id`, `tasks` | all exist since 0001, 0002, 0004; phase 5 |
   | 0009 | the personnel tables of phase 5 (`agent_versions`, `positions`, `position_assignments`, `personnel_facts`) point to `agents`, `tasks`, `task_runs`, `roles`; `task_runs.agent_version_id` points to `agent_versions` | all targets exist since 0001 to 0008; `agent_versions` first, then `positions`, `position_assignments`, `personnel_facts`; `task_runs.agent_version_id` is nullable (an expand step) and is added by an `alter table` after `agent_versions`; phase 5 |
   | 0010 | the personnel tables of phase 8 (`assessments`, `incidents`, `qualification_reviews`, `corrective_actions`, `measures`) point to the 0009 tables, `task_reviews`, `task_runs`; `position_assignments.measure_id` points to `measures`; `incidents.suspension_id` points to `rights_suspensions` (0007) | `assessments`, `incidents`, `qualification_reviews`, `corrective_actions`, `measures` in this order (a measure needs the other three); `position_assignments.measure_id` is nullable and added by an `alter table` after `measures`; `incidents.suspension_id` is an ordinary nullable key, the target exists since 0007; phase 8 |
-  | 0011 | the robotics tables (D34, 12 tables, not counted in the 55) point to `agents`, `tasks`, `task_runs`, `task_artifacts`; the four physical `block_kind` values and their `task_transitions` rows | all targets exist since 0001 to 0004; order as in Robotics tables; built when robotics starts (order of the stages: robotics.md, Phases) |
+  | next free number | the robotics tables (D34, 15 tables, not counted in the 55) point to `agents`, `tasks`, `task_runs`, `task_artifacts`; the four physical `block_kind` values and their `task_transitions` rows | all targets exist since 0001 to 0004; order as in Robotics tables; independent of 0010 (each depends only on 0001 to 0009, the one built first takes the next free number, see Robotics tables); built when robotics starts |
 
   A test applies the migrations one by one to an empty database and checks the schema after each file; it fails when a
   table of this document is in no file or in two (`migration-order`).

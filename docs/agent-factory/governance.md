@@ -172,7 +172,11 @@ The owner's list (G15) also holds two items of D34 ([robotics.md](robotics.md), 
 or hardware circuits (switching off a guard), and a purchase or any financial obligation outside an approved budget. The
 code answers a request for either `call_owner`, and no grant covers them. A qualification of a physical skill is a gate
 beside the rights, not a right: a role, record or grant gives the right of the task (the first of the five gates) and
-never a qualification, and a qualification gives no right.
+never a qualification, and a qualification gives no right. An ordinary qualified physical action is
+not a dangerous operation (D23) and needs no owner; the owner's full list for physical work is in robotics.md, Ordinary
+physical work (limits and circuits, quarantine, purchases outside a budget, people in the zone, unattended start without a
+verified policy). Actions on people, animals, dangerous tools, chemicals, hot
+surfaces and mains voltage are prohibited in the first implementation and refused, never offered for a press.
 
 **The chief engineer.** A request names the run, the action, the target, the reason and what was tried. Code first:
 a right already held (role, record, live grant) is answered at once and makes no request row; a request for something on the owner's list (G15) is answered

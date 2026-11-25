@@ -137,7 +137,9 @@ S3 possible), a restore check, and an export of the full state that a test resto
 
 The content is defined by [robotics.md](robotics.md) (D34) and arrives by its stages, in the client's own sections as the
 data exists: the robot registry and state, assignments and leases, skills and qualifications, diagnostics, maintenance, the
-stop view and evidence. Physical tasks are ordinary tasks with dangerous operations; hardware limits that no record or
+stop view and evidence. Physical tasks are ordinary tasks; a routine action of a qualified skill is not a dangerous operation and shows no second
+press (the list of cases that do is in robotics.md, Ordinary physical work; actions on people, animals, dangerous tools, chemicals, hot
+surfaces and mains voltage are refused, never offered for a press); hardware limits that no record or
 grant can change stay on the robot. The client sends no motor command and has no motor screen; a stop pressed in it is a
 request, and the screen shows the confirmed state reported by the robot, never the request (api.md, Robotics). The
 emergency stop never depends on a model, a cloud, Temporal or this client. The checks of this part are the `robot-*` ids

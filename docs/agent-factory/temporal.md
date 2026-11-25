@@ -105,8 +105,11 @@ settle a technical cause (D18).
 set with the kind by a rule in code when the task enters BLOCKED. `scope` and `agent_question` enter with `owner`. The
 other five kinds (`dependency`, `execution`, `usage_limit`, `check_environment`, `rework_limit`) and the physical kinds
 `safe_stop`, `physical_unknown` and `maintenance` enter with `chief_engineer`, and `quarantine` with `owner`, unless the
-cause needs the owner: a requirement, the scope, a cost, a dangerous operation, a person who must look at the robot, or an
-owner's own credential such as a login; then they enter with `owner`. The engineer's resolution is a `resolve_block`
+cause needs the owner: a requirement, the scope, a cost, a dangerous operation, or an
+owner's own credential such as a login; then they enter with `owner`. A routine qualified physical action is not a
+dangerous operation and asks no owner (robotics.md, Ordinary physical work needs no owner); a `physical_unknown` is the
+chief engineer's even when a person might have to look: a person is asked only when no allowed observation remains, and
+then as a dependency with the smallest human part, not as the owner's decision. The engineer's resolution is a `resolve_block`
 decision row with its run (`engineer_run_id`) and channel `api`, applied by the same handler as the owner's. The choices
 are those of the kind, except one that raises a cost, token or time budget or does a dangerous operation: that is the
 owner's (`422 owner_only`). The engineer's extra choice `call_owner` leaves the status as it is, sets
@@ -136,13 +139,14 @@ registry never holds a task. The owner's answer to the poll is recorded as a reg
 | `check_environment` | a mandatory check could not run after repair (D26); no reviewer of another provider (D20) | chief engineer; the owner when the fix is an owner's credential or a cost | `retry` (after the cause is fixed, for example an agent enabled) | VERIFYING |
 | `rework_limit` | `rework.maxRounds` reached | chief engineer | `raise_limit` (the owner's if it raises a cost) | REWORK_REQUIRED |
 | `safe_stop` (D34) | a safe stop of the platform: a request, a safety event or a lost link | chief engineer | `release_after_check` (a new hardware check, then a new permission), `call_owner` | ASSIGNED, never a retry; the platform is `stopped` until checked |
-| `physical_unknown` (D34) | the real physical state is unknown after a command, a restart or a lost link | chief engineer; the owner when a person must look | `observe` (read the real state first), `call_owner` | ASSIGNED with a new action formed from the observed state; the platform leaves `unknown` only by observation |
+| `physical_unknown` (D34) | the real physical state is unknown after a command, a restart or a lost link | chief engineer; a person only when no allowed observation remains, then a dependency with the smallest human part, never the owner's decision | `observe` (read the real state first), `call_owner` | ASSIGNED with a new action formed from the observed state; the platform leaves `unknown` only by observation |
 | `maintenance` (D34) | repair, calibration or a part change; power isolated | chief engineer (or the handler the record names) | `finish_maintenance` (calibration and check recorded) | ASSIGNED after a new check and a new permission |
 | `quarantine` (D34) | after an incident: the platform cannot take a lease | owner (the notice is on the critical list) | `release_quarantine` (owner only) | ASSIGNED after a new check and a new permission |
 
 **Physical kinds (D34, [robotics.md](robotics.md)).** They are new `blockKind` values, no new task state. Their exit is
 always ASSIGNED and never the old attempt: no physical operation is retried (below), and a lease, a qualification and the
-runtime's own checks are asked again. A platform in `reserved` (equipment busy, charging) does not block the task: it
+runtime's own checks are asked again. A release from them is refused only for a missing new hardware check or new
+permission, never for an unconfirmed state. A platform in `reserved` (equipment busy, charging) does not block the task: it
 stays ASSIGNED with the reason and its queue position.
 
 A block whose handler is the chief engineer also has the choice `call_owner` for it (the status stays, the handler
@@ -327,7 +331,7 @@ started.
 | VERIFYING | AWAITING_APPROVAL, REWORK_REQUIRED, BLOCKED, FAILED | pause (held), revise | cancel |
 | AWAITING_APPROVAL | none; waits for the owner | approve, reject, request_changes, revise, pause | cancel |
 | REWORK_REQUIRED | ASSIGNED | pause, revise | cancel |
-| BLOCKED | `resolve_block` by the chief engineer when `blockHandler = chief_engineer`; otherwise waits for the owner (`quarantine` and a `physical_unknown` that needs a person: the owner) | `resolve_block`, revise, pause | cancel |
+| BLOCKED | `resolve_block` by the chief engineer when `blockHandler = chief_engineer`; otherwise waits for the owner (`quarantine`: the owner; `physical_unknown`: the chief engineer) | `resolve_block`, revise, pause | cancel |
 | PAUSED | none; waits for the owner | resume, revise | cancel |
 | CANCELLING | CANCELLED when the machine confirms | `force_close` | none needed |
 
