@@ -1,0 +1,67 @@
+# Agent Factory database server (phase 1). Development-only compose file.
+#
+# Start:  AF_SECRETS_DIR=<directory made by deploy/setup-secrets.ts> docker compose -f factory/deploy/compose.yml up -d
+# The stack refuses to start without AF_SECRETS_DIR: there is no default inside the repository, and no password
+# text anywhere in this file or in the environment of the container.
+# AF_PG_PORT (default 55432) is the port on 127.0.0.1; the server is never published on another address.
+# Container, volume and network names derive from the project name, so a test project (-p) never meets this one.
+
+name: agent-factory
+
+services:
+  postgres:
+    # PostgreSQL 16 with pgvector 0.8.7, pinned by version and by digest (the digest wins; the tag documents it).
+    image: pgvector/pgvector:0.8.7-pg16-bookworm@sha256:484e838076e04939d27d3e176e91c86eea96236126023be8d3059761122e579f
+    restart: unless-stopped
+    stop_grace_period: 30s
+    command: ["postgres", "-c", "hba_file=/etc/agent-factory/pg_hba.conf"]
+    environment:
+      POSTGRES_USER: af_bootstrap
+      POSTGRES_DB: postgres
+      POSTGRES_PASSWORD_FILE: /run/secrets/af_bootstrap
+      # Checksums on pages, and scram-sha-256 for local and network connections alike (the default is trust for local).
+      POSTGRES_INITDB_ARGS: --data-checksums --auth-local=scram-sha-256 --auth-host=scram-sha-256
+    ports:
+      - target: 5432
+        published: "${AF_PG_PORT:-55432}"
+        host_ip: 127.0.0.1
+        protocol: tcp
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+      - ./postgres/pg_hba.conf:/etc/agent-factory/pg_hba.conf:ro
+    secrets:
+      - af_bootstrap
+      - af_migrator
+      - af_api
+      - af_control
+      - af_backup
+      - af_reader
+    healthcheck:
+      # pg_isready over TCP needs no password (so none sits in a command line or an environment). It is enough: the
+      # entrypoint's temporary init server listens on the unix socket only, so a TCP answer comes only from the final
+      # server, which starts after the init script created the roles and the database. "healthy" therefore means
+      # init finished and the server accepts connections; logins are proved by the tests, not by the healthcheck.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U af_backup -d agent_factory -q"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+      start_interval: 1s
+
+volumes:
+  pgdata:
+
+secrets:
+  af_bootstrap:
+    file: ${AF_SECRETS_DIR:?set AF_SECRETS_DIR to the directory made by deploy/setup-secrets.ts}/af_bootstrap
+  af_migrator:
+    file: ${AF_SECRETS_DIR:?set AF_SECRETS_DIR to the directory made by deploy/setup-secrets.ts}/af_migrator
+  af_api:
+    file: ${AF_SECRETS_DIR:?set AF_SECRETS_DIR to the directory made by deploy/setup-secrets.ts}/af_api
+  af_control:
+    file: ${AF_SECRETS_DIR:?set AF_SECRETS_DIR to the directory made by deploy/setup-secrets.ts}/af_control
+  af_backup:
+    file: ${AF_SECRETS_DIR:?set AF_SECRETS_DIR to the directory made by deploy/setup-secrets.ts}/af_backup
+  af_reader:
+    file: ${AF_SECRETS_DIR:?set AF_SECRETS_DIR to the directory made by deploy/setup-secrets.ts}/af_reader

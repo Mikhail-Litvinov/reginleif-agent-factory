@@ -21,7 +21,8 @@ of this phase: the registry is built before it (G5, [governance.md](governance.m
 | File | What it does | Depends on |
 |---|---|---|
 | `F/deploy/compose.yml` | PostgreSQL (with `pgvector`); restart policy; ports on loopback only | none |
-| `F/deploy/postgres/` | Init: roles af_migrator, af_api, af_control, af_backup (database.md Accounts) | compose |
+| `F/deploy/postgres/` | Init: roles af_migrator, af_api, af_control, af_backup, af_reader and the socket-only superuser af_bootstrap (database.md Accounts); `pg_hba.conf` | compose |
+| `F/deploy/setup-secrets.ts` | Creates one random password file per account, never overwrites | none |
 | `F/deploy/backup/` | Dump with af_backup, checksum, restore into a scratch database, row-count and FK check | postgres |
 | `F/package.json`, `F/tsconfig.json` | Own package; root `bunfig.toml` and `tsconfig.json` in R/ exclude `factory/` | none |
 | `docs/agent-factory/deployment.md`, `recovery.md` | Spec 23 documents with the real commands of this phase (install, start, backup, restore); recovery is extended in phases 3, 4 and 7 | deploy, backup |

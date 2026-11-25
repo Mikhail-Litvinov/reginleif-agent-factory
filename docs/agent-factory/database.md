@@ -530,7 +530,11 @@ later type is an expand step (an enum value).
 
 ## Accounts and rights
 
-Database accounts (none is a superuser; Temporal's account has no right on this database and the reverse):
+Database accounts (none of these is a superuser; Temporal's account has no right on this database and the reverse).
+The server also has one superuser, `af_bootstrap`. Only the init script and recovery use it, and only on the local socket
+inside the container (its network `pg_hba` line is a reject). No service, script, backup or person uses it in daily work:
+the backup and the restore check run as `af_backup`; only the scratch container of a restore check uses the superuser, to
+restore into a database nobody else reads.
 
 | Account | Rights |
 |---|---|
@@ -538,6 +542,7 @@ Database accounts (none is a superuser; Temporal's account has no right on this 
 | `af_api` | `select`; `insert` and `update` on mutable tables; `insert` and `select` only on immutable ones; no `delete` anywhere |
 | `af_control` | As `af_api`, plus the outbox lease updates and the projection updates of `tasks` and `task_runs` |
 | `af_backup` | `select` on everything (`pg_dump`) |
+| `af_reader` | Read-only for a person or a tool that looks at the data: sessions are read-only, a 30 s statement timeout, at most 5 connections; holds no table right until one is granted per table |
 
 Registry tables: `af_api` has `select` and `insert` on all six; `update` only on the columns `status`,
 `status_changed_at`, `status_changed_by` of `registry_records`, on the status and activation columns of

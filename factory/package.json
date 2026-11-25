@@ -1,0 +1,22 @@
+{
+	"name": "agent-factory",
+	"version": "0.0.0",
+	"private": true,
+	"type": "module",
+	"description": "Agent Factory: deployment, database and services. Own package, outside Rig's bun test and typecheck.",
+	"engines": {
+		"node": ">=24"
+	},
+	"scripts": {
+		"test": "node --test --test-concurrency=3 \"tests/**/*.test.ts\"",
+		"typecheck": "tsc --noEmit",
+		"setup-secrets": "node deploy/setup-secrets.ts",
+		"backup": "node deploy/backup/backup.ts",
+		"restore-check": "node deploy/backup/restore-check.ts",
+		"restore": "node deploy/backup/restore.ts"
+	},
+	"devDependencies": {
+		"@types/node": "^24.0.0",
+		"typescript": "^5.9.0"
+	}
+}
