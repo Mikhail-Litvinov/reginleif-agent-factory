@@ -1,6 +1,6 @@
 # Agent Factory security
 
-Design, nothing is built. [architecture.md](architecture.md) is binding (D1 to D30 are its decisions; "call" marks a choice made in these documents, open to veto); the Decision Registry and
+Design, nothing is built. [architecture.md](architecture.md) is binding (D1 to D31 are its decisions; "call" marks a choice made in these documents, open to veto); the Decision Registry and
 the regulation are in [governance.md](governance.md); facts about Rig and
 the hub are in [audit.md](audit.md); tests are in [testing.md](testing.md). This file states weakness classes and defences,
 never steps to exploit the existing hub.
@@ -45,7 +45,7 @@ There is no border between an agent and the Windows user who runs it (D4, D13).
 | T2 | The worker's credentials start a workflow or send an Update | separate certificates and a proxy with a method allowlist: the worker may poll, heartbeat and complete activities; workflow-task polling and completion stay off the list (without it they were accepted in the trial) | config | S6 |
 | T3 | Forged decision: sent as a Temporal message, or as the answer to the workflow's own read of it | the Update carries only a decision id; the workflow reads the decision from PostgreSQL in a local activity (D28), so the read is never in a queue, and checks actor, revision and single use | code | `wf-forged-update`, `control-no-queue`, S6 |
 | T4 | Forged or replayed API call | token hash, role check on every route, unique idempotency key, revision check | code | `api-authz-matrix`, F6 |
-| T5 | An agent holding a deciding token | agent environment is built from an allowlist; no Temporal credential, no push credential, and no API token except one: the `registry` token, bound to one session or run, which can only search, open an inquiry, give a verdict and propose a draft; it decides nothing and activates nothing | code | `env-allowlist`, `api-authz-matrix` |
+| T5 | An agent holding a deciding token | agent environment is built from an allowlist; no Temporal credential, no push credential, and no API token except one: the `registry` token, bound to one session or run, which can only search, open an inquiry, give a verdict, propose a draft, ask the rights check and file a right request; it decides nothing, activates nothing and gives itself no right | code | `env-allowlist`, `api-authz-matrix` |
 | T6 | An agent pushes or publishes | push and publication done by the worker after an owner decision; profile denies Git remote operations; no credentials in the agent environment | code plus profile | S3. Not stopped: saved credentials of the same Windows user (T8) |
 | T7 | An agent leaves its directory or uses a forbidden tool | permission mode, tool and directory lists (Claude), sandbox (Codex), worker checks of repository, directories, Git operations | profile plus code | S3, `path-escape` |
 | T8 | A process of the same Windows user reads files, saved credentials, the hub key, the worker's credentials | none in version one (D13); untrusted repositories must not run | undefended | none possible on one user |
@@ -67,10 +67,15 @@ There is no border between an agent and the Windows user who runs it (D4, D13).
 | T24 | Backup exposes secrets | backups encrypted; key stored apart from the backup. Off-host copy needs a server | config | open until a server exists |
 | T25 | Cross-site or token theft from the web panel from outside | TLS for any non-loopback access | config | open until a server exists |
 | T26 | A worker certificate takes another machine's activity and answers it with a forged result (the method allowlist does not see queue names; accepted in the S6 trial) | one machine only: the API refuses a second one until a gateway that binds a certificate to its own queues is in place (D28) | code | `second-machine-refused`; the gateway gets its own proof before it is switched on |
-| T27 | A record is used as a permission: a matching decision makes a guard let something through (G7) | no guard reads the registry; a draft in conflict with the list of guards is refused activation, also for the owner (`guard_conflict`); the order of authority puts guards first | code | `registry-not-a-guard`, `registry-authority` |
-| T28 | A forged press creates a wrong project record (same Windows user, T8, D13) | the press names a poll the hub registered before sending, never text of its own, and is checked like a relay decision (T10: press id, mapped Telegram user, once); the category an agent gave is not trusted; only an offered option pressed in Telegram becomes active (G8); the result is a project record, never a permission, and it is listed with its source | code; the forgery itself is undefended (T8) | `registry-capture`, `registry-not-a-guard` |
+| T27 | A record is used as a permission: similar text, a `decision` record or a search result makes the check let something through (G7, D31) | a right comes only from a `permission` record matched exactly (action, target, arguments, project); a refusal (guard or deny rule) wins and no record overrides it; similar text, a `decision` record, an unreadable call, a consumed `once` record and the search give nothing; a draft in conflict with the list of guards is refused activation, also for the owner (`guard_conflict`) | code | `permission-by-record`, `registry-authority` |
+| T28 | A forged press creates a wrong project record, or tries to make a permission (same Windows user, T8, D13) | the press names a poll the hub registered before sending, never text of its own, and is checked like a relay decision (T10: press id, mapped Telegram user, once); the category an agent gave is not trusted; only an offered option pressed in Telegram becomes active (G8); a `permission` record is made only by the owner's button, never by a poll press (the database refuses another source); every dangerous operation keeps its second press, with a record or a grant (D23); the result of a press is listed with its source | code; the forgery itself is undefended (T8) | `registry-capture`, `permission-second-press` |
 | T29 | Prompt injection through text in records: a record steers a later agent | only what the owner pressed or confirmed by the button binds (a poll's question, options and pressed option word for word; a draft's shown text); fields the owner was not shown (summary, tags) serve the search and never bind; a precedent is advice; a verdict `applies` cites a record, it does not copy its text into a command | code plus prompt | `registry-capture`, `registry-authority`. Injection into the agent's reading stays T13 |
 | T30 | An agent changes the regulation | the `registry` role may only propose a draft version; activation needs the owner and two presses (D23); the rules on changing the regulation are guards in code, not clauses | code | `regulation-change` |
+| T31 | The chief engineer is talked into a grant by the request text | the chief engineer is a fresh run with no tools and the text is data; code checks every `grant`: an active clause covering the action, off the owner's list, no wider than the request, not for its own run; otherwise it becomes `call_owner`; an empty regulation grants nothing; a repeat of a refused request gets the same refusal | code | `chief-engineer` |
+| T32 | A grant outlives its task, or passes to a participant it was not given to | a grant belongs to one participant of one task; it passes to that participant's next attempt and ends with the task (in an ordinary session, with the session) or by the owner's revocation; a run ending ends nothing; the search never finds a grant | code | `grant-ends` |
+| T33 | An agent gives itself a right (a role, a `permission` record, a grant) | a role is given only by the chief engineer and its contents change only with the regulation (two presses, D23); a record is activated only by the owner's button; a grant is written only by the code that checked an answer of the chief engineer, never by the `registry` token | code | `role-rights`, `permission-by-record` |
+| T34 | The check or the chief engineer is down, or the hook is made to wait | the hook never allows silently: an unavailable chief engineer means the request waits (no prompt, no message to the owner, nobody else answers; the panel shows it); the usual prompt appears only on `call_owner` or when the registry itself is off or unreachable; a refusal denies with the reason | code | `permission-by-record`, `chief-engineer` |
+| T35 | A command is wrapped (a script, a shell inside a shell) to slip past an exact match | matching is by the call as the agent made it, exact; a call the check cannot read matches nothing and goes to the request path; a record for the wrapper gives nothing for what it runs | code | `permission-by-record` |
 
 ## Roles and rights
 
@@ -82,6 +87,8 @@ There is no border between an agent and the Windows user who runs it (D4, D13).
 | reader | read tasks, history, status | read secrets or raw agent logs flagged sensitive; any change |
 | Control Worker (internal service identity) | start workflows, send Updates for recorded decisions, run server steps as local activities | accept anything by itself |
 | registry (an agent's token, bound to one session or run, T5) | search the registry, open an inquiry, give a verdict, propose a draft | activate, revoke or supersede a record, change the regulation, record a press, read anything else through the API |
+| chief engineer (a fresh Claude run with no tools, never the owner, G14) | give a participant its role; answer a right request with `grant` (with a clause), `refuse` or `call_owner` | change what a role contains (the regulation does); grant without a clause, wider than the request, on the owner's list or for its own run (code turns it into `call_owner`); decide anything else; hold a token |
+| permission through the check and requests (the `registry` token) | ask the rights check and file a right request for its own run or session | give itself a right, read other runs' requests, activate a `permission` record or revoke a grant |
 | agent | nothing else against the API | holds a token of any role except `registry` |
 
 Temporal roles follow this table (T2). Temporal admin and UI access are held by the owner only and are not reachable
@@ -106,8 +113,9 @@ old token and certificate are refused, the new ones work). A leak is handled by 
 ## Permission profiles and what they do not stop
 
 A profile is chosen by the owner per task and recorded in the decision. Claude: permission mode, tool list, directory
-list. Codex: sandbox mode. The worker adds its own checks on repository, directories, Git operations and limits, and a
-profile never grants more than the task's approved scope.
+list. Codex: sandbox mode. It is computed from the role of the participant, the `permission` records and the live grants
+(D31); for Codex only the sandbox is set, at job start, and there is no hook. The worker adds its own checks on
+repository, directories, Git operations and limits, and a profile never grants more than the task's approved scope.
 
 They do not stop (version one, D4): reading files of the same Windows user; use of saved credentials; network access of a
 tool the profile allows; a local process speaking to the hub; writing to a release directory the user owns; a model
@@ -129,6 +137,9 @@ Windows user or a container, which is not planned for version one.
 | Automatic acceptance | architecture, last section | off; turning it on is a dangerous operation |
 | The question gate fails open: a slow or down registry lets a question pass | G1 | by design; the owner is asked as today |
 | A question in plain text at the end of a turn is not gated | G9 | stated limit; only the rule and the reflection check act |
+| Codex has no permission hook: a record or grant cannot change what a running Codex job may do | D31 | stated limit; a record only chooses the sandbox at job start |
+| Until phase 4 there is no chief engineer: a request with no record shows the usual prompt | D31 | by design; the check and hook land in phase 2 |
+| The hook is installed at the PC by the owner; a session without it gets no rights check | D31 | stated limit; the usual prompt stays |
 
 ## Self-modification
 
@@ -151,7 +162,7 @@ the other to be reachable).
 
 | Operation | Why |
 |---|---|
-| Push, merge, pull request, publication | outward and not undoable |
+| Merge into main, release, publication outside, a push that rewrites history (governance.md Rights) | outward and not undoable |
 | ACCEPT of a task whose diff touches policy, hooks, rules or release code | changes the guard |
 | Install, switch or roll back a Factory release | code that holds all credentials |
 | Create, rotate or revoke an API token or certificate | changes who may decide |
@@ -163,8 +174,9 @@ the other to be reachable).
 | Allow network or push in a profile | reach |
 | Activate or revoke a regulation version | changes what agents must do |
 | REJECT, CANCEL and force-close of a task | closes a task for good (D7, D21, D23) |
+| The owner's part of publications and deletions of data, with a record or a grant | the second press stays (G7, D23); the split is in governance.md Rights (G15), what it does not name is the owner's |
 
-REJECT, CANCEL, force-close and publication always take two presses (D23). PAUSE takes one: it only stops new work and
+REJECT, CANCEL, force-close and the owner's part of publications and deletions always take two presses (D23). PAUSE takes one: it only stops new work and
 RESUME undoes it (call).
 
 ## Open, decided in its phase

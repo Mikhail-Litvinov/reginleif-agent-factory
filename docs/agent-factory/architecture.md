@@ -39,14 +39,15 @@ success reported for a check that did not run.
 | D20 | A result is reviewed by another provider. When its usage limit is spent, the task waits for the reset and the owner is notified. | Owner |
 | D21 | A cancel whose machine is gone waits with a notice; the owner may force-close it. | Owner |
 | D22 | While paused: resume, cancel, feedback and revision only. | Owner |
-| D23 | Cancel, reject, publication and force-close take a second press in the same channel, in Telegram and in the panel. | Owner |
-| D24 | Nothing is deleted by itself. Cleanup on command removes logs, artifacts and worktrees; the history of decisions and events stays for good. | Owner |
+| D23 | Cancel, reject, force-close and the owner's part of publications and deletions (governance.md Rights) take a second press in the same channel, in Telegram and in the panel. | Owner |
+| D24 | Nothing is deleted by itself. Cleanup runs on the owner's command, or by the chief engineer for the part named in governance.md Rights (closed tasks, nothing unsaved); it removes logs, artifacts and worktrees; the history of decisions and events stays for good. | Owner |
 | D25 | A review finding the implementer accepts is fixed. A disputed technical one is settled by a third independent run; a dispute about requirements, scope or cost goes to the owner. | Call from D18 |
 | D26 | A mandatory check that could not run is first repaired by agents; if that fails, the task is BLOCKED with the reason. It never counts as passed. | Call from D18 |
 | D27 | Drizzle (as the task spec recommends; Rig has no database code to reuse) defines the schema and types; its generated SQL migrations are reviewed, committed, completed by hand where Drizzle cannot express a rule, and applied forward only. | Call, from spec 4 |
 | D28 | Server steps run as local activities inside the Control Worker, so no task queue carries them and no worker can take them. A gateway that binds a certificate to its own queues comes before a second machine; until then a second machine is refused. | Owner (the refusal in code is a call) |
 | D29 | Decisions, exceptions, precedents and facts, and the regulation, live in PostgreSQL as the Decision Registry. An agent consults it before a question to the owner. Details: [governance.md](governance.md). | Owner |
 | D30 | The registry is built and works before Temporal is installed. | Owner |
+| D31 | What an agent may do comes from rights: the role of its participant in the task, a `permission` record, a grant of the chief engineer (Claude, never the owner). Details: the Rights section of [governance.md](governance.md). | Owner |
 
 Rejected: a separate repository (Rig updates and rolls back only itself and the hub); code in the Rig core (ordinary Rig
 would pull Temporal and PostgreSQL); the worker's own child processes (an agent would die with the worker).
@@ -80,6 +81,7 @@ factory/
   control/     server activities, outbox relay
   api/         HTTP API and web panel
   registry/    Decision Registry: records, search, inquiries, gate, import
+  rights/      rights check, roles, requests, grants, chief engineer activity
   worker/      local worker, workspaces, execution store
   runner/      program that rig exec starts around one agent run
   adapters/    claude, codex, openai, comfyui, lmstudio
@@ -276,8 +278,9 @@ Numbers (attempts, timeouts, budgets, depth) are settings with defaults set in t
   The proxy sees methods, not queue names, so any worker certificate can take and answer an activity of any queue
   (S6 showed it on another machine's queue). D28 answers it: server steps never enter a queue, and a second machine
   waits for the gateway. A machine's result is never a decision.
-- Profiles: Claude gets a permission mode, tool and directory lists; Codex its sandbox; the worker checks repository,
-  directories, Git operations and limits itself. Push and publication are done by the worker after the owner's decision;
+- Profiles: built from the rights of the participant's role, the active `permission` records and the chief engineer's
+  grants (D31): Claude gets a permission mode, tool and directory lists; Codex its sandbox, fixed at start (it has no
+  hook); the worker checks repository, directories, Git operations and limits itself. Push and publication are done by the worker after the owner's decision;
   agents get no push credentials in their environment. That an agent of either kind cannot push is proven in S3.
 - Residual risk (D13): a process of the same Windows user can read that user's files, saved Git credentials, the hub's key
   and the worker's credentials. Untrusted repositories must not run. Closing it takes a separate Windows user.
@@ -320,9 +323,9 @@ saved histories.
 0. Audit, this document, contracts for data, API and security; proofs S1 to S6 (S3 spends a little of the Claude limit,
    S5 needs ComfyUI running).
 1. PostgreSQL in Docker on the PC, with restart and restore checks.
-2. Database, API, the registry with the embedder, the question gate, the hub's buttons and relay for it, the import (D30).
+2. Database, API, the registry with the embedder, the question gate, the hub's buttons and relay for it, the import (D30), the rights check and the Claude permission hook (D31).
 3. Temporal installation (with its restart checks, the proxy, S6 and the D28 part) and workflows.
-4. Local worker, Claude and Codex adapters, Rig feature.
+4. Local worker, Claude and Codex adapters, Rig feature, the chief engineer (D31).
 5. Several agents, OpenAI, ComfyUI and LM Studio adapters, independent review.
 6. Task commands and notices in Telegram, web panel.
 7. Limits, monitoring, backups, failure scenarios.

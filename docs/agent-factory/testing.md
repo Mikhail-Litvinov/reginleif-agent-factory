@@ -1,6 +1,6 @@
 # Agent Factory testing
 
-Design, nothing is built. [architecture.md](architecture.md) is binding (D1 to D30 are its decisions; "call" marks a choice made in these documents, open to veto); threats and their
+Design, nothing is built. [architecture.md](architecture.md) is binding (D1 to D31 are its decisions; "call" marks a choice made in these documents, open to veto); threats and their
 check ids (`secret-canary`, `path-escape`, ...) are in [security.md](security.md); the decision registry, the regulation
 and their check ids are in [governance.md](governance.md). A check named here must be able to
 fail: each has a pass criterion and a fail criterion, and a new check is first shown failing on the old or broken code.
@@ -49,21 +49,25 @@ Table-driven where the rule is data; each can fail (a cell removed, a check drop
 | `control-no-queue` | Run the lifecycle tests with the real Control Worker options and read the histories; compare the activity catalogue with the options (D28) | no history has an activity task of the `control` queue; every `local` row is reached through local activities; the Control Worker has `enableNonLocalActivities: false`; `act.<Name>.S` of each is below the workflow task timeout | one server step scheduled as an ordinary activity, or the option missing |
 | `second-machine-refused` | Register a second machine, with and without the gateway declared in the deployment; register the first one again (D28) | without the gateway the second is refused `queue_isolation_required` and gets no work; the first may register again; with it the second registers | a second machine registers without the gateway |
 | `gpu-order` | Several tasks request one machine's GPU slot with different priorities and request times, while one job runs | grants go by highest priority, then oldest request; one holder at a time; no preemption | a lower priority or a later request granted first, or two holders |
-| `cleanup-command` | Cleanup of a final task, a task not final, a task awaiting approval, a worktree with unpublished changes; and a day count passing on the injected clock | nothing is deleted by itself; the command removes only files and keeps rows; refusals as listed in [database.md](database.md) | anything removed without the command, or a row deleted |
+| `cleanup-command` | Cleanup of a final task, a task not final, a task awaiting approval, a worktree with unpublished changes; the chief engineer's cleanup inside and outside its part (G15); and a day count passing on the injected clock | nothing is deleted by itself; a cleanup removes only files and keeps rows; refusals as listed in [database.md](database.md) | anything removed without the command or a grant, anything of the owner's part removed by the chief engineer, or a row deleted |
 | `review-provider` | Review of a task whose implementer ran on one provider, with and without another provider eligible (D20) | another provider reviews; with none the task waits and a notice is sent | the same provider reviews |
 | `check-not-run` | A mandatory check that cannot run (D26) | agents get a repair attempt; then BLOCKED `check_environment`; never AWAITING_APPROVAL | a `not_run` check counted as passed or sent to the owner as complete |
 
 ## Registry and regulation checks
 
-The ten checks are defined in [governance.md](governance.md) (section "Checks"), each with its pass and fail criterion;
-they are not copied here. They run on the disposable database and a fake clock like the rest, and a new one is first
-shown failing on the broken code.
+The fourteen checks (nine of the registry and regulation, five of the rights, D31) are defined in
+[governance.md](governance.md) (section "Checks"), each with its pass and fail criterion; they are not copied here. They
+run on the disposable database and a fake clock like the rest, and a new one is first shown failing on the broken code.
 
 | Id | Level | Phase |
 |---|---|---|
 | `registry-first`, `registry-fail-open` | integration: API gate, the hub question hook as a fake command, a timeout on the injected clock | 2 |
 | `registry-capture`, `registry-scope`, `registry-authority` | unit (order and scope rules as data) and integration (the relay press path) | 2 |
-| `registry-not-a-guard` | integration: every permission prompt, profile and second press with and without a matching active record | 2 |
+| `permission-by-record` | integration: the rights check and the permission hook as a fake command, every near miss (target, argument, project, unreadable call, consumed `once`, a `decision` record, similar text) against an exact match, a deny rule, the chief engineer unavailable on the injected clock (a waiting request, no prompt, no notice to the owner), the registry off or unreachable (the prompt) | 2 (the hook cases with the chief engineer in 4) |
+| `permission-second-press` | integration: every dangerous operation with a record and with a grant still asks for the second press | 2 (with a grant, 4) |
+| `role-rights` | integration: a run does what its role names and nothing else, per participant; a role is given only by the chief engineer and its contents change only with the regulation | 2 |
+| `chief-engineer` | unit (the code check of an answer, as data) and integration (a fake chief engineer: no clause, too wide, owner's list, own run, repeat of a refusal, instructions in the request, empty regulation, ordinary session asks it before the owner, while it is away requests wait and each is answered once after its return) | 4 |
+| `grant-ends` | integration and database: end of task, end of session, revocation, next attempt of the same participant; the search never returns a grant | 4 |
 | `registry-history`, `regulation-change` | database (triggers, grants) and integration (two presses, version size, guard conflict) | 2 |
 | `registry-search` | measured on a set of questions with the chosen model; also runs without the model (`degraded`) | 2 |
 | `registry-import` | integration: Factory documents and project memories as input, a second run | 2 |

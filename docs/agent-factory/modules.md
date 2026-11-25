@@ -60,6 +60,12 @@ and the import work before Temporal exists ([governance.md](governance.md)).
 | `F/registry/gate.ts` | The gate command (G9): inquiry id, verdicts, a second search by the real question text, fail open after `registry.gateTimeoutMs` | service |
 | `F/registry/import.ts` | One-time import of drafts from the Factory documents and the projects' memories (G4); source named, a second run adds nothing | service |
 | `F/api/handlers/registry.ts` | The registry and regulation routes of api.md; poll press capture on the relay role | service |
+| `F/rights/check.ts` | The rights check (D31): refusal first, then the role of the participant, an active `permission` record by exact match, a live grant; nothing found returns `ask`; an unreadable call matches nothing; `once` is consumed by the first use | repo, `registry/service.ts` |
+| `F/rights/roles.ts` | Roles per participant of a task, their rights and deny lists, read from the active regulation version (a role changes only with the regulation); assignment of a role to a participant, written only for the chief engineer's answer after the code check | repo |
+| `F/rights/requests.ts` | Right requests and their answers: code answers first (a right in the role, the owner's list, a repeat of a refusal), the rest goes to the chief engineer; the wait holds no machine | check, roles |
+| `F/rights/chief-engineer.ts` | The activity that runs the chief engineer (a fresh Claude run with no tools, role `chief_engineer`); the request text is data; a local activity (D28); code checks every `grant` (clause, owner's list, width, own run) before it writes a grant; lands in phase 4, the module only reads settings in phase 2 | requests, regulation |
+| `F/api/handlers/rights.ts` | The roles, rights check, requests and grants routes of api.md; revocation by the owner | check, requests |
+| Rig permission hook of the `factory` feature | Installed by the owner at the PC only: asks the check for an ordinary Claude session, allows on a match or grant, denies with the reason on a refusal, sends a request and waits when nothing is found (also while the chief engineer is away; before the tool's own hook limit it answers "deny, request still waiting"); the usual prompt appears only on `call_owner` or when the registry itself is off or unreachable; it never allows silently. Codex has no hook | api |
 | Rig hooks of the `factory` feature | Session start gives the active clauses; before a prompt and a tool call the difference when the version changed (G10); both do nothing while the registry is off | api |
 | Rig command `rig factory registry find`, `verdict`, `propose`, `import` | The client of the `registry` role for Claude and Codex; the same command for both | api |
 | raf-hub (separate repository): gate command, poll registration, buttons | The hub's own question hook runs the gate command first, registers the poll (a failure or the timeout sends it unregistered), and only then sends it (hooks run in parallel, so a separate hook cannot go first); the generic button mechanism with per-client keys (D5) for confirming drafts; generic, off by default | gate command |
@@ -82,19 +88,22 @@ Migrations, in order (foreign keys decide the order; each table is in exactly on
 | 0004 | workspaces, task_runs, task_events, task_artifacts, run_checks | run-role trigger; one `in_use` row per worktree path; adds the foreign key `tasks.origin_run_id` to `task_runs` by `alter` |
 | 0005 | task_reviews, review_finding_outcomes, task_approvals, task_proposals | review-independence trigger |
 | 0006 | regulation_versions, registry_inquiries, registry_records, registry_links, registry_embeddings, registry_inquiry_results | extensions `pg_trgm` and `vector` first; `regulation_versions` before the `alter` that adds `task_runs.regulation_version_id` and `regulation_seen_id` (an expand step); the `registry` role value and binding columns of `api_tokens`; status audit triggers (database.md) |
-| 0007 | gpu_leases | lands in phase 5 with its use; its keys target tables that exist by then |
+| 0007 | roles, role_assignments, right_requests, right_grants | the rights tables (D31, database.md Rights tables); `roles` first; adds the `permission` kind, `right` and `consumed_at` to `registry_records`, the run role `chief_engineer`, and `task_runs.participant` and `role_assignment_id` (an expand step by `alter`); the grant-insert and role-status triggers |
+| 0008 | gpu_leases | lands in phase 5 with its use; its keys target tables that exist by then |
 
-Count: 9+3+6+5+4+6+1 = 34 tables, each in exactly one file (see Verification).
+Count: 9+3+6+5+4+6+4+1 = 38 tables, each in exactly one file (see Verification).
 
 Rig files changed: the command `rig factory registry` (the registry client above; the rest of the `rig factory` commands
-are phase 4). Separate repository: the gate command option in raf-hub. Open check of this phase: whether the Codex sandbox
+are phase 4) and the permission hook of the `factory` feature, which the owner installs at the PC (D31). Separate repository: the gate command option in raf-hub. Open check of this phase: whether the Codex sandbox
 reaches the loopback API; if not, the launcher does the search ([governance.md](governance.md) Access).
 
 Proving check: `ops-matrix`, `decision-recorded`, `decision-kinds`, `second-press`,
-`state-exit`, `api-authz-matrix`, `second-machine-refused`, `sql-param`, `migration-order` (applies 0001-0007 to an empty database, and the
+`state-exit`, `api-authz-matrix`, `second-machine-refused`, `sql-param`, `migration-order` (applies 0001-0008 to an empty database, and the
 regeneration test shows the schema files and the generated migrations agree), the openapi regeneration test, and the
 registry checks of governance.md "Checks" (testing.md): `registry-first`, `registry-fail-open`, `registry-capture`,
-`registry-scope`, `registry-authority`, `registry-not-a-guard`, `registry-history`, `regulation-change`,
+`registry-scope`, `registry-authority`, `permission-by-record`, `permission-second-press`, `role-rights` (the
+chief-engineer side of the rights checks, `chief-engineer` and `grant-ends`, runs with the chief engineer in phase 4),
+`registry-history`, `regulation-change`,
 `registry-search` (a measurement on invented paraphrases, which also fixes the model and the thresholds),
 `registry-import`, and for the buttons `hub-key`, `hub-once`, `button-replay`. Parallel: `contracts/` first; then `db/` plus `db/migrations`, `api/handlers/` by route group,
 `registry/` and the `control/` skeleton are disjoint lanes; the raf-hub change is a separate lane in its own repository.
@@ -124,7 +133,8 @@ Migrations: none new. Rig files: none. Proving check: `state-exit`, `review-prov
 `relay-press-once`, `control-no-queue`, failure scenarios F1-F6 (server side), replay test, the Temporal restart checks
 (history survives a reboot and a restart), S6 against the real proxy, and the server path of the registry:
 `registry-first` and `registry-fail-open` for `agent_question` and BLOCKED, `registry-authority` for the precedents
-the orchestrator writes (advice only), and `registry-capture` for a run that stores `regulation_version_id` at its start.
+the orchestrator writes (advice only), and `registry-capture` for a run that stores `regulation_version_id` at its start, and `role-rights` for the role of each
+participant a run starts under (a run does what its role names and nothing else).
 Parallel: deploy/ (Temporal, proxy), workflows/, control/activities/,
 outbox-relay.ts and fakes are disjoint lanes.
 
@@ -141,8 +151,9 @@ Criterion (spec): a real task starts an agent, gets the result, survives a worke
 | `F/worker/recovery.ts` | Execution folder lookup table: collect, attach, died, start, unclear | runner |
 | `F/runner/` | Outlives the worker: marker first, output, exit, time limit, stop file | none (no server, no credentials) |
 | `F/adapters/api.ts` | AgentAdapter interface (nine operations) and the common checks | contracts |
-| `F/adapters/claude/` | `claude -p` inside `rig exec`; command built here, not in the runner | api, runner |
-| `F/adapters/codex/` | Supervisor job folder; mapping of the 7 statuses | api, runner |
+| `F/adapters/claude/` | `claude -p` inside `rig exec`; command built here, not in the runner; the profile comes from the role, the records and the grants of the participant | api, runner |
+| `F/adapters/codex/` | Supervisor job folder; mapping of the 7 statuses; a record can only choose the sandbox at job start, there is no hook | api, runner |
+| `F/control/activities/chief-engineer.ts` | `AskChiefEngineer`, a local activity (D28) using `F/rights/chief-engineer.ts`; the wait for a right holds no machine and the task state stays as it is; `call_owner` goes through the gate (G9) to the owner | rights, registry |
 | `F/telegram/` | Task commands and notices are phase 6; the relay of the registry exists since phase 2 | |
 | `docs/agent-factory/operations.md`; `recovery.md` extended | Spec 23 documents with the real commands of this phase | worker, runner |
 
@@ -167,7 +178,11 @@ providers), `ExecutionFolder` (adapter, runner, recovery share the layout), `Wor
 Migrations: none. Proving check: `env-allowlist`, `path-escape`, `identity-recycle`, `secret-canary`, F7-F10 (worker
 kill, machine reboot, runner kill, unreadable folder), plus the cases the phase 0 proofs left open: a foreign process
 with the same pid, a pruned `rig exec` record, a crash before `identity.json` is written, a starter killed without its
-tree. Parallel: runner/, worker/git/, adapters/claude/,
+tree, and the rights checks that need the chief engineer: `chief-engineer` (no grant without a clause, wider than the
+request, on the owner's list, for its own run or after a refusal; instructions in a request change nothing; an empty
+regulation grants nothing; the permission hook asks it before the owner; while it is away requests wait, nothing reaches the owner, and after its return each is answered once), `grant-ends` (a grant ends with the task, the
+session or a revocation, passes to the next attempt of the same participant, and is never found by the search) and the
+hook cases of `permission-by-record` (the registry off or unreachable shows the prompt; no answer of the chief engineer waits and shows none; never allows). Parallel: runner/, worker/git/, adapters/claude/,
 adapters/codex/ and the Rig changes are disjoint lanes; worker/activities/ follows them.
 
 ## Phase 5: several agents, authority, GPU
@@ -185,7 +200,7 @@ Criterion (spec): several agents work without conflicts, authority is separated 
 | `F/control/proposals.ts` | Child tasks and suggestions (D19) | repo |
 | `F/api/handlers/cleanup.ts` | Cleanup command that lists what it would remove first (`cleanup-command`, D24) | repo |
 
-Migrations: 0007 (gpu_leases) here. Rig files: none. Proving check: `gpu-order`, `review-provider`, `cleanup-command`,
+Migrations: 0008 (gpu_leases) here. Rig files: none. Proving check: `gpu-order`, `review-provider`, `cleanup-command`,
 `policy-diff`, F11. Parallel: each adapter directory, review.ts, proposals.ts, gpu are disjoint lanes.
 
 ## Phase 6: remote control
@@ -238,6 +253,8 @@ database. Parallel: one lane per scenario file.
 | 19 | The gate must run before a question reaches Telegram, but Claude hooks before a tool call run in parallel | Settled in governance.md: the hub's own question hook runs the gate command first (an optional command in raf-hub, a separate repository, phase 2); a separate gate hook is not used |
 | 20 | Architecture said an agent holds no token of any role; the registry needs an agent to search and give verdicts | Settled by D29 and security.md T5: the one exception is the `registry` token, bound to one session or run, which can search, open an inquiry, give a verdict and propose a draft |
 | 21 | The registry is built in phase 2, but the orchestrator that writes precedents exists only in phase 3 | Settled: phase 2 has the gate, capture of poll presses and import; the orchestrator's precedents and drafts come with `TaskWorkflow` in phase 3 (a local activity, D28) |
+| 22 | G7 says a right is given by a `permission` record, G16 says a chief-engineer grant is not a record; the chief engineer exists from phase 4, the check and hook land in phase 2 | Settled by D31: two sources behind one check (record by exact match, then grant), both read in `F/rights/check.ts`; until phase 4 a request with no record shows the usual prompt as today; the grant table exists from 0007 and stays empty until the chief engineer runs |
+| 23 | A grant must outlive the run that asked, but a run's rights come from its role | Settled by G17: a grant belongs to one participant of one task, passes to its next attempt, and ends with the task (or session) or by revocation; a run ending ends nothing |
 
 ## Risks
 
@@ -256,10 +273,12 @@ database. Parallel: one lane per scenario file.
 | Check reported passed without a run | Stored run_checks record wins; D26 | 4 | `check-not-run` |
 | GPU contention | Lease table, no preemption | 5 | `gpu-order` |
 | Codex limit or orphan restarts | Reactive `limit` status, restart switch in codex-run.py | 4 | F10 |
-| A record is used as a permission | No guard reads the registry (G7); a draft in conflict with a guard is refused activation | 2 | `registry-not-a-guard`, `registry-authority` |
+| A record is used as a permission | Only a `permission` record made by the owner's button, matched exactly; a deny rule wins; similar text, a `decision` record and search results give nothing (G7, D31); a draft in conflict with a guard is refused activation | 2 | `permission-by-record`, `registry-authority` |
+| The chief engineer is talked into a grant, or a grant outlives its task | Code checks every grant (clause, owner's list, width, own run); the request text is data; a grant ends with the task or session or by revocation | 4 | `chief-engineer`, `grant-ends` |
+| A run does more than its role names | The check reads the role of the participant; a role is given only by the chief engineer and its contents change only with the regulation | 2 | `role-rights` |
 | Registry down or slow stops work | The gate fails open after `registry.gateTimeoutMs` (G1); off by default | 2 | `registry-fail-open` |
 | Question skips the gate | The hub hook runs the gate first; a plain-text question at the end of a turn and an interactive Codex session cannot be gated (stated limits) | 2, 3 | `registry-first` |
-| Forged press records a wrong decision | Press id and Telegram user checked as for a relay decision; the result is a project record, never a permission (D13) | 2 | `registry-capture` |
+| Forged press records a wrong decision | Press id and Telegram user checked as for a relay decision; the result is a project record; a permission is made only by the owner's button, never by a poll press, and every dangerous operation keeps its second press (G7, D23) | 2 | `registry-capture`, `permission-second-press` |
 | Text in a record steers an agent | Only owner-pressed fields bind; agent-written fields serve the search | 2 | `registry-capture`, `registry-authority` |
 | An agent changes the regulation | An agent's right ends at a draft; activation needs two presses; the rules on changing it are guards in code | 2 | `regulation-change` |
 | A wrong answer found by similarity | The agent's verdict decides, and it is stored; scope filters come first; `once` records are never offered | 2 | `registry-scope`, `registry-search` |
@@ -282,7 +301,7 @@ reachable before a server exists.
 | 3.1 Remote server | `F/deploy/`, phases 1 to 3 (PostgreSQL, the embedder, then Temporal); permanent operation not reachable before a server exists |
 | 3.2 Local machine | `F/worker/`, `F/runner/`, Rig changes (phase 4) |
 | 3.3 Network model | `F/deploy/proxy/` (mTLS plus method allowlist, S6), phase 3; security.md |
-| 4.1 Tables | `F/db/schema/`, `F/db/migrations/` (0001-0007), database.md |
+| 4.1 Tables | `F/db/schema/`, `F/db/migrations/` (0001-0008), database.md |
 | 4.2 Database requirements | triggers and constraints in the migrations; D24 for deletion; Contradictions row 1 |
 | 5.1 Main workflow | `F/workflows/task.ts`, phase 3 |
 | 5.2 Activities | `F/control/activities/`, `F/worker/activities/` |
@@ -328,8 +347,8 @@ reachable before a server exists.
 
 ## Verification done
 
-- Tables: 34 tables in database.md (`outbox_events` and `execution_policies` counted once; 28 of the architecture plus the
-  six registry tables). Migrations 0001-0007 hold 9+3+6+5+4+6+1 = 34 tables. Each of the 33 first-column names plus
+- Tables: 38 tables in database.md (`outbox_events` and `execution_policies` counted once; 28 of the architecture plus the
+  six registry tables and the four rights tables). Migrations 0001-0008 hold 9+3+6+5+4+6+4+1 = 38 tables. Each of the 37 first-column names plus
   `task_transitions` appears in exactly one migration row, compared by name.
 - Phase deliverables: every spec phase 1-7 criterion has a module row and a proving check above. The Rig change list
   (feature, command, installer, autostart, codex-run.py) is fully assigned to phase 4, with the audit items (the five

@@ -1,6 +1,6 @@
 # Agent Factory: Temporal design
 
-Binding: [architecture.md](architecture.md) (D1-D30, the state table, state ownership); the registry and the regulation:
+Binding: [architecture.md](architecture.md) (D1-D31, the state table, state ownership); the registry and the regulation:
 [governance.md](governance.md). Facts: [audit.md](audit.md).
 Spec sections: "spec 5.2". Numbers are named settings; defaults are set in the measuring phase. "Call" marks a design
 choice made here, open to veto. Table and column names are those of [database.md](database.md).
@@ -46,8 +46,8 @@ Main path by state (all moves follow the architecture's table; each arrow is one
    the review run is the same activities). Pass goes to AWAITING_APPROVAL; confirmed findings to REWORK_REQUIRED;
    `rework.maxRounds` reached to BLOCKED `rework_limit`. Details below. Input no attempt can make valid goes to FAILED.
 8. AWAITING_APPROVAL: waits for a decision Update. `PublishArtifacts` runs only after ACCEPT, on the machine, by key,
-   with the second press of D23 already recorded.
-9. After a final state the workflow completes. `CleanupWorkspace` runs only through the owner's cleanup command (D24),
+   with the second press of D23 already recorded where the publication is the owner's (G15).
+9. After a final state the workflow completes. `CleanupWorkspace` runs only through the owner's cleanup command or the chief engineer's grant (D24, G15),
    delivered as an outbox row of kind `cleanup`; nothing runs by itself.
 
 ### Verification, review and mandatory checks (D20, D25, D26)
@@ -108,6 +108,14 @@ registry never holds a task. The owner's answer to the poll is recorded as a reg
 | `agent_question` | the agent asked the owner | `answer` | ASSIGNED |
 | `check_environment` | a mandatory check could not run after repair (D26); no reviewer of another provider (D20) | `retry` (after the owner fixed the cause, for example enabled an agent) | VERIFYING |
 | `rework_limit` | `rework.maxRounds` reached | `raise_limit` | REWORK_REQUIRED |
+
+**A right request (G7, G13-G17, D31, governance.md "Rights").** A run that needs a right it does not have asks the check
+and waits for the answer without holding a machine; the task stays RUNNING or VERIFYING, and no new BLOCKED kind exists.
+The wait for the chief engineer is a run of role `chief_engineer`, and its server steps are local activities (D28). Only
+the answer `call_owner` (and a request on the owner's list, G15) goes through the gate above and reuses BLOCKED
+`agent_question`. An unavailable chief engineer (limit, outage) leaves the request waiting: no BLOCKED, no notice to the
+owner, nobody else answers; the panel shows the waiting requests, and each is answered once when it is back. A grant belongs to one participant of the task: the next attempt keeps it, a finished or died run does
+not end it, and it ends with the task or by the owner's revocation.
 
 Cancel is open to every kind. The owner's feedback and revision are open too (matrix below).
 
@@ -193,7 +201,7 @@ Rules that hold in the whole matrix:
   `endUnconfirmed` set; on reconnect the worker stops such a run before anything else (`ReconcileMachine`).
 - **PAUSED (D22).** Only `resume`, `cancel`, `add_feedback`, `revise_requirements` apply. Everything else is refused
   `not_allowed_in_state` and tells the owner to resume first.
-- **Second press (D23).** `cancel`, `reject`, `force_close` and publication need a second press in the same channel. The
+- **Second press (D23).** `cancel`, `reject`, `force_close` and the owner's part of publications need a second press in the same channel. The
   API holds the first press as a `confirmations` row and records the decision on the second; the workflow sees only
   completed decisions.
 

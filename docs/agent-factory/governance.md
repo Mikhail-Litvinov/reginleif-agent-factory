@@ -11,7 +11,7 @@ Two parts. **Factory Governance** is the regulation: how agents must work, versi
 looks there first. It asks the owner only when no active record applies or the circumstances differ, and it records the
 difference. A question already answered is a defect of the system.
 
-Anti-goals: a record that acts as a permission; an agent that makes its own proposal binding; an owner's chat message that
+Anti-goals: a permission from a similar text or from an agent's word; an agent that makes its own proposal binding; an owner's chat message that
 switches off a security guard; a registry that stops ordinary work when it is down; old decisions that vanish.
 
 ## Decisions
@@ -24,12 +24,17 @@ switches off a security guard; a registry that stops ordinary work when it is do
 | G4 | The registry starts with drafts taken from the Factory documents and the projects' memories; the owner confirms them as one list. | Owner |
 | G5 | The registry is built and working before Temporal is installed. | Owner |
 | G6 | The regulation's text is written by the owner later; until then the regulation is empty and only the mechanism exists. | Owner |
-| G7 | No guard reads the registry. Permission prompts, profiles and second presses work as if it did not exist. | Call, from the owner's rule not to bypass security confirmations |
+| G7 | A permission is given by a record of the registry, in Factory and in ordinary sessions. Second presses stay. | Owner |
 | G8 | A poll answer is recorded by itself only when an offered option was pressed in Telegram. Typed answers and answers in the terminal become drafts. | Owner |
 | G9 | The check before a question is code, not only a rule in a prompt. | Call |
 | G10 | A new version of the regulation applies at once, also to work in progress. | Owner |
 | G11 | Drafts are confirmed as one list, daily or on demand. | Owner |
 | G12 | The hub's buttons and the relay for the registry are built in phase 2. | Owner |
+| G13 | Every participant of a task has a role with the rights the task needs. An agent that needs more asks the chief engineer, who grants by the regulation, refuses an unfounded request, or calls the owner in an extreme case. Whoever waits for an unavailable superior waits; nobody goes over the superior's head. | Owner |
+| G14 | The chief engineer is always Claude until the owner orders otherwise. | Owner |
+| G15 | The chief engineer gives participants their roles. Only the owner decides: the regulation, switching off a guard, and a part of the publications and deletions (the list in Rights). | Owner |
+| G16 | A right granted by the chief engineer is not written into the registry. | Owner |
+| G17 | Such a right belongs to one participant of one task, passes to its next attempt, ends with the task and is kept in the grant log, which is an audit trail and never a precedent. | Call, from "rights the task needs" and the audit duty of spec 12 |
 
 G8 because a typed answer is often a counter-question, and a terminal answer has no checked Telegram user behind it.
 
@@ -42,6 +47,7 @@ One table, one series of ids (`DEC-00042`), kinds kept apart:
 | `rule` | a clause of the regulation | owner, two presses | every agent in its scope |
 | `decision` | the owner's answer | owner's press (G2, G8) or the button | every agent in its scope |
 | `exception` | a named departure from one rule or decision | owner's button | only where it applies |
+| `permission` | a right to one action on a named target (see Rights) | owner's button, never a poll press (a sensitive category) | the permission check, by exact match |
 | `precedent` | a technical case agents settled themselves (D18, D25) | the Control Worker, with evidence | advice; never replaces a decision that is the owner's |
 | `fact` | a measured or tested result with its conditions | whoever ran it, with evidence | nobody; it never becomes a rule by itself |
 
@@ -65,7 +71,7 @@ word for word; those fields are the decision, and an agent's summary and tags se
 
 ## Order of authority
 
-1. **Guards in code**: second press, profiles, allowlists, roles. They are not records and no record changes them. A draft
+1. **Guards in code**: second press, profiles, allowlists. They are not records and no record changes them. A draft
    in conflict with the list of guards is refused activation, `guard_conflict`, also for the owner; a guard changes only
    by a release.
 2. **Regulation**, the active version.
@@ -130,6 +136,62 @@ difference, changed circumstances or conflict is always open to the agent.
   and makes drafts with the source named. The list is shown once. Nothing is active before the press. The contents stay in
   the database and never enter the repository.
 
+## Rights
+
+**The check, in code, in this order.** (1) A refusal: a guard, a deny rule of the tool or of the role. It wins
+over everything below. (2) The role of the participant in the task. (3) An active `permission` record. (4) A live grant of
+the chief engineer. Nothing found is not a permission: the request goes to the chief engineer, in Factory and in an ordinary
+session alike. The owner is asked only when the chief engineer calls
+the owner. If the chief engineer cannot be reached, the request waits. An agent's statement "I am allowed" is never a source.
+
+**Roles.** A role is a named list of rights: tools and commands, directories, repositories, network, machine actions. A
+task's plan proposes a role for each participant and the chief engineer gives it; the run receives only its rights. Giving
+a role is checked as a grant: a defined role, not for the chief engineer's own run. What a role contains is a part of the
+regulation, versioned and changed with it (call). A right is a structure (action, target, conditions), never free text.
+
+**A `permission` record** holds the same structure. The check compares the actual call with it: tool, program and
+arguments, real path, repository, project. Search by meaning never gives a permission; it only finds the record for the
+agent to read. A call the parser cannot read completely does not match. `once` is consumed by the first use.
+
+**Second presses stay** (G7) for the operations of the owner: a record or a grant gives the right to begin one, and the
+owner's second press is asked as before. The split of publications and deletions (G15):
+
+| The chief engineer, without a second press | The owner, with a second press |
+|---|---|
+| push a working branch; open or update a pull request | merge into main; a release; publication outside (a site, a store, a message to people); a push that rewrites history |
+| delete temporary files, worktrees with nothing unsaved, logs and draft artifacts of closed tasks | delete unsaved work, rows of a database, backups, other people's projects, a remote branch |
+
+The split is a list in the code by exact action and target; what it does not name is the owner's. The chief engineer still
+needs a clause, so with an empty regulation this part waits too. Cancel, reject, acceptance and force-close of a task stay
+the owner's.
+
+**The chief engineer.** A request names the run, the action, the target, the reason and what was tried. Code first:
+a right already in the role is answered at once; a request for something on the owner's list (G15) goes to the owner; a
+repeat of a refused request in the same task gets the same refusal. The rest goes to a fresh Claude run that sees the
+request, the task, the role, the active regulation, and nothing else. It has no tools, and the request's text is data
+for it, not instruction. It answers `grant` with the clause it stands on, `refuse` with the reason, or `call_owner`.
+Code then checks the answer: a grant needs an active clause that covers the action, stays off the owner's list, is no
+wider than the request, and is not for the chief engineer's own run. Otherwise it becomes `call_owner`. While the
+regulation is empty (G6) the chief engineer can only refuse or call the owner.
+
+A request waits without holding a machine. The chief engineer unavailable (limit, outage): the request waits until it is
+back. No message goes to the owner and nobody else answers (G13, G14); the panel shows the waiting requests. A call to the
+owner goes through the gate (G9), so a
+known answer is found first.
+
+**Grant log.** Requests and answers are kept with the run, the clause and the reason. They are shown in the panel and
+never found by the search (G16). A grant ends with the task or by the owner's revocation; in an ordinary session, with the
+session. When one kind of request repeats, the owner sees the count and may change the regulation; nothing changes by itself.
+
+**Ordinary sessions.** In Claude a permission hook asks the check. An exact match or a grant answers "allow"; a refusal
+answers "deny" with the reason; with nothing found the hook sends the request to the chief engineer and waits for the
+answer, also when the chief engineer is away. Before the tool's own hook limit it answers "deny, request still waiting",
+and the agent asks for the answer by the number of the request; a second request is not made. The usual prompt appears
+only on `call_owner`, or when the registry itself is off or unreachable (G1). It never fails to "allow". It is installed and switched on by the
+owner at the PC, never from a chat message. Deny rules and the tool's own safety checks stay above it. Codex has no such
+hook: a record can only choose the sandbox at the start of a job; what it can do is checked in phase 2. The chief
+engineer exists from phase 4, when runs exist; until then, with no record, the prompt appears as today.
+
 ## Regulation and its changes
 
 A version is an ordered set of clauses with a number, status and the owner's confirmation; one is active. A change
@@ -171,8 +233,9 @@ Russian and English: the criterion is the right record among the first results, 
 - The hub's relay role records presses. Activation, revocation and regulation changes are the owner's.
 - Client: the command `rig factory registry find | verdict | propose`, the same for Claude and Codex. Whether the Codex
   sandbox lets a command reach the loopback API is to be checked in phase 2; if not, the launcher does the search.
-- A process of the same Windows user could present a forged press (T8, D13). The result is a wrong project record, not a
-  permission (G7), and it is listed in the panel with its source.
+- A process of the same Windows user could present a forged press (T8, D13). The result is a wrong project record; a forged
+  button press of the owner could make a `permission` record. This is D13 at a higher price: closed only by a separate
+  Windows user for agents. Dangerous operations still need the second press, and every activation sends the owner a notice.
 
 ## Checks
 
@@ -183,7 +246,11 @@ Russian and English: the criterion is the right record among the first results, 
 | `registry-capture` | a pressed option of a registered poll becomes one active project record, word for word; typed text, a terminal answer, a sensitive question labelled harmless, global scope, a replayed press, or a press naming another or an unregistered poll does not become active | any of them becomes active |
 | `registry-scope` | a record of another project, repository or target, and a `once` record, is never offered as an answer | it is |
 | `registry-authority` | a precedent or project decision never outranks a rule; an exception only its own record; an equal conflict returns both | an order is broken |
-| `registry-not-a-guard` | with a matching active record every permission prompt, profile and second press behaves as without it | a guard reads a record |
+| `permission-by-record` | an exact match gives the right in Factory and in a Claude session; another target, argument, project, an unreadable call, a consumed `once`, a `decision` record or a similar text gives none; a deny rule wins; the check down shows the prompt and never allows; no answer of the chief engineer waits and shows no prompt | a right without an exact match, or a refusal turned into a pass |
+| `permission-second-press` | with a record and with a grant every dangerous operation still asks for the second press | one runs without it |
+| `role-rights` | a run can do what its role names and nothing else; a role is given only by the chief engineer, and its contents change only with the regulation | a right outside the role, record and grant |
+| `chief-engineer` | a grant without a clause, wider than the request, on the owner's list, for its own run, or after a refusal of the same request is not given; a request text with instructions changes nothing; an empty regulation grants nothing; an ordinary session asks the chief engineer before the owner; while it is away requests wait, no message or prompt reaches the owner, and after its return each is answered once | such a grant is given |
+| `grant-ends` | after the task, the session or a revocation the right is gone, and the next attempt of the same participant keeps it; the search never finds a grant | it outlives them or is found |
 | `registry-history` | supersede and revoke keep the old row and its link; the old record stays active until the new one is activated; rules left out of a version are not found, also by a session at work; a pressed answer to `outdated` supersedes the named record; update or delete of content raises | content changes, a link is missing, no record is active in between, or a left-out rule is found |
 | `regulation-change` | an agent token, one press, a conflict with a guard or an oversized version never activates; after an activation a session at work gets the difference before its next tool call, and its next inquiry uses the new version | a version becomes active, or a session at work goes on by the old one |
 | `registry-search` | measured set: the right record among the first results, none for unrelated questions; works without the model as `degraded` | a threshold is missed |

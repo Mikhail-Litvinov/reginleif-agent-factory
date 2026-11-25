@@ -83,7 +83,7 @@ revision it builds on). The 12 kinds are exactly the rows below.
 | `force-close` | `reason` | `force_close`: closes a task whose machine is gone (D21). Second press (D23). |
 | `allow-agent` | `agent_id` | `allow_agent`: adds an agent to the task's `allowedAgents` while it is ASSIGNED with no eligible agent. |
 
-Publication of a branch or pull request is also a dangerous operation (D23): it uses the same second press through
+Publication of the owner's part (governance.md Rights: merge into main, release, publication outside, a history rewrite) is also a dangerous operation (D23): it uses the same second press through
 `POST /tasks/{id}/publish`, which records a `confirmations` row and then the decision.
 
 `GET /decisions/{id}` (O R) reads a decision with `delivery_state` and `refusal_reason`. Decisions are never changed or
@@ -91,7 +91,7 @@ deleted. A refused decision stays as history.
 
 #### Second press (D23)
 
-A dangerous operation (`cancel`, `reject`, `force-close`, publication, loosening a policy, forcing a cleanup, activating
+A dangerous operation (`cancel`, `reject`, `force-close`, the owner's part of publications and deletions (G15), loosening a policy, forcing a cleanup, activating
 a regulation version) takes two
 presses in the same channel and by the same actor. The first request records a `confirmations` row (actor, channel,
 operation, target, request hash) and answers `409 confirmation_required` with `confirmation_id`, a one-time `nonce`
@@ -151,6 +151,30 @@ Role `registry`: search, open an inquiry, give a verdict, ask the gate, propose 
 It never activates, revokes or supersedes. A press is recorded only through the relay role. Orchestrator writes
 (precedents, drafts) come from the Control Worker's service account and carry the run id.
 
+### Roles and rights
+
+Design: [governance.md](governance.md) Rights (G13 to G17); tables: [database.md](database.md). Paths are a call, open to
+veto. A `permission` record is made and activated through the registry routes above (owner's button, never a poll
+press); the routes below hold roles (read only: their contents are part of the regulation and change with it), the check,
+requests and grants.
+
+| Method and path | Role | Body and answer |
+|---|---|---|
+| `GET /roles`, `GET /roles/{id}` | O R | Roles of the active regulation version and their rights (action, target, conditions). A role is changed only with the regulation (`/regulation/versions` above). |
+| `GET /tasks/{id}/participants` | O R | A task participant and its role, given by the chief engineer (G15). No route sets or changes a role. |
+| `POST /rights/check` | G W | The check of governance.md in its order: `action`, `target` (tool, program and arguments, real path, repository), `run_id` or `session_id`, `task_id`. Answers `200 {allowed, source}` with `source` one of `role`, `record` (the number), `grant` (its id) or, when `allowed` is false, `refused` (with the reason) or `none` (nothing found: the caller makes a request). Not an HTTP error. A `once` record is consumed in the same transaction. The worker uses it before it starts a run. The Claude permission hook uses it with the `registry` token: `allowed` gives "allow", `refused` gives "deny" with the reason, `none` makes the hook send a request and wait for the answer, also while the chief engineer is away; the usual prompt appears only on `call_owner`, or when the registry itself is off or unreachable (G1), never a silent allow. |
+| `POST /rights/requests` | G W | A right request: `run_id` or `session_id`, `action`, `target`, `reason`, `tried`. Code answers first (already in the role, owner's list, repeat of a refusal); the rest becomes a chief engineer run (Claude, in Factory and in an ordinary session alike; the owner is asked last). 202 with the request id and its state; the hook reads the answer from `GET /rights/requests/{id}`; before the tool's own hook limit it answers "deny, request still waiting" and the agent asks again by the request number, no second request is made. The `registry` token requests only for its own run or session. |
+| `GET /rights/requests`, `GET /rights/requests/{id}` | O R G | Requests with answer (`grant`, `refuse`, `call_owner`), clause and reason; `G` reads only its own. Filter `task_id`, `participant`, `state`. |
+| `POST /rights/requests/{id}/answer` | O | The owner's answer to a `call_owner` request (also a request on the owner's list, G15): grant or refuse. Allowed only for those states, never in place of an unavailable chief engineer. Never callable with `registry`. |
+| `GET /rights/grants` | O R | The grant log, filters `task_id`, `participant`, `state` (`live`, `ended`, `revoked`). Never part of `GET /registry/search`. |
+| `POST /rights/grants/{id}/revoke` | O | Revokes a live grant at once. Audited. |
+
+A grant belongs to one participant of one task, is found again for that participant's next attempt, and ends with the
+task (in an ordinary session, with the session) or by revocation; a run ending does not end it. Role `registry` may call
+`POST /rights/check` and make a request for its own run or session; it can never answer a request, grant, revoke, or
+give a role. Chief engineer answers, grants and role assignments are written by the Control Worker's service account
+after the code check. While the chief engineer is unavailable, requests wait; nothing goes to the owner.
+
 ### Worker and artifact endpoints
 
 The worker holds no database access: everything it leaves on the server goes here. All W endpoints check that the run
@@ -204,7 +228,11 @@ Every error is `application/problem+json` with `type`, `title`, `status`, `code`
 | `dependency_cycle`, `depth_exceeded`, `project_active`, `task_active` | 409 | A fact of PostgreSQL forbids it. |
 | `queue_isolation_required` | 409 | A second machine registers while no gateway binds certificates to queues (D28). |
 | `checksum_mismatch`, `payload_too_large` | 422, 413 | Upload checks. |
-| `guard_conflict` | 409 | A draft record or regulation version conflicts with the list of guards in code (governance.md G7); refused also for the owner. |
+| `guard_conflict` | 409 | A draft record, regulation version or `permission` record conflicts with the list of guards in "Order of authority" ([governance.md](governance.md)); refused also for the owner. |
+| `right_invalid` | 422 | A right (in a role or a `permission` record) that is not a valid structure: action, target and conditions against the schema, or free text. |
+| `grant_refused` | 409 | A grant answer the code check refuses (no covering clause, on the owner's list, wider than the request, for the chief engineer's own run); the request becomes `call_owner`. |
+| `request_closed` | 409 | An answer to a request already answered, or a request for a task or session that has ended. |
+| `permission_by_poll` | 409 | A `permission` record made from a poll press; it needs the owner's button. |
 | `regulation_conflict`, `regulation_too_large` | 409, 422 | A version conflicts with an active clause or owner decision (the body lists them); a version over the clause-size setting. |
 | `rule_needs_regulation` | 409 | A single activation of a `rule` record. |
 | `registry_scope_required` | 422 | An inquiry or record without a project or `global` scope. |
@@ -245,8 +273,9 @@ Every error is `application/problem+json` with `type`, `title`, `status`, `code`
 
 An agent process receives no API token of the roles owner, worker, relay or reader: only the worker and the owner's
 clients hold those, and the worker never passes them into the agent's environment. The one token an agent may hold is
-`registry`, bound to its session or run (search, inquiry, verdict, gate, draft; security.md T5); it can never activate,
-revoke or supersede a record, change a regulation version, or record a press. Even a worker token can never: record any decision, create, rotate or revoke a token,
+`registry`, bound to its session or run (search, inquiry, verdict, gate, draft, the rights check and a right request for
+its own run; security.md T5); it can never activate, revoke or supersede a record, change a regulation version or a
+role, answer a request, grant or revoke, or record a press. Even a worker token can never: record any decision, create, rotate or revoke a token,
 write a project, agent, policy or routing rule, create a task other than through `proposals` of a run it owns, change
 a confirmed artifact, read another machine's runs, or read the audit log. Acceptance needs an owner actor in code and
 in the database. Residual risk (D13): a same-user process could read the worker's credentials.

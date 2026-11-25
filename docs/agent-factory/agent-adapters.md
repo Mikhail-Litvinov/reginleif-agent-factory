@@ -22,6 +22,12 @@ operation takes an `executionId` created on the server; the adapter keeps its fa
 | `collectResult` | Reads the execution folder, validates the report schema (below), computes usage, returns a result or a schema finding. |
 | `cleanup` | Removes provider leftovers (temp, caches, supervisor job folder after upload). Never touches a worktree. |
 
+**Rights at start (G7, G13-G17, D31, governance.md "Rights").** `start` receives a profile that the server computes from
+the participant's role, its active `permission` records and its live grants; the adapter never decides a right. Claude
+runs also get the permission hook (installed by the owner at the PC) that asks the rights check during the run. Codex has
+no hook: a record can only choose its sandbox at job start, and a right needed later reaches it only through a new
+attempt of the same participant, which keeps its grants.
+
 What an adapter cannot do (fixed limits of the providers, from the audit):
 
 | Adapter | Cannot do |
