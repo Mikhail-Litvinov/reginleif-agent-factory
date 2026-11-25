@@ -1,6 +1,6 @@
 # Agent Factory: Temporal design
 
-Binding: [architecture.md](architecture.md) (D1-D31, the state table, state ownership); the registry and the regulation:
+Binding: [architecture.md](architecture.md) (D1-D33, the state table, state ownership); the registry and the regulation:
 [governance.md](governance.md). Facts: [audit.md](audit.md).
 Spec sections: "spec 5.2". Numbers are named settings; defaults are set in the measuring phase. "Call" marks a design
 choice made here, open to veto. Table and column names are those of [database.md](database.md).
@@ -19,11 +19,13 @@ workflow already ran, never starts again, so an expired history cannot restart i
 
 `TaskWorkflow` keeps in memory: status, `revision`, counters (`attempt`, `rework`, `autoFix`), `executionId` and machine of
 the current run (empty when no run is alive), worktree reference, `pauseRequested`, `stopping`, `endUnconfirmed`,
-`resumeTo`, `blockKind`, `blockReason`, `allowedAgents` (agents the owner allowed for this task), the map `handled`
-(decision id to outcome), the settings snapshot, `regulationVersionId` (the version the current run
-started with, stored as `task_runs.regulation_version_id`; rules are always read from the active version, G10 of governance.md). Waiting for the owner or a dependency is `condition()` on this state: no
-worker is held and no timer polls. Every state change is a call to `PersistTaskEvent` before the next step. Names in
-the database are the snake_case forms (`block_kind`, `resume_to`, `pause_requested`, `end_unconfirmed`).
+`resumeTo`, `blockKind`, `blockHandler`, `blockReason`, `allowedAgents` (agents the owner allowed for this task), the map
+`handled` (decision id to outcome), the settings snapshot, `regulationVersionId` (the version the current run
+started with, stored as `task_runs.regulation_version_id`; rules are always read from the active version, G10 of
+governance.md). Waiting for a decision or a dependency is `condition()` on this state: no worker is held and no timer
+polls. Every state change is a call to `PersistTaskEvent` before the next step. Names in the database are the snake_case
+forms (`block_kind`, `block_handler`, `resume_to`, `pause_requested`, `end_unconfirmed`). A standing task of an ordinary
+session has no workflow (database.md) and none of this applies to it.
 
 Main path by state (all moves follow the architecture's table; each arrow is one `PersistTaskEvent`):
 1. CREATED: `PrepareTask` (loads task and requirements revision) then PLANNING.
@@ -34,7 +36,8 @@ Main path by state (all moves follow the architecture's table; each arrow is one
 4. WAITING_DEPENDENCIES: waits for the Signal `wake`; each wake re-runs `ResolveDependencies` (a read of PostgreSQL). A
    dependency that ended in a final state other than ACCEPTED goes to BLOCKED `dependency` (D15).
 5. ASSIGNED: `SelectAgent`, `PrepareWorkspace`, `StartAgentExecution`. No machine or no eligible agent: stays ASSIGNED,
-   `NotifyUser` once, shown to the owner with the failed filters; the wait ends on `wake`, on `cancel` or on `allow_agent`.
+   `NotifyUser` once, as a notice to the chief engineer with the failed filters (the owner sees it only by the
+   owner-load rule, BLOCKED kinds and exits below); the wait ends on `wake`, on `cancel` or on `allow_agent`.
    There is no timeout that moves the task (call: a silent wait is made visible by the notice, and `notice.repeatHours`
    repeats it, see Open, decided in its phase).
 6. RUNNING: `MonitorExecution` until an outcome; then `CollectResults`, `UploadResults`. Outcome `finished` goes to
@@ -54,10 +57,11 @@ Main path by state (all moves follow the architecture's table; each arrow is one
 
 - **Checks (D26).** A mandatory check that ends `not_run` first starts an agent run to repair its cause (tool path,
   missing file, a broken command), up to `autoFix.max` times; the check then runs again. A check still not run after
-  that goes to BLOCKED `check_environment` with the reason; it is never counted as passed and never ignored.
+  that goes to BLOCKED `check_environment` with the reason, handled first by the chief engineer; it is never counted as
+  passed and never ignored.
 - **Reviewer (D20).** `RequestReview` selects an enabled agent whose provider differs from the providers of the
   implementer runs. When the reviewer's usage limit is spent, the task stays VERIFYING with the reason "waiting for the
-  reviewer's limit" and one notice, and the workflow sleeps until the known reset time (`limit.maxWait` caps one sleep;
+  reviewer's limit" and one notice to the chief engineer, and the workflow sleeps until the known reset time (`limit.maxWait` caps one sleep;
   without a known reset time the task goes to BLOCKED `usage_limit`). When no such agent exists the task goes to BLOCKED
   `check_environment`.
 - **Findings (D25).** Each review finding has a kind: `defect`, `requirement_change`, `suggestion`. The implementer's
@@ -75,7 +79,7 @@ infrastructure faults. A new agent attempt is a workflow loop bounded by `attemp
 
 | Class | Temporal retry | Error types | Exhaustion |
 |---|---|---|---|
-| `infra` | yes, bounded by schedule-to-close | `DbUnavailable`, `ApiUnavailable`, `NetworkError` | BLOCKED `execution`, notice |
+| `infra` | yes, bounded by schedule-to-close | `DbUnavailable`, `ApiUnavailable`, `NetworkError` | BLOCKED `execution`, notice to its handler |
 | `workerLost` | yes, same machine queue; first step is a lookup | heartbeat timeout | BLOCKED `execution` |
 | `agentDied` | no; workflow loop | outcome `died` | BLOCKED `execution` after `attempt.max` |
 | `unclear` | no | outcome `unclear` | BLOCKED `execution` at once, after the inspection |
@@ -83,39 +87,79 @@ infrastructure faults. A new agent attempt is a workflow loop bounded by `attemp
 | `invalid` | no | `ValidationError`, `PermissionDenied`, `BudgetExceeded`, `BadInput` (non-retryable) | FAILED when no attempt can make the input valid (only in PLANNING, RUNNING and VERIFYING); otherwise BLOCKED `execution` (permission, budget) or `scope` |
 | `external` | only after checking the target by idempotency key | `PublishFailed` | BLOCKED `execution` |
 
+Every exhaustion into BLOCKED goes to the handler of its kind first (below): the chief engineer, unless the cause needs
+the owner.
+
 ## BLOCKED kinds and exits
 
-`blockKind` is set when the task enters BLOCKED and decides the exit (architecture). The owner's decision is
-`resolve_block` with a choice; a choice that does not belong to the kind is refused `block_kind_mismatch`. Before
-blocking, agents try to settle a technical cause (D18).
+`blockKind` is set when the task enters BLOCKED and decides the exit (architecture). The decision is `resolve_block` with
+a choice; a choice that does not belong to the kind is refused `block_kind_mismatch`. Before blocking, agents try to
+settle a technical cause (D18).
+
+**Who handles a block first.** The task also carries `blockHandler` (`chief_engineer` or `owner`, `tasks.block_handler`),
+set with the kind by a rule in code when the task enters BLOCKED. `scope` and `agent_question` enter with `owner`. The
+other five kinds (`dependency`, `execution`, `usage_limit`, `check_environment`, `rework_limit`) enter with
+`chief_engineer`, unless the cause needs the owner: a requirement, the scope, a cost, a dangerous operation, or an
+owner's own credential such as a login; then they enter with `owner`. The engineer's resolution is a `resolve_block`
+decision row with its run (`engineer_run_id`) and channel `api`, applied by the same handler as the owner's. The choices
+are those of the kind, except one that raises a cost, token or time budget or does a dangerous operation: that is the
+owner's (`422 owner_only`). The engineer's extra choice `call_owner` leaves the status as it is, sets
+`blockHandler = owner` once and raises the owner's notice. The owner may resolve any block and wins over a concurrent
+engineer resolution: the row version decides and the loser is refused `block_handled`. A `usage_limit` block reaches the
+owner only when no enabled agent of any provider can run. With the chief engineer unavailable the block waits and nobody
+is told (G13). Leaving BLOCKED clears the handler. The owner hears of the five kinds only by `call_owner` or when the
+block entered as `owner`; this is the whole of the owner-load rule for blocks, kept by the check `block-owner-load`.
 
 **The question gate (G9, governance.md).** When the registry is on, `agent_question` and BLOCKED `scope` raised by an
 agent's question go through the gate on the server before the owner is asked: the question needs an inquiry id of the run,
 a verdict on every found record, and a second search by the real text. A failed check or a verdict
 `applies` sends the found records to the agent in a new run of the same attempt budget (`attempt.max`); when that budget
 is spent, the task goes to the owner with the question and the records. The other kinds (`dependency`, `execution`,
-`usage_limit`, `check_environment`, `rework_limit`) are not questions of an agent: they never pass the gate and notify
-the owner at once. After `registry.gateTimeoutMs` the question passes (fail open), so a down
+`usage_limit`, `check_environment`, `rework_limit`) are not questions of an agent: they never pass the gate and go to the
+chief engineer first (above). After `registry.gateTimeoutMs` the question passes (fail open), so a down
 registry never holds a task. The owner's answer to the poll is recorded as a registry record by the API from the press
 (not by the workflow), and the next run's inquiry finds it.
 
-| Kind | Entered when | Choices | Exit |
-|---|---|---|---|
-| `scope` | plan or finding outside the approved scope; a dispute about requirements, scope or cost | `answer` | PLANNING |
-| `dependency` | a dependency ended without ACCEPTED (D15) | `remove_dependency`, `replace_dependency` (a new dependency inside the project) | READY |
-| `execution` | infra or worker faults exhausted; attempts or budget exhausted; unclear state the inspection settled nothing; a failed publication | `retry`, `raise_limit` (when the cause is a limit) | ASSIGNED |
-| `usage_limit` | agent limit with no known reset time, or beyond `limit.maxWait` | `retry` | ASSIGNED |
-| `agent_question` | the agent asked the owner | `answer` | ASSIGNED |
-| `check_environment` | a mandatory check could not run after repair (D26); no reviewer of another provider (D20) | `retry` (after the owner fixed the cause, for example enabled an agent) | VERIFYING |
-| `rework_limit` | `rework.maxRounds` reached | `raise_limit` | REWORK_REQUIRED |
+| Kind | Entered when | Handled first by | Choices | Exit |
+|---|---|---|---|---|
+| `scope` | plan or finding outside the approved scope; a dispute about requirements, scope or cost | owner | `answer` | PLANNING |
+| `dependency` | a dependency ended without ACCEPTED (D15) | chief engineer | `remove_dependency`, `replace_dependency` (a new dependency inside the project) | READY |
+| `execution` | infra or worker faults exhausted; attempts or budget exhausted; unclear state the inspection settled nothing (D16); a failed publication | chief engineer | `retry`, `raise_limit` (when the cause is a limit; the owner's if it raises a cost) | ASSIGNED |
+| `usage_limit` | agent limit with no known reset time, or beyond `limit.maxWait` | chief engineer; the owner only if no enabled agent of any provider can run | `retry` | ASSIGNED |
+| `agent_question` | the agent asked the owner | owner | `answer` | ASSIGNED |
+| `check_environment` | a mandatory check could not run after repair (D26); no reviewer of another provider (D20) | chief engineer; the owner when the fix is an owner's credential or a cost | `retry` (after the cause is fixed, for example an agent enabled) | VERIFYING |
+| `rework_limit` | `rework.maxRounds` reached | chief engineer | `raise_limit` (the owner's if it raises a cost) | REWORK_REQUIRED |
+
+A block whose handler is the chief engineer also has the choice `call_owner` for it (the status stays, the handler
+becomes the owner), and the owner may resolve any row. A block entered as `owner` (a cause that needs the owner) shows
+the owner as its handler from the start and the engineer has no choice on it.
 
 **A right request (G7, G13-G17, D31, governance.md "Rights").** A run that needs a right it does not have asks the check
 and waits for the answer without holding a machine; the task stays RUNNING or VERIFYING, and no new BLOCKED kind exists.
-The wait for the chief engineer is a run of role `chief_engineer`, and its server steps are local activities (D28). Only
-the answer `call_owner` (and a request on the owner's list, G15) goes through the gate above and reuses BLOCKED
-`agent_question`. An unavailable chief engineer (limit, outage) leaves the request waiting: no BLOCKED, no notice to the
-owner, nobody else answers; the panel shows the waiting requests, and each is answered once when it is back. A grant belongs to one participant of the task: the next attempt keeps it, a finished or died run does
-not end it, and it ends with the task or by the owner's revocation.
+The wait for the chief engineer is a run of role `chief_engineer`, and its server steps are local activities (D28). Each
+step of the answer is its own immutable `right_answers` row (the chief engineer's, the code's, the owner's), so
+`call_owner` is not the final word: the owner's answer is recorded as a further row and the grant points at the row that
+gave it. Only the answer `call_owner` (and a request on the owner's list, G15) goes through the gate above and reuses
+BLOCKED `agent_question`. An unavailable chief engineer (limit, outage) leaves the request waiting: no BLOCKED, no notice
+to the owner, nobody else answers; the client shows the waiting requests, and each is answered once when it is back. A
+run of the chief engineer for an ordinary session belongs to the project's standing task (database.md), which has no
+workflow: the request and its answer are rows only. A grant belongs to one participant of the task: the next attempt
+keeps it, a finished or died run does not end it, and it ends with the task, by the owner's revocation, or at once by a
+critical event (`ended_by = 'critical'`, written with the suspension in one transaction).
+
+**Assessment, terms of limits and replacement (D32, [personnel.md](personnel.md)).** No workflow is added. Facts are
+written by the Control Worker as local activities at the end of a run, a check or a review (`RecordPersonnelFact`, keyed
+by the event key). The assessment cycle and the end of a limit's term are a loop in the Control Worker process, like the
+outbox relay: it computes assessments, files incidents and lifts a limit whose term ran out, each as a local activity
+with its own key, so a repeat after a crash returns the stored result. A run of the chief engineer or of the
+independent evaluator is a run of its own role, and its server steps are local activities (D28). The critical reaction
+(stop the run, close the rights, notify the owner), from phase 4, is no workflow step: it is one transaction of the
+control component (`af_control`): the suspension, the grants ended `critical`, the tokens revoked, the audit row
+`rights.suspend`, the outbox order `stop_run` (the run killed by its identity, whole tree) and the notice to the owner,
+with the same `StopExecution` and `NotifyUser` activities carrying out the outbox orders. It never waits for a workflow
+or the Temporal server. A measure or a replacement decided by the owner is an ordinary recorded decision read by
+`ReadDecision`. Nothing is added to the
+operation matrix and no new BLOCKED kind exists.
 
 Cancel is open to every kind. The owner's feedback and revision are open too (matrix below).
 
@@ -146,7 +190,7 @@ Worker sets `enableNonLocalActivities: false` and workflow code reaches these st
 | `ReadDecision` | local | decision id | S C | infra | actor, revision or single-use check fails | outcome `refused` with a reason, task unchanged |
 | `RecordDecisionOutcome` | local | decision id | S C | infra | none | none; the relay re-reads an unresolved decision |
 | `PersistTaskEvent` | local | event id, row version | S C | infra | version conflict is re-read, not failed | BLOCKED `execution` |
-| `NotifyUser` | local, writes a notice via API; Telegram client delivers | notice key | S C | infra | none | none (a lost notice is shown in the panel) |
+| `NotifyUser` | local, writes a notice via API; Telegram client delivers | notice key | S C | infra | none | none (a lost notice is shown in the client) |
 | `CreateChildTasks` | local | origin task + proposal id | S C | infra | depth, count, budget, scope limit | the proposal stays `open` for the owner |
 | `RequestReview` | local (selects reviewer, creates review record) | task + round | S C | infra | no agent of another provider | BLOCKED `check_environment` |
 | `PrepareWorkspace` | `machine-<id>` | execution id | S Q C | workerLost | repo missing, dirty base | BLOCKED `execution` |
@@ -162,6 +206,9 @@ Worker sets `enableNonLocalActivities: false` and workflow code reaches these st
 | `RunGpuJob` | `machine-<id>-gpu`, one slot | job key in the generator's queue | S Q H | workerLost | `invalid` | BLOCKED `execution` |
 | `ReconcileMachine` | machine, at worker start before polling | none, read mostly | S | infra | none | machine not registered |
 | `LoadSettings` | local | read only | S | infra | none | none |
+| `RecordPersonnelFact` | local; phase 5 | event key | S C | infra | none | none; a lost write is repeated by its key. Written by the server from a recorded run, check or review, never from an agent's report |
+| `RunAssessment` | local; phase 8 | agent + period | S C | infra | below the minimum facts (result "not enough data") | none; the result is stored, a repeat returns it |
+| `ApplyMeasureTerm` | local; phase 8 | measure id + term end | S C | infra | none | none; lifts a limit whose term ended, audited |
 | `RecordPrecedent` | local; writes through `RegistryService` | task id + run id + case (settled dispute, resolved block, answered question) | S C | infra | none | none; a lost write is repeated by its key. Writes only an agent `precedent` or a `draft`, never an active owner record |
 
 Heartbeat details of `MonitorExecution` and `RunGpuJob` are the log offset and the execution id, so a retry attaches. The
@@ -183,14 +230,18 @@ refusal changes no task state and is shown to the owner.
 Order of checks: (1) the **validator**, deterministic, sees only the Update and workflow memory, and checks form only:
 the operation id is known, the payload has the fields of its kind, the Update id is not in `handled`. It cannot run
 activities and does not look at state or revision. (2) The **handler** takes a mutex so one decision applies at a time,
-calls `ReadDecision` (the actor is an owner or a relay press that maps to an owner; the revision is the current one for
-kinds that carry it; the decision is not already resolved), then looks up the cell of the matrix, applies the effect,
+calls `ReadDecision` (the actor is an owner or a relay press that maps to an owner, or for `resolve_block` the chief
+engineer's run when the block's handler is the chief engineer; the revision is the current one for kinds that carry it;
+the decision is not already resolved), then looks up the cell of the matrix, applies the effect,
 calls `PersistTaskEvent` and then `RecordDecisionOutcome`, and stores the outcome in `handled`. A repeated id returns the
 stored outcome and has no effect. A refusal inside the handler returns the refusal code to the relay (no exception, no
 workflow failure), so Update failures mean only faults.
 
 Refusal codes: `not_allowed_in_state`, `revision_stale`, `actor_not_allowed`, `already_resolved`, `block_kind_mismatch`,
-`task_closed`. The first four and `block_kind_mismatch` come from the handler; `task_closed` is written by the relay when
+`block_handled`, `task_closed`. The first four, `block_kind_mismatch` and `block_handled` (a `resolve_block` of the
+chief engineer after the owner took the block, or after `call_owner` made the owner the handler; the loser of the race
+by row version) come from the handler; an engineer's choice that raises a cost or does a dangerous operation is refused
+`owner_only` by the API before any outbox row exists (HTTP 422, not a workflow refusal). `task_closed` is written by the relay when
 the workflow is already closed or the task is final in PostgreSQL (the relay marks the outbox row and calls
 `RecordDecisionOutcome` through the API path, not a workflow).
 
@@ -229,9 +280,10 @@ X; `flag` sets a flag, no move; `stop` stops a live run first (rule L). `*` see 
 `*` Revise in BLOCKED goes to PLANNING and clears the block, except in kind `execution` with an unsettled run
 (inspection found nothing): the revision is stored, the task stays BLOCKED, and the owner's next `resolve_block` goes to
 PLANNING instead of ASSIGNED (call: a new run must never start beside a run that may be alive). `resolve_block` of kind
-`execution` is the owner's word that the old run ended. The same holds in PAUSED entered from such a BLOCKED: cancel follows
+`execution` is the handler's word that the old run ended (the chief engineer's, or the owner's after `call_owner`). The
+same holds in PAUSED entered from such a BLOCKED: cancel follows
 rule L, and `resume` returns to BLOCKED with the revision stored. `approve`, `reject`,
-`request_changes` and `resolve_block` carry the revision the owner saw; `revise_requirements` carries the revision it
+`request_changes` and `resolve_block` carry the revision the deciding actor saw; `revise_requirements` carries the revision it
 builds on; a stale one is refused `revision_stale`. In ASSIGNED, if `StartAgentExecution` is already scheduled the intent
 may exist: pause is a `flag`, cancel is CANCELLING, and a started run takes the RUNNING cell. RUNNING with `stopping` set
 (a revision stop) shows RUNNING until the machine confirms the end, and then `stopping` clears. A `flag` is applied when
@@ -252,20 +304,21 @@ started.
 | VERIFYING | AWAITING_APPROVAL, REWORK_REQUIRED, BLOCKED, FAILED | pause (held), revise | cancel |
 | AWAITING_APPROVAL | none; waits for the owner | approve, reject, request_changes, revise, pause | cancel |
 | REWORK_REQUIRED | ASSIGNED | pause, revise | cancel |
-| BLOCKED | none; waits for the owner | `resolve_block`, revise, pause | cancel |
+| BLOCKED | `resolve_block` by the chief engineer when `blockHandler = chief_engineer`; otherwise waits for the owner | `resolve_block`, revise, pause | cancel |
 | PAUSED | none; waits for the owner | resume, revise | cancel |
 | CANCELLING | CANCELLED when the machine confirms | `force_close` | none needed |
 
 A test walks this table and the matrix (testing.md): no cell is empty, every non-final state reaches a final state by at
 least one path that needs no unavailable actor, and a state that waits for the owner has an owner operation to leave it.
-AWAITING_APPROVAL, BLOCKED and PAUSED wait for the owner by design; the owner's cancel is always possible, so none is a
-dead end. CANCELLING waits for the machine and has `force_close` for a machine that never returns.
+AWAITING_APPROVAL and PAUSED wait for the owner by design; BLOCKED waits for its handler, the chief engineer first and
+the owner when `blockHandler = owner`, and the owner can always resolve it; the owner's cancel is always possible, so
+none is a dead end. CANCELLING waits for the machine and has `force_close` for a machine that never returns.
 
 ## Continue-As-New
 
 Triggered when `continueAsNewSuggested` is true or `history.maxEvents` is passed, only at a quiet point: no activity in
 flight and `allHandlersFinished()`. A long `MonitorExecution` does not force it (heartbeats add no events). It carries:
-task id, status and flags (`pauseRequested`, `stopping`, `endUnconfirmed`, `resumeTo`, `blockKind`, `blockReason`),
+task id, status and flags (`pauseRequested`, `stopping`, `endUnconfirmed`, `resumeTo`, `blockKind`, `blockHandler`, `blockReason`),
 `revision`, `attempt`, `rework`, `autoFix`, current `executionId` and machine, worktree reference, `allowedAgents`,
 `handled` (decision ids and outcomes), dependency and child ids, the settings snapshot, `regulationVersionId`, budget used, the contract
 version. The Update dedupe of Temporal does not cross a roll-over; `handled` and the unique key in PostgreSQL do.
@@ -298,8 +351,8 @@ is rebuilt from the workflow's own events if a row version lags: the workflow is
 `InspectWorkspace` records Git state and file changes (see the adapters document for the two files of Rig's temp hook).
 (3) `died`: new attempt in the same worktree, session resumed where the adapter allows, results of the earlier attempt
 kept, within `attempt.max` and budget (D16). (4) `unclear`: never a second run; a read-only inspection of processes,
-folder and Git; if it settles the state the matching row applies, else BLOCKED `execution` and the owner chooses
-`retry` or cancel.
+folder and Git; if it settles the state the matching row applies, else BLOCKED `execution` and the chief engineer
+chooses `retry` or cancel (or `call_owner`).
 
 **F. Network isolation.** (1) The worker starts nothing new without a connection; no decision needing the server is taken
 locally. (2) Running processes end by their runner time limit or finish. (3) On reconnect `ReconcileMachine` uploads

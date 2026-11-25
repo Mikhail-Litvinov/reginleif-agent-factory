@@ -1,6 +1,6 @@
 # Agent Factory testing
 
-Design, nothing is built. [architecture.md](architecture.md) is binding (D1 to D31 are its decisions; "call" marks a choice made in these documents, open to veto); threats and their
+Design, nothing is built. [architecture.md](architecture.md) is binding (D1 to D33 are its decisions; "call" marks a choice made in these documents, open to veto); threats and their
 check ids (`secret-canary`, `path-escape`, ...) are in [security.md](security.md); the decision registry, the regulation
 and their check ids are in [governance.md](governance.md). A check named here must be able to
 fail: each has a pass criterion and a fail criterion, and a new check is first shown failing on the old or broken code.
@@ -40,9 +40,9 @@ Table-driven where the rule is data; each can fail (a cell removed, a check drop
 
 | Id | Check | Pass | Fail |
 |---|---|---|---|
-| `ops-matrix` | Walks the 16 states by the 12 decision kinds of [temporal.md](temporal.md) (the operations matrix); for each pair sends the decision to a workflow in that state | every cell has the stated effect (applied, or refused with one of `not_allowed_in_state`, `revision_stale`, `actor_not_allowed`, `already_resolved`, `block_kind_mismatch`, `task_closed`); no cell is empty or leaves the workflow stuck | a cell without an effect, an unknown refusal reason, or a state change outside the transition table |
-| `state-exit` | For every state, the "every state has an exit" table: drive the task to the state, then take the stated exit | each state reaches a final state or its normal successor, CANCELLING and BLOCKED included (D21, D26) | a state with no exit |
-| `decision-recorded` | Send a decision that must be refused (stale revision, closed task, wrong actor, wrong block kind) through the API | one `task_decisions` row, `refused` with a reason and a notice; the API answers 202, never an error for state | no row, or an HTTP refusal for a state fact |
+| `ops-matrix` | Walks the 16 states by the 12 decision kinds of [temporal.md](temporal.md) (the operations matrix); for each pair sends the decision to a workflow in that state | every cell has the stated effect (applied, or refused with one of `not_allowed_in_state`, `revision_stale`, `actor_not_allowed`, `already_resolved`, `block_kind_mismatch`, `block_handled`, `owner_only`, `task_closed`); `resolve_block` is walked once with the owner and once with the chief engineer as the actor; no cell is empty or leaves the workflow stuck | a cell without an effect, an unknown refusal reason, or a state change outside the transition table |
+| `state-exit` | For every state, the "every state has an exit" table: drive the task to the state, then take the stated exit; for BLOCKED each of the seven kinds with each handler (`chief_engineer`, `owner`) | each state reaches a final state or its normal successor, CANCELLING and BLOCKED included (D21, D26); a block with the handler `chief_engineer` has an exit by the engineer's `resolve_block` and by `call_owner`, one with the handler `owner` by the owner's decision | a state with no exit, or a block whose handler has none |
+| `decision-recorded` | Send a decision that must be refused (stale revision, closed task, wrong actor, wrong block kind, a block already handled by the owner, a cost raise or a dangerous operation by the chief engineer) through the API | one `task_decisions` row, `refused` with a reason (`block_handled`, `owner_only` included) and a notice; the API answers 202, never an error for state | no row, or an HTTP refusal for a state fact |
 | `decision-kinds` | The enum in [database.md](database.md), the API routes of [api.md](api.md) and the handler table of the workflow list the same 12 kinds (`allow_agent` included) | identical sets | any set differs |
 | `second-press` | Each dangerous operation (`cancel`, `reject`, `force-close`, publication) with one press, with a second press in another channel, with an expired or reused one | only the same-channel second press inside the window is accepted, once | any other form accepted |
 | `relay-press-once` | The relay submits the same `press_id` twice, and a press from an unmapped Telegram user | the first decision recorded; the second refused; the unmapped user refused | a second row for one press id, or an unmapped user accepted |
@@ -51,11 +51,22 @@ Table-driven where the rule is data; each can fail (a cell removed, a check drop
 | `gpu-order` | Several tasks request one machine's GPU slot with different priorities and request times, while one job runs | grants go by highest priority, then oldest request; one holder at a time; no preemption | a lower priority or a later request granted first, or two holders |
 | `cleanup-command` | Cleanup of a final task, a task not final, a task awaiting approval, a worktree with unpublished changes; the chief engineer's cleanup inside and outside its part (G15); and a day count passing on the injected clock | nothing is deleted by itself; a cleanup removes only files and keeps rows; refusals as listed in [database.md](database.md) | anything removed without the command or a grant, anything of the owner's part removed by the chief engineer, or a row deleted |
 | `review-provider` | Review of a task whose implementer ran on one provider, with and without another provider eligible (D20) | another provider reviews; with none the task waits and a notice is sent | the same provider reviews |
-| `check-not-run` | A mandatory check that cannot run (D26) | agents get a repair attempt; then BLOCKED `check_environment`; never AWAITING_APPROVAL | a `not_run` check counted as passed or sent to the owner as complete |
+| `check-not-run` | A mandatory check that cannot run (D26) | agents get a repair attempt; then BLOCKED `check_environment` with the handler `chief_engineer`, so the first notice goes to the chief engineer; never AWAITING_APPROVAL | a `not_run` check counted as passed or sent to the owner as complete, or the owner told first |
+| `block-owner-load` | Enter every BLOCKED kind with a cause that needs the chief engineer (a dependency, an execution error, a usage limit, an environment check, a rework limit) and with one that needs the owner (requirements, scope, cost, a dangerous operation, an owner's credential); the engineer resolves one, calls the owner on another, is unavailable on the injected clock for a third; a usage limit with another provider enabled and with none; the owner decides a block the engineer is resolving (D15, D18, G13) | the handler follows the one rule in code; the owner gets a notice only for an `owner` block or after `call_owner`; a limit reaches the owner only when no enabled agent of any provider can run; with the engineer away the block waits and nobody is told; the owner's decision wins (`block_handled`) | the owner told of a block the engineer can settle, a block that stays with the engineer after `call_owner`, or a notice sent while the engineer is away |
+| `poll-arbiter` | One poll of each arbiter (`hub` for an ordinary session, `api` for a Factory decision); the same answer from the PC and from Telegram, repeated with the same idempotency key, with the API down, and late; the hub's confirmation lost and retried | an ordinary-session poll is settled once by the hub (a request row `pending`, then `accepted` or `refused`, retried until confirmed) and the API never decides it; the relay answers with the API down; a Factory poll is settled by `task_decisions` once, a late answer refused `poll_closed`; only the hub token sets the result columns | two arbiters for one poll, a second settlement, a late answer taken, or a result written by another token |
+| `event-cursor` | Commit two transactions in the reverse order of their sequence numbers (the later number first) while a reader holds a cursor; read each stream (`task_events`, `audit_log`, `notifications`, `messages`) with it; send a cursor of another stream and a malformed one | the reader returns only rows older than the oldest running transaction, so the late-committed row appears on a later read and none is skipped or repeated; a foreign or malformed cursor is refused `bad_cursor` (400) | a row skipped or read twice, a cursor accepted by another stream, or an `after_seq` read of a number the client builds |
+| `standing-task` | A ten-minute run for an ordinary session in a project and in none; the request row, the limits, the scheduler, the lists, the soft delete and the cleanup | one standing task per project and one for `_factory`, fixed RUNNING, no workflow, no decision, no workspace; the request row links to it; the scheduler, lists, soft delete and cleanup never touch it; agent and worker concurrency still apply; attempt, rework and budget rules do not | a second standing task, a standing task in a list or in cleanup, a request with no task, or a task state change |
+| `right-steps` | A request answered by the chief engineer with `call_owner`, then by the owner; a repeat; an update of a step row | one immutable `right_answers` row per step (`chief_engineer`, `code`, `owner`); the grant points at the step that gave it; no update of a request or an answer is allowed to any account | a final `call_owner`, an owner's answer that cannot be recorded, or an updated step |
+| `review-same-subject` | A decision that relies on a `task_reviews` row (the rule "One rule for every review a decision relies on" of [database.md](database.md)) with a review of another task, a verdict other than `pass`, and one written by the subject's own run or agent or the decider's | the database trigger refuses it; with the same task, verdict `pass` and another author it passes; the decision's row holds the review's id, not a copy of the verdict | any of the three accepted, or a verdict copied into the decision's row |
+| `review-same-incident` | A measure that relies on an independent check or a classifier review (`qualification_reviews`), with one tied to another incident, a verdict other than `confirmed`, the author of the measure or of the classification | the trigger refuses it; `incidents.classified_by` is set once; with the same incident, `confirmed` and another author it passes | any of them accepted, or `classified_by` changed |
+
+Phases of the seven checks above (as in [modules.md](modules.md)): `block-owner-load` 2 and 3 (the rule and the
+refusals in 2, the workflow side in 3, the engineer's side in 4), `poll-arbiter`, `event-cursor` and `standing-task` 2, `right-steps` 4, `review-same-subject` 5 and
+`review-same-incident` 8. Each runs on the disposable database and the injected clock.
 
 ## Registry and regulation checks
 
-The fourteen checks (nine of the registry and regulation, five of the rights, D31) are defined in
+The fifteen checks (nine of the registry and regulation, six of the rights, D31) are defined in
 [governance.md](governance.md) (section "Checks"), each with its pass and fail criterion; they are not copied here. They
 run on the disposable database and a fake clock like the rest, and a new one is first shown failing on the broken code.
 
@@ -63,14 +74,54 @@ run on the disposable database and a fake clock like the rest, and a new one is 
 |---|---|---|
 | `registry-first`, `registry-fail-open` | integration: API gate, the hub question hook as a fake command, a timeout on the injected clock | 2 |
 | `registry-capture`, `registry-scope`, `registry-authority` | unit (order and scope rules as data) and integration (the relay press path) | 2 |
-| `permission-by-record` | integration: the rights check and the permission hook as a fake command, every near miss (target, argument, project, unreadable call, consumed `once`, a `decision` record, similar text) against an exact match, a deny rule, the chief engineer unavailable on the injected clock (a waiting request, no prompt, no notice to the owner), the registry off or unreachable (the prompt) | 2 (the hook cases with the chief engineer in 4) |
+| `permission-by-record` | integration: the rights check and the permission hook as a fake command, every near miss (target, argument, project, unreadable call, consumed `once`, a `decision` record, similar text) against an exact match, a deny rule, the chief engineer unavailable on the injected clock (a waiting request, no prompt, no notice to the owner), the registry off or unreachable (the prompt in an ordinary session, a denial in a Factory run `claude -p`), a native prompt pressed by the owner (never a grant) | 2 (the hook cases with the chief engineer in 4) |
 | `permission-second-press` | integration: every dangerous operation with a record and with a grant still asks for the second press | 2 (with a grant, 4) |
 | `role-rights` | integration: a run does what its role names and nothing else, per participant; a role is given only by the chief engineer and its contents change only with the regulation | 2 |
-| `chief-engineer` | unit (the code check of an answer, as data) and integration (a fake chief engineer: no clause, too wide, owner's list, own run, repeat of a refusal, instructions in the request, empty regulation, ordinary session asks it before the owner, while it is away requests wait and each is answered once after its return) | 4 |
-| `grant-ends` | integration and database: end of task, end of session, revocation, next attempt of the same participant; the search never returns a grant | 4 |
+| `chief-engineer` | unit (the code check of an answer, as data) and integration (a fake chief engineer: no clause, too wide, owner's list, own run, repeat of a refusal, instructions in the request, empty regulation, ordinary session asks it before the owner, while it is away requests wait and each is answered once after its return; an ordinary session's request handled under the standing task) | 4 |
+| `grant-ends` | integration and database: end of task, end of session, revocation, a critical suspension in each of the six places a right lives (role gate, grant, `permission` record, token, live session, Codex sandbox), next attempt of the same participant, a restore that does not revive a grant; the search never returns a grant | 4 |
+| `rights-suspended` | integration and database: an open suspension refuses at step 1 for every agent, the chief engineer included; one open row per agent; the suspension, the ended grants, the revoked token, the audit row, the `stop_run` order and the notice written in one transaction; a restore by the suspended agent refused, by the chief engineer or (for the chief engineer's own suspension) the owner accepted | 2 (the stop order executed in 4) |
 | `registry-history`, `regulation-change` | database (triggers, grants) and integration (two presses, version size, guard conflict) | 2 |
 | `registry-search` | measured on a set of questions with the chosen model; also runs without the model (`degraded`) | 2 |
 | `registry-import` | integration: Factory documents and project memories as input, a second run | 2 |
+
+## Personnel checks
+
+The eight checks of [personnel.md](personnel.md) (section "Checks", D32) are defined there with their pass and fail
+criteria; they are not copied here. They run on the disposable database and a fake clock, with fake agents and a fake
+evaluator, and a new one is first shown failing on the broken code. No real month passes: `personnel-load` simulates it on
+the injected clock.
+
+| Id | Level | Phase |
+|---|---|---|
+| `personnel-facts` | database and integration: every source (check, review, run, request) writes one fact; an agent's text, a report and a token write none; a configuration change opens a new history | 5 |
+| `personnel-score` | unit (the score as data: weights, categories, "not enough data" below the minimum) and integration (a guard kept and a protected case change nothing downward) | 8 |
+| `personnel-protected` | unit (every item of the protected list as a case, each near miss against it) and integration (the same event key gives one incident) | 8 |
+| `personnel-decision` | unit (the code check as data: no evidence, no independent check from level 3, a check of another incident, a verdict other than `confirmed`, own author, no term) and integration in both `observe` and `enforce` | 8 |
+| `personnel-effect` | integration and database: a measure closes the rights through the rights code, tasks are handed over, history, registry and audit stay | 8 |
+| `personnel-chief` | integration: a fake chief engineer tries to change, read drafts of or stop its own assessment; a replacement with and without the owner's approved procedure | 8 |
+| `personnel-safety` | integration: each critical event of the list in both modes, for an executor and for the chief engineer; the run stops (killed by its identity, the Codex sandbox included), every place a right lives closes in one transaction with the audit row `personnel.critical_reaction`, the owner is notified; a restore only by the chief engineer or, for its own suspension, the owner | 4 (the incident row linked in 8) |
+| `personnel-load` | workflow on the injected clock: a simulated month of staff decisions; the only requests to the owner are the exceptional ones | 8 |
+
+## Client checks
+
+The eleven checks of [client.md](client.md) (section "Checks", D33) are defined there with their pass and fail
+criteria; they are not copied here. The API side runs on the disposable database with a fake hub and a fake clock; the
+client side on a headless test device for Android and for Windows, against a fake API built from the same
+`openapi.json`. Nothing waits on a real clock, and a new check is first shown failing on the broken code.
+
+| Id | Level | Phase |
+|---|---|---|
+| `client-contract` | unit: the generated library is regenerated and compared with the API; a network guard in the test device records every host a call goes to | 2 (library), 6 |
+| `client-resume` | integration: the stream is cut after every event of a recorded run and resumed with the opaque cursor; a row committed late by an earlier transaction is read once, a cursor of another stream or a malformed one is refused `bad_cursor`; the result has each event once | 2 (API side), 6 |
+| `client-retry` | integration: a mutation repeated after a lost answer with the same idempotency key is applied once; a dangerous operation is never sent from the offline queue | 2 (API side), 6 |
+| `client-approval` | integration on both platforms: changed parameter, used, expired, revoked device and other channel are each refused | 6 |
+| `client-sessions` | integration with a fake hub: an ordinary session and a Factory run give each message once; a poll answered in one place closes in the other and a late answer is refused by its one arbiter (the hub for an ordinary session, the API for a Factory decision); the client's answer is a request row retried with its idempotency key until the hub confirms; the hub's Telegram relay answers with the API down | 6 |
+| `client-no-model` | integration: the network guard sees no request to a provider or a local model port; forged, unparsed and malformed messages stay plain text and trigger nothing | 6 |
+| `client-no-secret` | integration: a canary token over the build, the cache, the log and the stream | 6 |
+| `client-closed` | integration: a task runs to the end with no client connected; the client's state is right on return | 6 |
+| `client-foreign-prompt` | unit and integration: the list of served and unserved prompts as data; a third-party tool's own confirmation never becomes an approval; the owner's press on a native prompt is the owner's own act, not a grant; a Factory run has no such prompt and is denied | 6 |
+| `client-stop` | integration: stop-all with Temporal, the client and the models down ends runs (killed by identity) and closes rights through one suspension per agent | 6 |
+| `client-move` | integration: the full state is exported and restored into an empty stack; decisions, regulation, history, tasks and links compare equal | 7 |
 
 The gate for `agent_question` and BLOCKED `scope` in a workflow, and `RecordPrecedent`, are covered by the lifecycle tests of
 phase 3 (`ops-matrix` and `state-exit` run with the gate on and off); the registry checks above do not need Temporal.
@@ -88,12 +139,12 @@ writes output. "Check" is automated; ids are the keys used in the section 24 tab
 | F4 | PostgreSQL restart | task AWAITING_APPROVAL | stop PostgreSQL; send ACCEPT; start PostgreSQL; resend with the same key | during the outage the API answers unavailable and nothing is confirmed; after restart one decision row, applied once | no row while down; one row after; no lost confirmed decision |
 | F5 | Network loss | task RUNNING; worker cut from server (network disconnected for the worker container) | wait on the fake clock beyond the limit | worker starts nothing new and decides nothing needing the server; runner stops the agent at its time limit; results stay in the execution folder; on reconnect they are uploaded and a conflicting decision is shown, not applied silently | no new start while cut; agent stopped by limit; upload once; conflict recorded |
 | F6 | Duplicated Signal or Update | task AWAITING_APPROVAL | send the same ACCEPT twice: same idempotency key, then same Update id, then a different key | first applies; second no-op; a different key on a decided task is refused | one decision, one transition, refused row for the third |
-| F7 | Agent dies | task RUNNING, fake agent exits abnormally or is killed | kill the agent only | with marker and no exit, run gone: new attempt, earlier results and worktree kept; unclear lookup (unreadable record): BLOCKED | worktree files byte-equal after retry; BLOCKED on the unreadable case |
+| F7 | Agent dies | task RUNNING, fake agent exits abnormally or is killed | kill the agent only | with marker and no exit, run gone: new attempt, earlier results and worktree kept; unclear lookup (unreadable record): BLOCKED `execution`, handled first by the chief engineer (D16) | worktree files byte-equal after retry; BLOCKED with the handler `chief_engineer` on the unreadable case, the first notice to the chief engineer |
 | F8 | Git operation interrupted | worktree with a half commit or a lock file | kill Git mid-operation; run recovery | worktree inspected first; no hard reset, no branch deletion; unpublished changes survive; cleanup refuses it | commit hashes and file bytes unchanged; cleanup returns refusal |
 | F9 | Migration error | database at release N | run a migration that fails halfway (injected failing step) | transaction rolled back or schema marked failed; old release still works with the schema (expand then contract); no data loss; owner notice | schema version unchanged; release N-1 and N both pass the contract tests |
 | F10 | Failed Rig update | Factory release R installed, `rig update` run with a deliberately failing step | `rig update` then its rollback | Rig returns to the previous pair; Factory release pointer, schema and worker are untouched (architecture) | pointer and schema version equal before and after; Factory tests still pass |
-| F11 | Telegram unavailable | task AWAITING_APPROVAL, hub down | try to deliver the notice; then decide through the API | notice kept in the outbox and retried with backoff; the web panel and API still decide; nothing is lost | notice row pending; decision applied through the API; notice delivered once when the hub returns |
-| F12 | Budget exceeded | budget set to a small value; fake agent reports cost | run until the budget is passed | execution stopped, task BLOCKED, one notice; no further start | stop reason is budget; no start after; spend recorded |
+| F11 | Telegram unavailable | task AWAITING_APPROVAL, hub down | try to deliver the notice; then decide through the API | notice kept in the outbox and retried with backoff; the client and API still decide; nothing is lost | notice row pending; decision applied through the API; notice delivered once when the hub returns |
+| F12 | Budget exceeded | budget set to a small value; fake agent reports cost | run until the budget is passed | execution stopped, task BLOCKED (a cost cause: the handler is the owner, the chief engineer cannot raise it, `owner_only`), one notice to the owner; no further start | stop reason is budget; no start after; spend recorded; the engineer's raise refused |
 | F13 | Activity delivered again | an activity that opens a pull request against a fake remote | force a retry (kill worker after the effect, before completion) | the retry checks the target by idempotency key and finds it; no second pull request | fake remote has one pull request |
 | F14 | Server off while awaiting acceptance | task AWAITING_APPROVAL | stop the whole server stack, start it, then ACCEPT | task and its report survive; local worker idles and starts nothing; ACCEPT after restart applies once | state and report equal before and after; one transition |
 
@@ -143,15 +194,15 @@ broken harness.
 | Tasks persist independent of the PC | F1, F14 with the worker stopped; real server with PC off | PC-Docker now, server open |
 | Claude and Codex receive tasks | adapter integration with fakes; `live` smoke; S3 | live marked |
 | GPT through a separate adapter | OpenAI adapter against a fake endpoint; one `live` call | live marked |
-| Dependencies | unit and workflow: transition table, cycle rejection, BLOCKED on a failed dependency (D15) | automated |
+| Dependencies | unit and workflow: transition table, cycle rejection, BLOCKED on a failed dependency with the chief engineer as first handler (D15; `block-owner-load`) | automated |
 | Parallel executors | integration: two machines (gateway declared, D28), two fake agents, no shared worktree | automated; a real second machine waits for the gateway |
 | Results stored and checked | worker-run checks stored with command, exit code and log; an agent claim does not count | automated |
 | History of all attempts | integration: attempt rows after F1, F7, REQUEST_CHANGES | automated |
 | Survives PC restart | F1, F2 automated part, plus the recorded real restart | partly recorded |
 | Survives server component restart | F3, F4, F9, F14 | automated |
 | No uncontrolled duplicates | F3, F6, F13 | automated |
-| Manual acceptance | integration: ACCEPT, REQUEST_CHANGES, REJECT through API and panel; second confirmation checks | automated |
-| Remote control | API and panel from a second host; TLS | open (needs a server and TLS) |
+| Manual acceptance | integration: ACCEPT, REQUEST_CHANGES, REJECT through the API and the client; second confirmation checks | automated |
+| Remote control | API and client from a second host; TLS | open (needs a server and TLS) |
 | Failure notices | F11, notice rows per outage, one per outage | PC-Docker now; with the PC off no notice is possible (D5): open |
 | Verified backups | backup then restore into a clean container, then contract tests and row counts; off-host copy | restore automated; off-host open |
 | Existing Rig works | Rig regression below | automated |

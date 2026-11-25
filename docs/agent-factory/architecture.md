@@ -31,23 +31,25 @@ success reported for a check that did not run.
 | D12 | One GPU queue per machine for ComfyUI, LM Studio and other heavy jobs. | Call |
 | D13 | Under D4 an agent could steal a key from the owner's Windows profile and accept its own task. The risk is accepted for the first version. | Owner |
 | D14 | A requirements change stops the running agent at once; a new attempt starts with the new revision. | Owner |
-| D15 | A dependency that ends without acceptance puts the waiting task into BLOCKED until the owner decides. | Owner |
-| D16 | An agent that surely died is continued by a new attempt within the attempt limit and budget. An unclear state never starts a second run: a read-only inspection settles it, and only what it cannot settle goes to the owner. | Owner (retry); the inspection follows D18 and spec 8E |
+| D15 | A dependency that ends without acceptance puts the waiting task into BLOCKED until the chief engineer decides, or the owner when the engineer calls the owner or the block needs the owner (temporal.md, Who handles a block first; the owner's D18 load rule). | Owner; who is told first follows the owner's later rule that routine technical matters do not reach the owner (personnel.md Hierarchy) |
+| D16 | An agent that surely died is continued by a new attempt within the attempt limit and budget. An unclear state never starts a second run: a read-only inspection settles it, and only what it cannot settle goes to the chief engineer first, and to the owner when the engineer calls the owner. | Owner (retry); the inspection follows D18 and spec 8E; who is told first as in D15 |
 | D17 | Server code (API, Control Worker), the local worker and their tests all run on Node 24. Factory installation checks for Node and does not install it. | Call |
 | D18 | Agents settle technical contradictions themselves. The owner gets only results, real blockers, and decisions that need them: requirements, scope, cost, loss, publication, permissions, acceptance. | Owner |
 | D19 | Child tasks inside the approved requirements start by themselves within limits of depth, number and the parent's budget. Anything outside the requirements is a proposal to the owner. | Owner |
-| D20 | A result is reviewed by another provider. When its usage limit is spent, the task waits for the reset and the owner is notified. | Owner |
+| D20 | A result is reviewed by another provider. When its usage limit is spent, the task waits for the reset and the chief engineer is notified first (the owner only when it needs the owner). | Owner; who is told first as in D15 |
 | D21 | A cancel whose machine is gone waits with a notice; the owner may force-close it. | Owner |
 | D22 | While paused: resume, cancel, feedback and revision only. | Owner |
-| D23 | Cancel, reject, force-close and the owner's part of publications and deletions (governance.md Rights) take a second press in the same channel, in Telegram and in the panel. | Owner |
+| D23 | Cancel, reject, force-close and the owner's part of publications and deletions (governance.md Rights) take a second press in the same channel, in Telegram and in the client. | Owner |
 | D24 | Nothing is deleted by itself. Cleanup runs on the owner's command, or by the chief engineer for the part named in governance.md Rights (closed tasks, nothing unsaved); it removes logs, artifacts and worktrees; the history of decisions and events stays for good. | Owner |
 | D25 | A review finding the implementer accepts is fixed. A disputed technical one is settled by a third independent run; a dispute about requirements, scope or cost goes to the owner. | Call from D18 |
-| D26 | A mandatory check that could not run is first repaired by agents; if that fails, the task is BLOCKED with the reason. It never counts as passed. | Call from D18 |
+| D26 | A mandatory check that could not run is first repaired by agents; if that fails, the task is BLOCKED with the reason, handled first by the chief engineer. It never counts as passed. | Call from D18 |
 | D27 | Drizzle (as the task spec recommends; Rig has no database code to reuse) defines the schema and types; its generated SQL migrations are reviewed, committed, completed by hand where Drizzle cannot express a rule, and applied forward only. | Call, from spec 4 |
 | D28 | Server steps run as local activities inside the Control Worker, so no task queue carries them and no worker can take them. A gateway that binds a certificate to its own queues comes before a second machine; until then a second machine is refused. | Owner (the refusal in code is a call) |
 | D29 | Decisions, exceptions, precedents and facts, and the regulation, live in PostgreSQL as the Decision Registry. An agent consults it before a question to the owner. Details: [governance.md](governance.md). | Owner |
 | D30 | The registry is built and works before Temporal is installed. | Owner |
 | D31 | What an agent may do comes from rights: the role of its participant in the task, a `permission` record, a grant of the chief engineer (Claude, never the owner). Details: the Rights section of [governance.md](governance.md). | Owner |
+| D32 | Personnel: a position belongs to the factory and an agent holds it by an assignment; facts, assessment and discipline follow [personnel.md](personnel.md). Measures of level 3 and above are only proposed until the owner switches `personnel.mode` to `enforce`. | Owner |
+| D33 | One personal client for Android and Windows (Flutter) runs the factory through the API only; it parses messages and controls the Rig, and is not a client for language models. Telegram stays as the reserve channel. The web panel is not built. Details: [client.md](client.md). | Owner for platforms, personal use, the message source and the reserve channel; the rest are calls |
 
 Rejected: a separate repository (Rig updates and rolls back only itself and the hub); code in the Rig core (ordinary Rig
 would pull Temporal and PostgreSQL); the worker's own child processes (an agent would die with the worker).
@@ -63,7 +65,7 @@ Server contour (Docker Compose; on the PC until a server exists):
 - **Temporal Server** and **admin-tools** for schema steps, pinned. The `auto-setup` image is deprecated and the official
   Compose samples are for development, so the configuration is our own. No Elasticsearch: SQL visibility is enough.
 - **Temporal UI**, diagnostics only, not reachable from outside.
-- **API** with the web panel: server-rendered pages and a small script, no frontend framework (call).
+- **API** for the client, Telegram and the workers; it serves no pages and no browser session (D33, call).
 - **Control Worker**: task queue `control`, workflow tasks only; server activities run inside it as local activities
   (D28); outbox relay.
 
@@ -71,7 +73,9 @@ Local contour (Windows first):
 
 - **Local Agent Worker**: Node process, outgoing connections only, to Temporal and the API. No access to PostgreSQL.
 - **Adapters**: Claude, Codex, OpenAI API, ComfyUI, LM Studio.
-- **Telegram client**: connects to the hub's generic mechanism and to the API.
+- **Telegram client**: connects to the hub's generic mechanism and to the API; the hub's second output hands the messages of
+  every Rig session to the API (D33).
+- **Client application**: Android and Windows, talks only to the API ([client.md](client.md)).
 
 ```
 factory/
@@ -79,13 +83,15 @@ factory/
   db/          schema, migrations
   workflows/   deterministic workflow code only
   control/     server activities, outbox relay
-  api/         HTTP API and web panel
+  api/         HTTP API, device sessions, event stream
   registry/    Decision Registry: records, search, inquiries, gate, import
   rights/      rights check, roles, requests, grants, chief engineer activity
+  personnel/   facts, score, incidents, protected conduct, measures, replacement (D32)
   worker/      local worker, workspaces, execution store
   runner/      program that rig exec starts around one agent run
   adapters/    claude, codex, openai, comfyui, lmstudio
   telegram/    hub client
+  client/      Flutter application for Android and Windows (D33)
   deploy/      Compose, server configuration, backup and restore
   tests/
 ```
@@ -136,7 +142,7 @@ confirmed". On reconnect the worker stops such a run before anything else.
 | From | To | When |
 |---|---|---|
 | CREATED | PLANNING | workflow started |
-| PLANNING | READY / BLOCKED | plan stays inside the approved scope / needs the owner |
+| PLANNING | READY / BLOCKED | plan stays inside the approved scope / needs the owner (kind `scope`) |
 | READY | WAITING_DEPENDENCIES / ASSIGNED | dependencies open / met |
 | WAITING_DEPENDENCIES | ASSIGNED / BLOCKED | all met / one ended in a final state other than ACCEPTED |
 | ASSIGNED | RUNNING | execution started; no machine available keeps it ASSIGNED and raises a notice |
@@ -145,7 +151,7 @@ confirmed". On reconnect the worker stops such a run before anything else.
 | AWAITING_APPROVAL | ACCEPTED / REWORK_REQUIRED / REJECTED | owner's ACCEPT / REQUEST_CHANGES / REJECT |
 | REWORK_REQUIRED | ASSIGNED | next attempt, earlier results kept |
 | PLANNING, VERIFYING | FAILED | input that no attempt can make valid |
-| BLOCKED | by the kind of block, see below | `resolve_block` by the owner |
+| BLOCKED | by the kind of block, see below | `resolve_block` by its handler: the chief engineer, or the owner |
 | RUNNING | ASSIGNED | the agent surely died: new attempt in the same worktree, resuming the session where the agent allows |
 | any active state | PAUSED and back | see below |
 
@@ -154,6 +160,12 @@ Final: ACCEPTED, REJECTED, CANCELLED, FAILED.
 - **BLOCKED** stores its kind, and the kind decides the exit: scope to PLANNING; dependency to READY; execution, usage limit
   or agent question to ASSIGNED; environment of a check to VERIFYING; rework limit to REWORK_REQUIRED with a raised limit.
   Before blocking, agents try to settle a technical cause (D18).
+- **Who handles a block.** The task stores a handler with the kind (`block_handler`): the owner for `scope` and
+  `agent_question`, and for any other kind whose cause needs the owner (requirements, scope, cost, a dangerous operation,
+  an owner's credential such as a login); the chief engineer for the rest (dependency, execution, usage limit, environment
+  of a check, rework limit). The engineer may hand the block to the owner (`call_owner`); the owner may resolve any block
+  and wins over the engineer. A usage limit reaches the owner only when no enabled agent of any provider can run. With the
+  engineer unavailable a block waits and nobody is told (G13). Details: temporal.md, Who handles a block first; api.md.
 - **ASSIGNED without a machine** waits with a notice. The owner may cancel (no run, so at once) or allow another
   agent (`allow_agent`).
 - **PAUSE.** In RUNNING and VERIFYING the request is recorded and takes effect when the run or the check ends, before the
@@ -164,8 +176,8 @@ Final: ACCEPTED, REJECTED, CANCELLED, FAILED.
   takes it. In BLOCKED and in states before ASSIGNED it goes to PLANNING, in ASSIGNED it stays and takes it. BLOCKED with a
   run whose end is not confirmed only stores it, and the next `resolve_block` goes to PLANNING. In PAUSED it is stored and
   RESUME goes to PLANNING (back to BLOCKED when it was paused there with such a run). A decision carries its revision number; one on an older revision is refused.
-- **Dependency.** One that ends without ACCEPTED puts the waiting task into BLOCKED. The owner removes the dependency,
-  replaces it or cancels the task. Dependencies stay inside one project in the first version.
+- **Dependency.** One that ends without ACCEPTED puts the waiting task into BLOCKED, handled first by the chief engineer. The handler removes
+  the dependency, replaces it or cancels the task. Dependencies stay inside one project in the first version.
 - **add_feedback** adds a note and changes no state: the next attempt gets it. **change_priority** affects only work that
   has not started.
 
@@ -218,7 +230,9 @@ never counts as a result.
 API at an interval. A Temporal Schedule marks a silent machine OFFLINE and raises one notice per outage.
 
 **Other users of the same session store.** Factory's Claude runs are ordinary sessions to Rig's global hooks and to the
-hub. A run ended by a hub command is seen as an ended run. S3 also checks which user hooks and rules load in a run.
+hub. A run ended by a hub command is seen as an ended run. S3 also checks which user hooks and rules load in a run. A
+Factory run (`claude -p`) has no prompt to the owner: when the registry is unreachable the hook denies it, while an
+ordinary session keeps its usual prompt (governance.md, Ordinary sessions).
 
 | Operation | Claude | Codex | OpenAI API | ComfyUI | LM Studio |
 |---|---|---|---|---|---|
@@ -262,6 +276,10 @@ to Git's `info/exclude`, so they do not show as changes; collection leaves them 
 | Validation, permission, budget, bad input | none | FAILED only when no attempt can make the input valid, otherwise BLOCKED |
 | External effect (push, pull request, publication) | only after checking the target by idempotency key | BLOCKED |
 
+Every BLOCKED and notice above goes to the handler of its kind first (Who handles a block, above): the chief engineer for
+all of them except a cause that needs the owner. D16, D20, D21 and D26 keep their wording: the owner is told where they say
+so, after the chief engineer where the block is handled first.
+
 Numbers (attempts, timeouts, budgets, depth) are settings with defaults set in the phase that measures them.
 
 ## Security
@@ -270,7 +288,10 @@ Numbers (attempts, timeouts, budgets, depth) are settings with defaults set in t
   before it leaves the PC. PostgreSQL and the UI are never published.
 - API tokens are stored as hashes and carry a role: owner, worker, relay, reader, registry. An agent process gets no
   token that can decide; the only token it may hold is `registry` (search, inquiry, verdict, draft; security.md T5). The Telegram client has the relay role: it may submit a decision (dangerous ones after the hub's second press) only with the hub's press id and a Telegram user
-  that is mapped to an owner, and each press id works once.
+  that is mapped to an owner, and each press id works once. The client holds a device session, a revocable token that
+  never carries an agent role; the hub's second output writes with a service account that may only write messages, polls
+  and session states, and report the result of a poll answer request it arbitrated (D33, [api.md](api.md)). A critical
+  event revokes every token of the agent at once (personnel.md, Critical).
 - The hub's local endpoints have no authentication today. The new generic mechanism needs a per-client key; a button press
   is checked against the hub's allowed users and works once; dangerous actions need a second press.
 - Temporal roles are separate: a proxy in front of the frontend allows the worker's certificate only the methods for
@@ -323,12 +344,19 @@ saved histories.
 0. Audit, this document, contracts for data, API and security; proofs S1 to S6 (S3 spends a little of the Claude limit,
    S5 needs ComfyUI running).
 1. PostgreSQL in Docker on the PC, with restart and restore checks.
-2. Database, API, the registry with the embedder, the question gate, the hub's buttons and relay for it, the import (D30), the rights check and the Claude permission hook (D31).
+2. Database, API, the registry with the embedder, the question gate, the hub's buttons and relay for it, the import (D30), the rights check and the Claude permission hook (D31); the API contracts of the client: conversations, devices, the event stream and approvals (D33).
 3. Temporal installation (with its restart checks, the proxy, S6 and the D28 part) and workflows.
-4. Local worker, Claude and Codex adapters, Rig feature, the chief engineer (D31).
-5. Several agents, OpenAI, ComfyUI and LM Studio adapters, independent review.
-6. Task commands and notices in Telegram, web panel.
+4. Local worker, Claude and Codex adapters, Rig feature, the chief engineer (D31), and the critical reaction (D32: stop the
+   run by its identity, close every right, notify the owner) with its check `personnel-safety`, because this is the
+   phase that first gives an agent a right.
+5. Several agents, OpenAI, ComfyUI and LM Studio adapters, independent review, agent profiles and fact collection (D32).
+6. Task commands and notices in Telegram; the hub's second output to the API, then the client MVP for Android and Windows,
+   which takes the place of the web panel (D33).
 7. Limits, monitoring, backups, failure scenarios.
+8. Assessment, incident records and the observe mode of personnel (D32). Measures are enforced only on the owner's switch of
+   `personnel.mode`, after calibration. The later client sections join as their data exists: Personnel, Registry,
+   Governance, Projects, Infrastructure (D33).
+9. Push, voice and the robotics extension point of the client, each only on the owner's order or when its need exists (D33).
 
 Open until a server exists: permanent operation, work while the PC is off, external TLS, backups outside the host.
 Decided in their phase: how agents are paid for (subscription or API keys), log retention, default limits, automatic

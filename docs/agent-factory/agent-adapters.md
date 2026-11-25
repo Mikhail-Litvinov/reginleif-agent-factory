@@ -15,10 +15,10 @@ operation takes an `executionId` created on the server; the adapter keeps its fa
 | `getCapabilities` | What the adapter declares (roles, tools, kinds of work, resume, cancel, usage numbers) joined with what `validateEnvironment` verified. A declared but unchecked capability is reported as unverified and is not used for routing. |
 | `validateEnvironment` | Checks tool paths from machine settings, the account allowlist, model gates (spec 6.5 inputs), network to the provider, free disk. Returns a list of named checks with pass, fail or `unknown`. Side-effect free. |
 | `start` | Writes the intent file first, then launches through the runner, returns the launch id. A second call with the same `executionId` never starts a second agent. |
-| `attach` | Looks the run up and returns one of five outcomes of the architecture's recovery table: `collect`, `attach`, `died` (new attempt), `start`, `unclear` (BLOCKED, D16). |
+| `attach` | Looks the run up and returns one of five outcomes of the architecture's recovery table: `collect`, `attach`, `died` (new attempt), `start`, `unclear` (BLOCKED `execution`, D16, handled first by the chief engineer). |
 | `getStatus` | State (starting, running, exited, lost), usage so far, time of last output. Read only. |
 | `streamOutput` | Output chunks from a byte offset, so a restart or a retry resumes and never repeats. |
-| `cancel` | Idempotent. Stops the run by process identity (pid plus creation time), returns whether the end is confirmed; "not confirmed" keeps the task in CANCELLING until the machine confirms or the owner uses `force_close` (D21). |
+| `cancel` | Idempotent. Stops the run by process identity (pid plus creation time), returns whether the end is confirmed; "not confirmed" keeps the task in CANCELLING until the machine confirms or the owner uses `force_close` (D21). The same kill by identity (the whole process tree of the `execution_id`) executes the `stop_run` order of the control component: a stop of one run, a stop of all runs of a project or of the factory, and the critical reaction (personnel.md, Critical). |
 | `collectResult` | Reads the execution folder, validates the report schema (below), computes usage, returns a result or a schema finding. |
 | `cleanup` | Removes provider leftovers (temp, caches, supervisor job folder after upload). Never touches a worktree. |
 
@@ -26,7 +26,13 @@ operation takes an `executionId` created on the server; the adapter keeps its fa
 the participant's role, its active `permission` records and its live grants; the adapter never decides a right. Claude
 runs also get the permission hook (installed by the owner at the PC) that asks the rights check during the run. Codex has
 no hook: a record can only choose its sandbox at job start, and a right needed later reaches it only through a new
-attempt of the same participant, which keeps its grants.
+attempt of the same participant, which keeps its grants. For the same reason a right of a running Codex job cannot be
+taken back by a message: the sandbox it started with is closed by killing the run by its identity (`stop_run`, database.md,
+Where a right can live), and the next attempt starts with the profile of that moment, a suspended agent with none.
+
+Factory runs (`claude -p`) have no interactive prompt: when the registry or the rights check cannot be reached, the hook
+denies the action instead of asking the owner. The fail-open prompt of an ordinary session and the meaning of the owner's
+press on it are in governance.md, Ordinary sessions.
 
 What an adapter cannot do (fixed limits of the providers, from the audit):
 
@@ -82,7 +88,8 @@ The agent's final report is one JSON document validated by `collectResult`:
 Automated checks (`RunAutomatedChecks`) run on the worker, by the workflow's decision, with commands from the project
 profile, not from the agent. For each: command, working directory, exit code, duration, log (kept as a file, large
 ones as a reference), status. A mandatory check that cannot run (tool missing, timeout) is `not_run` with the reason;
-agents first repair its cause, and if it still cannot run the task is BLOCKED `check_environment` with the reason (D26).
+agents first repair its cause, and if it still cannot run the task is BLOCKED `check_environment` with the reason (D26),
+handled first by the chief engineer (an owner's credential, such as a login, makes it the owner's).
 It is never counted as passed and never goes to the owner as complete. Graphics tasks: automatic checks cover format, size, count and naming only;
 visual quality and story conformance are never recorded as automatically confirmed, they need the reviewer or the owner.
 
@@ -113,7 +120,8 @@ event.
 2. Ranking among the eligible by: owner preference for the project (`routing_rules`), then estimated cost, then current
    load of the machine and queue; past outcomes break a tie (call: preference is the owner's word, cost is what the
    owner pays, load only orders equals).
-No eligible agent: the task stays ASSIGNED with the list of failed filters shown to the owner and one notice. The owner
+No eligible agent: the task stays ASSIGNED with the list of failed filters and one notice to the chief engineer (to the
+owner only when no enabled agent of any provider can run, or when the fix is the owner's: a cost, a login). The handler
 answers with `allow_agent` or fixes the cause; a review with no other provider waits for one (D20).
 
 ## Worktrees
@@ -159,6 +167,11 @@ Nothing is deleted by itself. Execution folders stay on the machine after upload
 |---|---|---|
 | Budgets of subscription agents (what counts as "budget left" when the provider shows no number) | When routing skips an agent and when the owner is told to wait | 5 |
 | Network access of a profile (which hosts a profile may reach; default off) | What an agent can fetch and leak | 4 |
+| Codex login: ChatGPT plan or API key. The documentation recommends the key for automation, keeps the plan login for trusted private automation and says one `auth.json` must not be shared by concurrent jobs or machines and not used for public repositories | What Codex runs cost, whether they may run in parallel, whether public repositories may use the plan | 4 |
+| Claude subscription in unattended runs: `claude -p` and `claude setup-token` are documented for scripts, the consumer terms forbid automated access unless explicitly permitted, the help center says `claude -p` draws from the plan's limits; own scheduled runs, a server and several machines are not addressed; the edition for the EEA and Switzerland also bars commercial or business use, other editions were not read | Whether Claude runs stay on the subscription or need an API key | 4 |
+
+Sources and quotes: [provider-terms.md](../reports/provider-terms.md). Whatever is chosen, the adapters start only the unmodified `claude`
+and `codex` programs with the owner's own login or key, and never read, store or pass on a login of either.
 
 Spec 6.1 lists `getStatus` and `streamOutput` as adapter operations, while the architecture has the worker read the
 execution folder through activities. Both are kept; `getStatus` is derived from the folder, not from the provider.
