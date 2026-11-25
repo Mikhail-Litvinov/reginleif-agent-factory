@@ -1,6 +1,6 @@
 # Agent Factory: Temporal design
 
-Binding: [architecture.md](architecture.md) (D1-D26, the state table, state ownership). Facts: [audit.md](audit.md).
+Binding: [architecture.md](architecture.md) (D1-D28, the state table, state ownership). Facts: [audit.md](audit.md).
 Spec sections: "spec 5.2". Numbers are named settings; defaults are set in the measuring phase. "Call" marks a design
 choice made here, open to veto. Table and column names are those of [database.md](database.md).
 
@@ -103,17 +103,29 @@ Cancel is open to every kind. The owner's feedback and revision are open too (ma
 Timeouts per activity are settings `act.<Name>.<kind>`: S start-to-close, Q schedule-to-start (machine queues only,
 bounds the wait for a machine), H heartbeat, C schedule-to-close. "Key" is the idempotency key.
 
+**Server steps are local activities (D28).** Rows marked `local` run inside the Control Worker process that runs the
+workflow task: no activity task is created, so nothing can be polled or answered by another certificate. The Control
+Worker sets `enableNonLocalActivities: false` and workflow code reaches these steps only through
+`proxyLocalActivities`. Consequences:
+- A local activity may run again after a crash of the Control Worker, also with one attempt allowed, so each write is
+  idempotent by its key. The call that repeats a recorded write returns the stored result.
+- It is short: `act.<Name>.S` of a `local` row stays below the workflow task timeout (a check derives the bound from the
+  setting). Anything long belongs to a machine activity.
+- A wait longer than `localRetryThreshold` becomes a server timer, so a PostgreSQL outage holds no worker.
+- `MachineLivenessWorkflow` follows the same rule.
+- A machine activity's result is data about a run. No machine result is read as a decision of the owner.
+
 | Activity | Queue / where | Key | Timeouts | Class | Non-retryable | Escalation |
 |---|---|---|---|---|---|---|
-| `PrepareTask` | `control`, server | task id + revision | S C | infra | unknown task | BLOCKED `execution` |
-| `ResolveDependencies` | `control` | read only | S C | infra | cycle | BLOCKED `dependency` |
-| `SelectAgent` | `control` | task id + attempt | S C | infra | no agent allowed by profile | stays ASSIGNED, notice |
-| `ReadDecision` | `control` | decision id | S C | infra | actor, revision or single-use check fails | outcome `refused` with a reason, task unchanged |
-| `RecordDecisionOutcome` | `control` | decision id | S C | infra | none | none; the relay re-reads an unresolved decision |
-| `PersistTaskEvent` | `control` | event id, row version | S C | infra | version conflict is re-read, not failed | BLOCKED `execution` |
-| `NotifyUser` | `control`, writes a notice via API; Telegram client delivers | notice key | S C | infra | none | none (a lost notice is shown in the panel) |
-| `CreateChildTasks` | `control` | origin task + proposal id | S C | infra | depth, count, budget, scope limit | the proposal stays `open` for the owner |
-| `RequestReview` | `control` (selects reviewer, creates review record) | task + round | S C | infra | no agent of another provider | BLOCKED `check_environment` |
+| `PrepareTask` | local | task id + revision | S C | infra | unknown task | BLOCKED `execution` |
+| `ResolveDependencies` | local | read only | S C | infra | cycle | BLOCKED `dependency` |
+| `SelectAgent` | local | task id + attempt | S C | infra | no agent allowed by profile | stays ASSIGNED, notice |
+| `ReadDecision` | local | decision id | S C | infra | actor, revision or single-use check fails | outcome `refused` with a reason, task unchanged |
+| `RecordDecisionOutcome` | local | decision id | S C | infra | none | none; the relay re-reads an unresolved decision |
+| `PersistTaskEvent` | local | event id, row version | S C | infra | version conflict is re-read, not failed | BLOCKED `execution` |
+| `NotifyUser` | local, writes a notice via API; Telegram client delivers | notice key | S C | infra | none | none (a lost notice is shown in the panel) |
+| `CreateChildTasks` | local | origin task + proposal id | S C | infra | depth, count, budget, scope limit | the proposal stays `open` for the owner |
+| `RequestReview` | local (selects reviewer, creates review record) | task + round | S C | infra | no agent of another provider | BLOCKED `check_environment` |
 | `PrepareWorkspace` | `machine-<id>` | execution id | S Q C | workerLost | repo missing, dirty base | BLOCKED `execution` |
 | `InspectWorkspace` | machine | read only | S Q | workerLost | none | BLOCKED `execution` |
 | `StartAgentExecution` | machine | execution id (intent file first) | S Q C | workerLost | `invalid` | BLOCKED `execution` |
@@ -126,7 +138,7 @@ bounds the wait for a machine), H heartbeat, C schedule-to-close. "Key" is the i
 | `CleanupWorkspace` | machine | worktree path | S Q | workerLost | unpublished changes | stays, notice |
 | `RunGpuJob` | `machine-<id>-gpu`, one slot | job key in the generator's queue | S Q H | workerLost | `invalid` | BLOCKED `execution` |
 | `ReconcileMachine` | machine, at worker start before polling | none, read mostly | S | infra | none | machine not registered |
-| `LoadSettings` | `control` | read only | S | infra | none | none |
+| `LoadSettings` | local | read only | S | infra | none | none |
 
 Heartbeat details of `MonitorExecution` and `RunGpuJob` are the log offset and the execution id, so a retry attaches. The
 SDK throttles heartbeats to the smaller of 0.8 x heartbeat timeout and 60 s; `act.*.H` is set above that. Cancellation of
@@ -253,7 +265,7 @@ Decisions wait in the outbox. (3) Agents continue; their results stay in the exe
 workflows resume; activity timers fire as recorded, so a completed attempt with its result already stored is
 collected by the lookup, not repeated. External effects retry only after the target check (`external`).
 
-**D. PostgreSQL down.** (1) API refuses mutations, nothing is confirmed. (2) Server activities fail as `infra` and retry;
+**D. PostgreSQL down.** (1) API refuses mutations, nothing is confirmed. (2) Server steps fail as `infra` and retry;
 `PersistTaskEvent` is idempotent by event id. (3) After recovery the relay re-sends outbox rows in `pending`; a row
 already applied is recognised by `handled` (or by the unique key), so no decision is lost or doubled. (4) The projection
 is rebuilt from the workflow's own events if a row version lags: the workflow is the writer.

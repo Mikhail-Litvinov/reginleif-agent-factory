@@ -1,6 +1,6 @@
 # Agent Factory security
 
-Design, nothing is built. [architecture.md](architecture.md) is binding (D1 to D26 are its decisions; "call" marks a choice made in these documents, open to veto); facts about Rig and
+Design, nothing is built. [architecture.md](architecture.md) is binding (D1 to D28 are its decisions; "call" marks a choice made in these documents, open to veto); facts about Rig and
 the hub are in [audit.md](audit.md); tests are in [testing.md](testing.md). This file states weakness classes and defences,
 never steps to exploit the existing hub.
 
@@ -41,8 +41,8 @@ There is no border between an agent and the Windows user who runs it (D4, D13).
 | # | Threat (class) | Defence | Enforced in | Proof |
 |---|---|---|---|---|
 | T1 | Anyone reaching the Temporal frontend (no authorizer by default) | mTLS with required client certificates, private network, port not published | config | `deploy-ports`, S6 |
-| T2 | The worker's credentials start a workflow or send an Update | separate certificates and a custom authorizer or proxy: worker may poll its own queues and complete activities only | config plus code | S6 |
-| T3 | Forged decision sent as a Temporal message | the Update carries only a decision id; the workflow reads the decision from PostgreSQL and checks actor, revision and single use | code | `wf-forged-update` |
+| T2 | The worker's credentials start a workflow or send an Update | separate certificates and a proxy with a method allowlist: the worker may poll, heartbeat and complete activities; workflow-task polling and completion stay off the list (without it they were accepted in the trial) | config | S6 |
+| T3 | Forged decision: sent as a Temporal message, or as the answer to the workflow's own read of it | the Update carries only a decision id; the workflow reads the decision from PostgreSQL in a local activity (D28), so the read is never in a queue, and checks actor, revision and single use | code | `wf-forged-update`, `control-no-queue`, S6 |
 | T4 | Forged or replayed API call | token hash, role check on every route, unique idempotency key, revision check | code | `api-authz-matrix`, F6 |
 | T5 | An agent holding a deciding token | agent environment is built from an allowlist; no API token, no Temporal credential, no push credential | code | `env-allowlist` |
 | T6 | An agent pushes or publishes | push and publication done by the worker after an owner decision; profile denies Git remote operations; no credentials in the agent environment | code plus profile | S3. Not stopped: saved credentials of the same Windows user (T8) |
@@ -65,16 +65,17 @@ There is no border between an agent and the Windows user who runs it (D4, D13).
 | T23 | Database or UI reachable from outside | only loopback or internal network binding | config | `deploy-ports` |
 | T24 | Backup exposes secrets | backups encrypted; key stored apart from the backup. Off-host copy needs a server | config | open until a server exists |
 | T25 | Cross-site or token theft from the web panel from outside | TLS for any non-loopback access | config | open until a server exists |
+| T26 | A worker certificate takes another machine's activity and answers it with a forged result (the method allowlist does not see queue names; accepted in the S6 trial) | one machine only: the API refuses a second one until a gateway that binds a certificate to its own queues is in place (D28) | code | `second-machine-refused`; the gateway gets its own proof before it is switched on |
 
 ## Roles and rights
 
 | Role | May | May not |
 |---|---|---|
 | owner | decide (accept, request changes, reject, pause, resume, cancel, force-close, resolve a block, allow an agent, priority), edit requirements, budgets and allowlists, create and rotate tokens, install a release, confirm dangerous operations | nothing is blocked; dangerous ones need the second press |
-| worker (a machine) | poll its own queues, heartbeat, upload results and logs, read tasks assigned to it | decide, start workflows, send Updates, reach PostgreSQL, read other machines' data |
+| worker (a machine) | poll activity queues, heartbeat, upload results and logs, read tasks assigned to it | decide, start workflows, send Updates, poll workflow tasks, reach PostgreSQL, read other machines' data through the API. Temporal does not hold it to its own queues (T26) |
 | relay (the Telegram client) | read like a reader, acknowledge notices, submit a decision with a hub press id and a Telegram user mapped to an owner, each press id once | act for an unmapped user; reuse a press id; hold any other right |
 | reader | read tasks, history, status | read secrets or raw agent logs flagged sensitive; any change |
-| Control Worker (internal service identity) | start workflows, send Updates for recorded decisions, run server activities | accept anything by itself |
+| Control Worker (internal service identity) | start workflows, send Updates for recorded decisions, run server steps as local activities | accept anything by itself |
 | agent | nothing against the API | holds no token of any role |
 
 Temporal roles follow this table (T2). Temporal admin and UI access are held by the owner only and are not reachable
@@ -112,6 +113,7 @@ Windows user or a container, which is not planned for version one.
 | Risk | Decision | Status |
 |---|---|---|
 | Same-user compromise (steals keys, accepts its own task through a stolen token) | D4, D13 | accepted; untrusted repositories must not run |
+| Forged results between machines (T26) | D28 | absent with one machine; the gateway is a condition of the second |
 | Hub endpoints unauthenticated for the unmodified hub | D5 | fork fixes the Factory path only |
 | Failure notices and buttons stop when the PC is off | D5, D6 | open until a second hub on a server |
 | Decision recorded but not yet applied | D10 | by design; clients show the delivery state |

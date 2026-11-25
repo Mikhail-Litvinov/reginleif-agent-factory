@@ -11,7 +11,7 @@ Design documents, plus proofs S1-S6 (testing.md). The proofs are throwaway code 
 tree. S2 and S4 are proven. What the proofs leave open becomes tests in phase 4 (see Phase 4, Proving check): a foreign
 process with the same pid, a pruned `rig exec` record, a crash before `identity.json` is written, a starter killed
 without its tree. S1, S3, S5 and S6 are proven in the phase that builds on them (S6 in phase 1 against the real
-proxy).
+proxy, with the D28 part that the trial did not cover).
 
 ## Phase 1: infrastructure
 
@@ -22,7 +22,7 @@ Criterion (spec): infrastructure keeps state after a reboot and passes a restore
 | `F/deploy/compose.yml` | PostgreSQL, Temporal server, Temporal UI off by default; ports on loopback only | none |
 | `F/deploy/postgres/` | Init: roles af_migrator, af_api, af_control, af_backup (database.md Accounts) | compose |
 | `F/deploy/backup/` | Dump with af_backup, checksum, restore into a scratch database, row-count and FK check | postgres |
-| `F/deploy/proxy/` | TLS front for API and Temporal gRPC (mTLS plus authorizer, S6) | compose |
+| `F/deploy/proxy/` | TLS front for API and Temporal gRPC (mTLS plus a method allowlist per certificate, S6) | compose |
 | `F/package.json`, `F/tsconfig.json` | Own package; root `bunfig.toml` and `tsconfig.json` in R/ exclude `factory/` | none |
 | `F/deploy/compose.yml` (setup service) | A one-shot admin-tools container creates and updates the Temporal schema (auto-setup is deprecated; schema updates are manual with `temporal-sql-tool`); PostgreSQL 16.6 is the newest tested major; compose files are dev-only | compose |
 | `docs/agent-factory/deployment.md`, `recovery.md` | Spec 23 documents with the real commands of this phase (install, start, backup, restore); recovery is extended in phases 4 and 7 | deploy, backup |
@@ -71,7 +71,7 @@ Migrations, in order (foreign keys decide the order; each table is in exactly on
 Count: 9+3+6+5+4+1 = 28 tables, each in exactly one file (see Verification).
 
 Rig files changed: none. Proving check: `ops-matrix`, `decision-recorded`, `decision-kinds`, `second-press`,
-`state-exit`, `api-authz-matrix`, `sql-param`, `migration-order` (applies 0001-0006 to an empty database, and the
+`state-exit`, `api-authz-matrix`, `second-machine-refused`, `sql-param`, `migration-order` (applies 0001-0006 to an empty database, and the
 regeneration test shows the schema files and the generated migrations agree), the openapi regeneration test.
 Parallel: `contracts/` first; then `db/` plus `db/migrations`, `api/handlers/` by route group, and `control/` skeleton
 are disjoint lanes.
@@ -84,7 +84,7 @@ Criterion (spec): a task goes through the lifecycle and recovers after a failure
 |---|---|---|
 | `F/workflows/task.ts` | TaskWorkflow (queue `control`, id `task-<uuid>`): states, 12 update kinds, signal `wake` | contracts |
 | `F/workflows/machine-liveness.ts` | MachineLivenessWorkflow, a Schedule; marks machines offline | contracts |
-| `F/control/activities/` | PrepareTask, ResolveDependencies, SelectAgent, ReadDecision, RecordDecisionOutcome, PersistTaskEvent, NotifyUser, CreateChildTasks, RequestReview, LoadSettings | repo |
+| `F/control/activities/` | PrepareTask, ResolveDependencies, SelectAgent, ReadDecision, RecordDecisionOutcome, PersistTaskEvent, NotifyUser, CreateChildTasks, RequestReview, LoadSettings. All are local activities (D28) | repo |
 | `F/control/outbox-relay.ts` | Loop in the Control Worker: lease, start or update the workflow, mark sent; press once (`relay-press-once`) | repo |
 | `F/control/routing.ts` | SelectAgent stages: hard filters, ranking, stored decision | repo, adapters (capabilities as data only) |
 | `F/tests/replay/` | Saved histories replayed against current workflow code | workflows |
@@ -93,7 +93,7 @@ Criterion (spec): a task goes through the lifecycle and recovers after a failure
 Interfaces: `WorkflowClient` (api and relay to Temporal; updates carry only a decision id); `ActivityCatalog` (names and
 queues, shared with the worker); `PatchGate` (`patched()` use, until Worker Versioning is confirmed, audit 8.5).
 Migrations: none new. Rig files: none. Proving check: `state-exit`, `review-provider`, `check-not-run`,
-`relay-press-once`, failure scenarios F1-F6 (server side), replay test. Parallel: workflows/, control/activities/,
+`relay-press-once`, `control-no-queue`, failure scenarios F1-F6 (server side), replay test. Parallel: workflows/, control/activities/,
 outbox-relay.ts and fakes are disjoint lanes.
 
 ## Phase 4: worker, runner, first agents
@@ -203,6 +203,7 @@ database. Parallel: one lane per scenario file.
 | 15 | outbox_events is listed in both table groups of database.md | Counted once, migration 0003 (the pointer row in database.md says so) |
 | 16 | Exact usage fields of the Claude result event (audit S3) and Codex events are unversioned | To be checked in phase 4; `source: estimated` until then |
 | 17 | Worker Versioning GA status unverified (audit 8.5) | `patched()` until confirmed |
+| 18 | Temporal does not bind a worker certificate to its queue (S6 trial), the security document assumed it did | Settled by D28: server steps are local activities; the gateway is a separate piece of work before a second machine |
 
 ## Risks
 
@@ -210,7 +211,9 @@ database. Parallel: one lane per scenario file.
 |---|---|---|---|
 | Worker restart loses a running agent | Runner outlives worker; marker and exit file | 4 | F7-F9 |
 | Duplicate start after retry | Intent file first, execution id, lookup table | 4 | F8 |
-| Forged workflow update | Updates carry only a decision id; mTLS plus authorizer | 3 | `wf-forged-update`, S6 |
+| Forged workflow update | Updates carry only a decision id; mTLS plus method allowlist | 3 | `wf-forged-update`, S6 |
+| Forged answer to a server step | Server steps never enter a queue (D28) | 3 | `control-no-queue`, S6 |
+| Forged result of another machine | One machine until the gateway exists (D28) | 2 | `second-machine-refused` |
 | Same-user agent reads secrets | Env allowlist, profiles (D13 accepted risk) | 4 | `env-allowlist`, `secret-canary` |
 | Double press of a destructive button | Second-press confirmation, button replay refusal | 2, 6 | `second-press`, `button-replay` |
 | Migration breaks a running release | Expand then contract, checksums, advisory lock | 2 | migration test on a copy |
@@ -237,7 +240,7 @@ reachable before a server exists.
 | 2.2 Compatibility limits | Rig changes in phase 4 (behind the feature) plus the Rig regression run (20.4) |
 | 3.1 Remote server | `F/deploy/`, phase 1; permanent operation not reachable before a server exists |
 | 3.2 Local machine | `F/worker/`, `F/runner/`, Rig changes (phase 4) |
-| 3.3 Network model | `F/deploy/proxy/` (mTLS plus authorizer, S6), phase 1; security.md |
+| 3.3 Network model | `F/deploy/proxy/` (mTLS plus method allowlist, S6), phase 1; security.md |
 | 4.1 Tables | `F/db/schema/`, `F/db/migrations/` (0001-0006), database.md |
 | 4.2 Database requirements | triggers and constraints in the migrations; D24 for deletion; Contradictions row 1 |
 | 5.1 Main workflow | `F/workflows/task.ts`, phase 3 |

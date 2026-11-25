@@ -112,7 +112,7 @@ and sends both presses with their press ids (call: the confirmation is the serve
 | `POST /agents`, `PATCH /agents/{id}`, `DELETE /agents/{id}` | O | Agent fields (no secret values; credential references only); `If-Match`; delete is soft. |
 | `GET /workers`, `GET /workers/{id}` | O R | Filters `status`, `platform`. `outdated` shows the contract version. |
 | `PATCH /workers/{id}` | O | `status: disabled\|online`, `concurrency_limit`. |
-| `POST /workers/register` | W | `machine_id`, `name`, `platform`, `capabilities`, `version`, `contract_version`. 200 with the worker id and the supported contract range. Repeating it is safe. |
+| `POST /workers/register` | W | `machine_id`, `name`, `platform`, `capabilities`, `version`, `contract_version`. 200 with the worker id and the supported contract range. Repeating it is safe. A machine beyond the first is refused `409 queue_isolation_required` until the deployment declares the queue gateway (D28). |
 | `POST /workers/{id}/heartbeat` | W | `capabilities` (changed only), run ids alive. 200 with server time and token expiry. Own id only. |
 | `GET /tokens` | O | Prefix, role, bound worker, times; never the secret. |
 | `POST /tokens` | O | `name`, `role`, `worker_id`, `expires_at`. 201 with the secret, shown once. |
@@ -170,6 +170,7 @@ Every error is `application/problem+json` with `type`, `title`, `status`, `code`
 | `version_conflict` | 409 | `If-Match` does not match `row_version`. |
 | `idempotency_conflict`, `idempotency_in_progress` | 409 | See Idempotency. |
 | `dependency_cycle`, `depth_exceeded`, `project_active`, `task_active` | 409 | A fact of PostgreSQL forbids it. |
+| `queue_isolation_required` | 409 | A second machine registers while no gateway binds certificates to queues (D28). |
 | `checksum_mismatch`, `payload_too_large` | 422, 413 | Upload checks. |
 | `contract_unsupported` | 426 | The worker's contract version is outside the supported range; the machine gets no work. |
 

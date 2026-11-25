@@ -1,6 +1,6 @@
 # Agent Factory testing
 
-Design, nothing is built. [architecture.md](architecture.md) is binding (D1 to D26 are its decisions; "call" marks a choice made in these documents, open to veto); threats and their
+Design, nothing is built. [architecture.md](architecture.md) is binding (D1 to D28 are its decisions; "call" marks a choice made in these documents, open to veto); threats and their
 check ids (`secret-canary`, `path-escape`, ...) are in [security.md](security.md). A check named here must be able to
 fail: each has a pass criterion and a fail criterion, and a new check is first shown failing on the old or broken code.
 
@@ -45,6 +45,8 @@ Table-driven where the rule is data; each can fail (a cell removed, a check drop
 | `decision-kinds` | The enum in [database.md](database.md), the API routes of [api.md](api.md) and the handler table of the workflow list the same 12 kinds (`allow_agent` included) | identical sets | any set differs |
 | `second-press` | Each dangerous operation (`cancel`, `reject`, `force-close`, publication) with one press, with a second press in another channel, with an expired or reused one | only the same-channel second press inside the window is accepted, once | any other form accepted |
 | `relay-press-once` | The relay submits the same `press_id` twice, and a press from an unmapped Telegram user | the first decision recorded; the second refused; the unmapped user refused | a second row for one press id, or an unmapped user accepted |
+| `control-no-queue` | Run the lifecycle tests with the real Control Worker options and read the histories; compare the activity catalogue with the options (D28) | no history has an activity task of the `control` queue; every `local` row is reached through local activities; the Control Worker has `enableNonLocalActivities: false`; `act.<Name>.S` of each is below the workflow task timeout | one server step scheduled as an ordinary activity, or the option missing |
+| `second-machine-refused` | Register a second machine, with and without the gateway declared in the deployment; register the first one again (D28) | without the gateway the second is refused `queue_isolation_required` and gets no work; the first may register again; with it the second registers | a second machine registers without the gateway |
 | `gpu-order` | Several tasks request one machine's GPU slot with different priorities and request times, while one job runs | grants go by highest priority, then oldest request; one holder at a time; no preemption | a lower priority or a later request granted first, or two holders |
 | `cleanup-command` | Cleanup of a final task, a task not final, a task awaiting approval, a worktree with unpublished changes; and a day count passing on the injected clock | nothing is deleted by itself; the command removes only files and keeps rows; refusals as listed in [database.md](database.md) | anything removed without the command, or a row deleted |
 | `review-provider` | Review of a task whose implementer ran on one provider, with and without another provider eligible (D20) | another provider reviews; with none the task waits and a notice is sent | the same provider reviews |
@@ -98,7 +100,10 @@ design, not the suite.
 | S3 profiles refuse | for Claude and Codex under a profile: write outside the directory, use a forbidden tool, run `git push` to a disposable local remote, print the environment; list which user hooks and rules load in the run | each forbidden attempt is refused or does nothing; the remote has no new ref; the environment holds no token or credential; the hook list matches the expected list | any forbidden attempt succeeds, a ref arrives, a credential is printed, or an unexpected hook loads. Spends a little of the Claude limit; run by hand with the cost stated first |
 | S4 wrapper stops agent at limit | runner given a limit on an injected clock; worker killed; clock advanced; the fake agent ignores a polite stop | agent gone, exit file written with reason `limit`, its child processes gone | agent still alive, or exit file missing, or a child left |
 | S5 ComfyUI job found after restart | queue a job, restart the worker before completion, look up by prompt id | the same job is found in queue or history and collected once | job lost, or queued twice. Needs ComfyUI running |
-| S6 worker credentials cannot decide | with the worker's certificate and token: start a workflow, send an Update, call a decision route; then poll its own queue | the first three are refused; polling and completing an activity succeed | any of the first three is accepted, or polling is refused. Also runs with a connection that has no certificate: refused |
+| S6 worker credentials cannot decide | with the worker's certificate and token: start a workflow, send an Update, poll workflow tasks, call a decision route; then poll and complete an activity of its own queue; then run a workflow with server steps and read its history (D28) | the first four are refused; polling and completing succeed; the history has no activity task of the `control` queue | any of the first four is accepted, or polling is refused, or a server step appears as an activity task. Also runs with a connection that has no certificate: refused |
+
+State: S1, S2 and S4 are confirmed (S1 without a heartbeat timeout; S2 and S4 with fake agents). S6 is confirmed for the
+methods and the missing certificate; the D28 part has not been run and belongs to phase 1.
 
 Each proof also runs a control: the same call with the owner or Control Worker identity must succeed, so a refusal is not a
 broken harness.
@@ -115,7 +120,7 @@ broken harness.
 | Claude and Codex receive tasks | adapter integration with fakes; `live` smoke; S3 | live marked |
 | GPT through a separate adapter | OpenAI adapter against a fake endpoint; one `live` call | live marked |
 | Dependencies | unit and workflow: transition table, cycle rejection, BLOCKED on a failed dependency (D15) | automated |
-| Parallel executors | integration: two machines, two fake agents, no shared worktree | automated |
+| Parallel executors | integration: two machines (gateway declared, D28), two fake agents, no shared worktree | automated; a real second machine waits for the gateway |
 | Results stored and checked | worker-run checks stored with command, exit code and log; an agent claim does not count | automated |
 | History of all attempts | integration: attempt rows after F1, F7, REQUEST_CHANGES | automated |
 | Survives PC restart | F1, F2 automated part, plus the recorded real restart | partly recorded |

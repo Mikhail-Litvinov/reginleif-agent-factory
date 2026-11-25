@@ -1,6 +1,6 @@
 # Agent Factory database
 
-The application database of Agent Factory. Binding sources: [architecture.md](architecture.md) (decisions D1-D27, the
+The application database of Agent Factory. Binding sources: [architecture.md](architecture.md) (decisions D1-D28, the
 task states, state ownership) and the task specification section 4. Status: design. Types are PostgreSQL 16. The
 Temporal database is separate and not described here. "Call" marks a design choice made here, open to veto. The schema
 is written in Drizzle (D27): the table definitions live in `factory/db/schema/` and are the source of the migrations

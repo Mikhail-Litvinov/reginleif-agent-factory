@@ -43,6 +43,7 @@ results; no second recovery scheduler next to Temporal; no success reported for 
 | D25 | A review finding the implementer accepts is fixed. A disputed technical one is settled by a third independent run; a dispute about requirements, scope or cost goes to the owner. | Call from D18 |
 | D26 | A mandatory check that could not run is first repaired by agents; if that fails, the task is BLOCKED with the reason. It never counts as passed. | Call from D18 |
 | D27 | Drizzle (as the task spec recommends; Rig has no database code to reuse) defines the schema and types; its generated SQL migrations are reviewed, committed, completed by hand where Drizzle cannot express a rule, and applied forward only. | Call, from spec 4 |
+| D28 | Server steps run as local activities inside the Control Worker, so no task queue carries them and no worker can take them. A gateway that binds a certificate to its own queues comes before a second machine; until then a second machine is refused. | Owner (the refusal in code is a call) |
 
 Rejected: a separate repository (Rig updates and rolls back only itself and the hub); code in the Rig core (ordinary Rig
 would pull Temporal and PostgreSQL); the worker's own child processes (an agent would die with the worker).
@@ -57,7 +58,8 @@ Server contour (Docker Compose; on the PC until a server exists):
   Compose samples are for development, so the configuration is our own. No Elasticsearch: SQL visibility is enough.
 - **Temporal UI**, diagnostics only, not reachable from outside.
 - **API** with the web panel: server-rendered pages and a small script, no frontend framework (call).
-- **Control Worker**: task queue `control`; workflows, server activities, outbox relay.
+- **Control Worker**: task queue `control`, workflow tasks only; server activities run inside it as local activities
+  (D28); outbox relay.
 
 Local contour (Windows first):
 
@@ -109,8 +111,8 @@ which drops unknown keys.
   Continue-As-New, and the unique key in PostgreSQL covers everything before it.
 - Creating a task starts its workflow the same way; a repeated start of the same id is a no-op.
 - A decision is never taken from a Temporal message. The Update carries only the decision id; the workflow reads the
-  decision from PostgreSQL through a server activity and checks the actor, the revision and that it was not used. Access
-  to Temporal alone cannot accept a task.
+  decision from PostgreSQL through a local activity of the Control Worker (D28) and checks the actor, the revision and
+  that it was not used. The worker's access to Temporal cannot accept a task: no queue carries that read.
 - A decision for a closed workflow is marked `refused: task closed`. A workflow id is never reused: the relay checks the
   task's state in PostgreSQL before a start, so an expired history cannot start the task again.
 - PostgreSQL down: the mutation fails and nothing is confirmed. Temporal down: decisions wait in the outbox.
@@ -263,8 +265,11 @@ Numbers (attempts, timeouts, budgets, depth) are settings with defaults set in t
   that is mapped to an owner, and each press id works once.
 - The hub's local endpoints have no authentication today. The new generic mechanism needs a per-client key; a button press
   is checked against the hub's allowed users and works once; dangerous actions need a second press.
-- Temporal roles are separate: the worker's certificate may poll its own queues and complete activities; it may not start
-  workflows or send Updates. Reaching this needs a custom authorizer or a proxy in front of the frontend, proven in S6.
+- Temporal roles are separate: a proxy in front of the frontend allows the worker's certificate only the methods for
+  polling, heartbeating and completing activities; starting workflows, Updates and workflow tasks are refused (S6).
+  The proxy sees methods, not queue names, so any worker certificate can take and answer an activity of any queue
+  (S6 showed it on another machine's queue). D28 answers it: server steps never enter a queue, and a second machine
+  waits for the gateway. A machine's result is never a decision.
 - Profiles: Claude gets a permission mode, tool and directory lists; Codex its sandbox; the worker checks repository,
   directories, Git operations and limits itself. Push and publication are done by the worker after the owner's decision;
   agents get no push credentials in their environment. That an agent of either kind cannot push is proven in S3.
@@ -302,7 +307,7 @@ saved histories.
 | S3 | Claude and Codex under a profile refuse what it forbids, push included; which user hooks load | attempts outside the directory and tool lists, a push to a disposable remote |
 | S4 | The wrapper stops an agent at its limit with the worker gone | kill the worker, wait on an injected short limit |
 | S5 | ComfyUI job can be found after a worker restart | restart between queueing and completion |
-| S6 | The worker's Temporal credentials cannot start a workflow or send an Update | both calls with the worker's certificate are refused |
+| S6 | The worker's Temporal credentials cannot start a workflow, send an Update or poll workflow tasks; no server step enters a queue (D28) | the calls with the worker's certificate are refused; a history with server steps holds no activity task of the `control` queue |
 
 ## Order of work
 
