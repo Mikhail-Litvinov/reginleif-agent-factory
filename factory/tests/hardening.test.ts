@@ -39,20 +39,25 @@ describe("hardening", () => {
 		for (const [name, password] of await passwords()) assert.equal(text.includes(password), false, `${name} found in ${where}`);
 	};
 
-	it("no password in inspect, logs, or any process command line or environment, also during a dump", async () => {
+	it("no password in inspect, logs, or any process command line or environment, also during a dump", { timeout: 180_000 }, async () => {
 		const session = new PsqlSession(stack.container, "af_backup");
+		const holder = new PsqlSession(stack.container, "af_migrator");
 		try {
 			assert.equal(await session.query("SELECT 1;"), "1");
-			// Enough data that pg_dump runs for a few seconds, so the scans below surely meet it (600k incompressible-ish rows).
-			await psql(stack.container, "af_migrator", "CREATE TABLE bulk AS SELECT g, md5(g::text) || md5((g + 1)::text) AS filler FROM generate_series(1, 600000) g;");
+			// The dump is held at a known point instead of lasting long: pg_dump takes an ACCESS SHARE lock on every object it
+			// dumps, including a materialized view (the backup's own row counting reads tables only, so it is not held up
+			// by it). While a lock holder keeps the view ACCESS EXCLUSIVE, pg_dump is alive and waiting; the scans run, and
+			// only then the lock is released. No duration is involved.
+			await psql(stack.container, "af_migrator", "CREATE TABLE small AS SELECT g FROM generate_series(1, 100) g; CREATE MATERIALIZED VIEW held AS SELECT g FROM small;");
+			// (LOCK TABLE refuses a materialized view; a refresh inside an open transaction takes the same lock and keeps it.)
+			assert.equal(await holder.query("BEGIN; REFRESH MATERIALIZED VIEW held; SELECT 'locked';"), "locked");
 			let sawDump = false;
 			let sawPsql = false;
 			let done = false;
 			const running = backup({ project: stack.project, target: join(work, "scan") }).finally(() => {
 				done = true;
 			});
-			// Scan while the backup runs (and once more after it), as root and as the server's own user.
-			do {
+			const scanOnce = async (): Promise<void> => {
 				for (const user of ["root", "postgres"]) {
 					// Other users' processes are unreadable to this user (a non-zero exit): that is expected, only output counts.
 					const scan = (await run("docker", ["exec", "-u", user, stack.container, "sh", "-c", SCAN])).stdout;
@@ -60,8 +65,13 @@ describe("hardening", () => {
 					sawDump ||= /pg_dump/.test(scan);
 					sawPsql ||= /psql/.test(scan);
 				}
-			} while (!done);
+			};
+			// Scan until pg_dump is seen (it is blocked on the lock, so it cannot have finished), then release the lock.
+			while (!sawDump && !done) await scanOnce();
+			assert.equal(done, false, "the backup finished while the view was locked: the lock did not hold pg_dump");
+			assert.equal(await holder.query("ROLLBACK; SELECT 'released';"), "released");
 			await running;
+			await scanOnce();
 			assert.ok(sawPsql, "the scan never saw a psql process: it proves nothing");
 			assert.ok(sawDump, "the scan never saw pg_dump running: it proves nothing");
 			await assertNone("docker inspect", (await run("docker", ["inspect", stack.container])).stdout);
@@ -71,6 +81,7 @@ describe("hardening", () => {
 			const env = await runChecked("docker", ["exec", "-u", "postgres", stack.container, "sh", "-c", "tr '\\0' '\\n' < /proc/1/environ"]);
 			assert.equal(/PASSWORD/i.test(env), false, "PGPASSWORD or POSTGRES_PASSWORD in the server environment");
 		} finally {
+			await holder.close();
 			await session.close();
 		}
 	});
@@ -87,14 +98,14 @@ describe("hardening", () => {
 			(await runChecked("docker", ["inspect", "--format", "{{.Config.Image}}", stack.container])).trim();
 
 		// Runs a short-lived client container on `network`; it reads the password from the read-only secrets mount into a
-		// passfile (never an environment variable). Its cleanup is registered before it is created.
+		// passfile (never an environment variable). It carries the stack's run label, so the checked removal of that label
+		// (stack.dispose) removes it should --rm not have, and a docker failure there fails the run.
 		const client = async (network: string, host: string, role: string, extra = ""): Promise<{ code: number; text: string }> => {
 			const name = `af-test-client-${randomBytes(4).toString("hex")}`;
-			cleanups.add(() => run("docker", ["rm", "-f", name]));
 			const script = `umask 077; f=$(mktemp); printf '*:*:*:${role}:%s\\n' "$(cat /s/${role})" > "$f"; ` +
 				`PGPASSFILE="$f" PGCONNECT_TIMEOUT=3 psql -w -h ${host} -U ${role} -d agent_factory ${extra} -Atc 'select 42'`;
 			const result = await run("docker", [
-				"run", "--rm", "--name", name, "--network", network,
+				"run", "--rm", "--name", name, "--label", `af.run=${stack.runId}`, "--network", network,
 				"--mount", `type=bind,source=${stack.secretsDir},target=/s,readonly`,
 				"--entrypoint", "sh", await image(), "-c", script,
 			]);
@@ -124,8 +135,7 @@ describe("hardening", () => {
 
 		it("a container on another docker network cannot reach the server", async () => {
 			const other = `af-test-net-${randomBytes(4).toString("hex")}`;
-			cleanups.add(() => run("docker", ["network", "rm", other]));
-			await runChecked("docker", ["network", "create", other]);
+			await runChecked("docker", ["network", "create", "--label", `af.run=${stack.runId}`, other]);
 			const ip = (await runChecked("docker", ["inspect", "--format", `{{(index .NetworkSettings.Networks "${stack.project}_default").IPAddress}}`, stack.container])).trim();
 			assert.match(ip, /^\d+\.\d+\.\d+\.\d+$/);
 			const refused = await client(other, ip, "af_api");

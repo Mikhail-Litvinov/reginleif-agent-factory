@@ -5,8 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { backup, type Manifest } from "../deploy/backup/backup.ts";
+import { restoreCheck, startScratch, type ScratchServer } from "../deploy/backup/restore-check.ts";
 import { psql, run } from "../deploy/lib.ts";
-import { createTestStack, type TestStack } from "./helpers.ts";
+import { createTestStack, leftovers, type TestStack } from "./helpers.ts";
 import { createHash } from "node:crypto";
 
 const BACKUP_CLI = new URL("../deploy/backup/backup.ts", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
@@ -17,8 +18,12 @@ describe("backup and restore check", () => {
 	let work: string;
 	let good: { manifestPath: string; dumpPath: string; manifest: Manifest };
 
-	// A restore check of a manifest through the real command; resolves with its exit code and error text.
-	const check = (manifestPath: string) => run("node", [CHECK_CLI, "--manifest", manifestPath, "--prefix", "af-test-rc"]);
+	let scratch: ScratchServer;
+
+	// The real command, once (the intact backup); every other case runs in process against one shared scratch server.
+	const checkCli = (manifestPath: string) => run("node", [CHECK_CLI, "--manifest", manifestPath, "--prefix", "af-test-rc"]);
+	const check = (manifestPath: string, hooks?: Parameters<typeof restoreCheck>[0]["hooks"]) =>
+		restoreCheck({ manifestPath, scratch, hooks });
 
 	// Copies the good backup into a new directory so that a test can damage its own copy.
 	const copyBackup = async (name: string) => {
@@ -43,10 +48,22 @@ describe("backup and restore check", () => {
 			"INSERT INTO child SELECT g, 1 + g % 50 FROM generate_series(1, 200) g;",
 		].join("\n"));
 		good = await backup({ project: stack.project, target: join(work, "good") });
+		scratch = await startScratch("af-test-rc");
 	});
 	after(async () => {
-		await stack?.dispose();
+		const errors: unknown[] = [];
+		try {
+			await scratch?.close();
+		} catch (error) {
+			errors.push(error);
+		}
+		try {
+			await stack?.dispose();
+		} catch (error) {
+			errors.push(error);
+		}
 		await rm(work, { recursive: true, force: true });
+		if (errors.length > 0) throw new AggregateError(errors, "cleanup failed");
 	});
 
 	it("writes the dump, its checksum and a manifest with versions, row counts and foreign keys", async () => {
@@ -75,6 +92,20 @@ describe("backup and restore check", () => {
 		assert.equal(files.length, 6, files.join(", "));
 		assert.ok(files.every((f) => !f.endsWith(".partial")));
 		assert.match(a.manifest.dump.file, /^af-\d{8}T\d{6}Z-[0-9a-f]{8}\.dump$/);
+	});
+
+	it("a file that already holds one of the run's names is never overwritten or removed, and the run fails", async () => {
+		const name = "af-20260101T000000Z-0badf00d";
+		const target = join(work, "collide");
+		for (const suffix of [".dump.partial", ".dump", ".dump.sha256", ".manifest.json.partial", ".manifest.json"]) {
+			await rm(target, { recursive: true, force: true });
+			await run("node", ["-e", `require("fs").mkdirSync(${JSON.stringify(target)})`]);
+			const taken = join(target, `${name}${suffix}`);
+			await writeFile(taken, "someone else's data");
+			await assert.rejects(backup({ project: stack.project, target, nameFor: () => name }), /EEXIST/, suffix);
+			assert.equal(await readFile(taken, "utf8"), "someone else's data", `${suffix} was changed`);
+			assert.deepEqual(await readdir(target), [`${name}${suffix}`], `${suffix}: the failed run left files behind`);
+		}
 	});
 
 	it("never puts a password into the files or the manifest", async () => {
@@ -106,9 +137,17 @@ describe("backup and restore check", () => {
 	});
 
 	it("restore check passes on an intact backup", async () => {
-		const result = await check(good.manifestPath);
+		const result = await checkCli(good.manifestPath);
 		assert.equal(result.code, 0, result.stderr);
 		assert.match(result.stdout, /passed/);
+	});
+
+	it("restore check passes in process on the shared scratch server, twice (the scratch database is reset between)", async () => {
+		for (let i = 0; i < 2; i += 1) {
+			const result = await check(good.manifestPath);
+			assert.deepEqual(result.problems, []);
+			assert.equal(result.ok, true);
+		}
 	});
 
 	it("restore check fails on a flipped byte (checksum)", async () => {
@@ -118,8 +157,31 @@ describe("backup and restore check", () => {
 		bytes.writeUInt8((bytes.readUInt8(at) ^ 0xff) & 0xff, at);
 		await writeFile(copy.dumpPath, bytes);
 		const result = await check(copy.manifestPath);
-		assert.notEqual(result.code, 0);
-		assert.match(result.stderr, /checksum mismatch/);
+		assert.equal(result.ok, false);
+		assert.match(result.problems.join("\n"), /checksum mismatch/);
+	});
+
+	it("restore check catches a dump changed after it was verified (the bytes pg_restore consumes are hashed)", async () => {
+		const copy = await copyBackup("swapped");
+		const bytes = await readFile(copy.dumpPath);
+		const at = Math.floor(bytes.length / 2);
+		const changed = Buffer.from(bytes);
+		changed.writeUInt8((changed.readUInt8(at) ^ 0xff) & 0xff, at);
+		const result = await check(copy.manifestPath, {
+			beforeFeed: async () => {
+				await writeFile(copy.dumpPath, changed);
+			},
+		});
+		assert.equal(result.ok, false);
+		assert.match(result.problems.join("\n"), /checksum mismatch: the dump changed after it was verified/);
+	});
+
+	it("restore check refuses a manifest that is not the final marker", async () => {
+		const copy = await copyBackup("partial");
+		await assert.rejects(check(`${copy.manifestPath}.partial`), /manifest .*\.partial/);
+		const odd = join(copy.dir, "manifest.json");
+		await copyFile(copy.manifestPath, odd);
+		await assert.rejects(check(odd), /manifest .*af-/);
 	});
 
 	it("restore check fails on a truncated dump even when its checksum was recomputed", async () => {
@@ -132,16 +194,14 @@ describe("backup and restore check", () => {
 		await writeFile(copy.sumPath, `${sum}  ${manifest.dump.file}\n`);
 		await writeFile(copy.manifestPath, JSON.stringify({ ...manifest, dump: { ...manifest.dump, sha256: sum, bytes: cut.length } }));
 		const result = await check(copy.manifestPath);
-		assert.notEqual(result.code, 0);
-		assert.match(result.stderr, /pg_restore failed/);
+		assert.equal(result.ok, false);
+		assert.match(result.problems.join("\n"), /pg_restore failed/);
 	});
 
 	it("restore check fails when the manifest is missing", async () => {
 		const copy = await copyBackup("nomanifest");
 		await rm(copy.manifestPath);
-		const result = await check(copy.manifestPath);
-		assert.notEqual(result.code, 0);
-		assert.match(result.stderr, /manifest missing/);
+		await assert.rejects(check(copy.manifestPath), /manifest missing/);
 	});
 
 	it("restore check fails when a row count in the manifest differs", async () => {
@@ -150,16 +210,14 @@ describe("backup and restore check", () => {
 		const changed = { ...manifest, rowCounts: { ...manifest.rowCounts, "public.child": 199 } };
 		await writeFile(copy.manifestPath, JSON.stringify(changed));
 		const result = await check(copy.manifestPath);
-		assert.notEqual(result.code, 0);
-		assert.match(result.stderr, /public\.child: 199 rows in the backup, 200 after restore/);
+		assert.equal(result.ok, false);
+		assert.match(result.problems.join("\n"), /public\.child: 199 rows in the backup, 200 after restore/);
 	});
 
-	it("restore check leaves no scratch container, volume or network behind", async () => {
-		const names = await run("docker", ["ps", "-a", "--format", "{{.Names}}"]);
-		assert.equal(/af-test-rc/.test(names.stdout), false);
-		const volumes = await run("docker", ["volume", "ls", "--format", "{{.Name}}"]);
-		assert.equal(/af-test-rc/.test(volumes.stdout), false);
-		const networks = await run("docker", ["network", "ls", "--format", "{{.Name}}"]);
-		assert.equal(/af-test-rc/.test(networks.stdout), false);
+	// Last: closes the shared scratch server, then lists by its run label (the listing must succeed to count as empty).
+	it("closing the scratch server leaves no container, volume or network with its label", async () => {
+		assert.ok((await leftovers(scratch.runId)).length > 0, "the scratch server was running");
+		await scratch.close();
+		assert.deepEqual(await leftovers(scratch.runId), []);
 	});
 });

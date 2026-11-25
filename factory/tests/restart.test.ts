@@ -56,9 +56,8 @@ describe("restart", () => {
 	it("survive a forced recreate of the container", async () => {
 		await writeRow();
 		const old = stack.container;
-		await runChecked("docker", ["compose", "-p", stack.project, "-f", (await import("../deploy/lib.ts")).composeFilePath(), "up", "-d", "--force-recreate"], {
-			env: { AF_SECRETS_DIR: stack.secretsDir, AF_PG_PORT: String(stack.port) },
-		});
+		const recreate = await compose(stack, "up", "-d", "--force-recreate");
+		assert.equal(recreate.code, 0, recreate.stderr);
 		stack.container = await findContainer(stack.project);
 		assert.notEqual(stack.container, old, "the container must be a new one");
 		await waitHealthy(stack.container);

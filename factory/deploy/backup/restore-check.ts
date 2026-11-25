@@ -11,20 +11,27 @@
 // The pieces that restore.ts (the real recovery command) shares with the check live here, so both do the same thing:
 // verifyBackupFiles, restoreDump, applyDatabaseGrants and compareCatalog.
 import { spawn } from "node:child_process";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { createSecrets } from "../setup-secrets.ts";
-import { MANIFEST_FORMAT, type Manifest } from "./backup.ts";
-import { DATABASE, FOREIGN_KEYS_SQL, ROW_COUNTS_SQL, execArgs, freePort, psql, removeStack, startStack, type ForeignKey } from "../lib.ts";
+import { MANIFEST_FORMAT, streamDump, type Manifest } from "./backup.ts";
+import { DATABASE, FOREIGN_KEYS_SQL, ROW_COUNTS_SQL, execArgs, freePort, newRunId, psql, removeOwned, startStack, type ForeignKey } from "../lib.ts";
+
+// The names a finished backup has (backup.ts): <stamp>-<8 hex>. Only the final manifest counts; a `.partial` is not one.
+export const MANIFEST_NAME = /^af-\d{8}T\d{6}Z-[0-9a-f]{8}\.manifest\.json$/;
+export const DUMP_NAME = /^af-\d{8}T\d{6}Z-[0-9a-f]{8}\.dump$/;
 
 export interface RestoreCheckOptions {
 	readonly manifestPath: string;
 	// Project names of the scratch stack start with this prefix (tests pass an `af-test-` one).
 	readonly prefix?: string;
+	// A scratch server shared by several checks (one start instead of one per check); the caller closes it.
+	readonly scratch?: ScratchServer;
+	readonly hooks?: RestoreDumpHooks;
 }
 
 export interface RestoreCheckResult {
@@ -41,6 +48,9 @@ const sha256OfFile = async (file: string): Promise<string> => {
 };
 
 const readManifest = async (path: string): Promise<Manifest> => {
+	const name = basename(path);
+	if (name.endsWith(".partial")) throw new Error(`manifest is a .partial file, not a completed backup: ${path}`);
+	if (!MANIFEST_NAME.test(name)) throw new Error(`manifest is invalid (${path}): its name is not af-<stamp>-<8 hex>.manifest.json`);
 	let text: string;
 	try {
 		text = await readFile(path, "utf8");
@@ -74,7 +84,7 @@ export const manifestProblems = (value: unknown): string[] => {
 	const dump = value.dump;
 	if (!isObject(dump)) problems.push("dump is missing");
 	else {
-		if (typeof dump.file !== "string" || !/^af-[\w-]+\.dump$/.test(dump.file)) problems.push("dump.file is not an af-*.dump file name");
+		if (typeof dump.file !== "string" || !DUMP_NAME.test(dump.file)) problems.push("dump.file is not an af-<stamp>-<8 hex>.dump file name");
 		if (typeof dump.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(dump.sha256)) problems.push("dump.sha256 is not 64 hex digits");
 		if (typeof dump.bytes !== "number" || !Number.isInteger(dump.bytes) || dump.bytes < 0) problems.push("dump.bytes is not a non-negative integer");
 	}
@@ -133,10 +143,23 @@ export const verifyBackupFiles = async (manifestPath: string): Promise<VerifiedB
 	return { manifest, dumpPath };
 };
 
+export interface DumpDigestExpectation {
+	readonly sha256: string;
+	readonly bytes: number;
+}
+
+export interface RestoreDumpHooks {
+	// Called right before the dump file is opened for the feed (tests change the file here, after it was verified).
+	readonly beforeFeed?: () => Promise<void>;
+}
+
 // Streams the dump into pg_restore inside the container (stream pipeline: backpressure, and an error on either side
-// ends both). Resolves with pg_restore's error text ("" on success).
-export const restoreDump = async (container: string, dumpPath: string): Promise<string> => {
+// ends both) and hashes THE BYTES THAT pg_restore CONSUMES while they pass. The restore counts only when those bytes are
+// the ones the manifest names: a file that changed after verifyBackupFiles read it is caught here, because the check
+// is on what was consumed, not on an earlier read of the same path. Resolves with an error text ("" on success).
+export const restoreDump = async (container: string, dumpPath: string, expected: DumpDigestExpectation, hooks: RestoreDumpHooks = {}): Promise<string> => {
 	const program = `pg_restore --exit-on-error --no-password -U af_bootstrap -d ${DATABASE}`;
+	await hooks.beforeFeed?.();
 	const child = spawn("docker", execArgs(container, "af_bootstrap", program), { stdio: ["pipe", "ignore", "pipe"] });
 	let stderr = "";
 	child.stderr.on("data", (chunk: Buffer) => {
@@ -147,10 +170,12 @@ export const restoreDump = async (container: string, dumpPath: string): Promise<
 		child.on("close", resolvePromise);
 	});
 	exit.catch(() => {});
-	const [fed, code] = await Promise.allSettled([pipeline(createReadStream(dumpPath), child.stdin), exit]);
+	const [fed, code] = await Promise.allSettled([streamDump(createReadStream(dumpPath), child.stdin), exit]);
 	if (code.status === "rejected") return `pg_restore could not run: ${code.reason instanceof Error ? code.reason.message : String(code.reason)}`;
+	if (fed.status === "fulfilled" && (fed.value.sha256 !== expected.sha256 || fed.value.bytes !== expected.bytes)) {
+		return `checksum mismatch: the dump changed after it was verified (pg_restore consumed ${fed.value.bytes} bytes with sha256 ${fed.value.sha256}, the manifest says ${expected.bytes} bytes and ${expected.sha256})`;
+	}
 	if (code.value !== 0) return `pg_restore failed (exit ${code.value}): ${stderr.trim()}`;
-	// pg_restore may exit 0 only after reading everything, so a failed feed with a clean exit cannot happen; report it anyway.
 	if (fed.status === "rejected") return `the dump could not be fed to pg_restore: ${fed.reason instanceof Error ? fed.reason.message : String(fed.reason)}`;
 	return "";
 };
@@ -169,11 +194,6 @@ export const applyDatabaseGrants = async (container: string): Promise<void> => {
 		"ALTER DEFAULT PRIVILEGES FOR ROLE af_migrator IN SCHEMA public GRANT SELECT ON TABLES TO af_backup;",
 		"ALTER DEFAULT PRIVILEGES FOR ROLE af_migrator IN SCHEMA public GRANT SELECT ON SEQUENCES TO af_backup;",
 	].join("\n"));
-};
-
-// Replaces the application database with an empty one owned by af_migrator (the caller proved it may).
-export const recreateDatabase = async (container: string): Promise<void> => {
-	await psql(container, "af_bootstrap", `DROP DATABASE ${DATABASE} WITH (FORCE); CREATE DATABASE ${DATABASE} OWNER af_migrator;`, { database: "postgres" });
 };
 
 const keyOf = (fk: ForeignKey): string => `${fk.table}|${fk.name}|${fk.definition}`;
@@ -221,27 +241,65 @@ export const restoreCheck = async (options: RestoreCheckOptions): Promise<Restor
 	}
 	const { manifest, dumpPath } = verified;
 
-	const prefix = options.prefix ?? "af-restore-check";
-	const project = `${prefix}-${randomBytes(4).toString("hex")}`;
-	const secretsDir = await mkdtemp(join(tmpdir(), `${prefix}-secrets-`));
-	let stack: { project: string; secretsDir: string; port: number } | undefined;
+	// A server the caller passes in is theirs to close; otherwise this check starts its own and removes it.
+	let own: ScratchServer | undefined;
 	try {
-		createSecrets(secretsDir);
-		stack = { project, secretsDir, port: await freePort() };
-		const container = await startStack(stack);
-
-		// The scratch server's init made an empty application database; replace it with an empty one that the dump fills.
-		await recreateDatabase(container);
-		const restoreError = await restoreDump(container, dumpPath);
+		const scratch = options.scratch ?? (own = await startScratch(options.prefix ?? "af-restore-check"));
+		await scratch.prepare();
+		const restoreError = await restoreDump(scratch.container, dumpPath, manifest.dump, options.hooks);
 		if (restoreError) return { ok: false, problems: [restoreError] };
-		await applyDatabaseGrants(container);
-		const problems = await compareRestored(container, manifest);
+		await applyDatabaseGrants(scratch.container);
+		const problems = await compareRestored(scratch.container, manifest);
 		return { ok: problems.length === 0, problems };
 	} catch (error) {
 		return { ok: false, problems: [error instanceof Error ? error.message : String(error)] };
 	} finally {
-		if (stack) await removeStack(stack);
-		await rm(secretsDir, { recursive: true, force: true });
+		if (own) await own.close();
+	}
+};
+
+// A throw-away server this process started itself (own run id, own labels, own secrets). Because the run id proves it is
+// ours and it holds nothing of any real stack, it may be emptied again between checks: prepare() gives the next restore
+// the same empty, init-made database the first one had.
+export interface ScratchServer {
+	readonly container: string;
+	readonly project: string;
+	readonly runId: string;
+	prepare(): Promise<void>;
+	close(): Promise<void>;
+}
+
+export const startScratch = async (prefix: string): Promise<ScratchServer> => {
+	const runId = newRunId();
+	const project = `${prefix}-${runId}`;
+	const secretsDir = await mkdtemp(join(tmpdir(), `${prefix}-secrets-`));
+	let dirty = false;
+	const close = async (): Promise<void> => {
+		try {
+			await removeOwned(runId);
+		} finally {
+			await rm(secretsDir, { recursive: true, force: true });
+		}
+	};
+	try {
+		createSecrets(secretsDir);
+		const container = await startStack({ project, secretsDir, port: await freePort(), runId });
+		return {
+			container,
+			project,
+			runId,
+			close,
+			prepare: async () => {
+				if (dirty) {
+					await psql(container, "af_bootstrap", `DROP DATABASE ${DATABASE} WITH (FORCE); CREATE DATABASE ${DATABASE} OWNER af_migrator;`, { database: "postgres" });
+					await psql(container, "af_bootstrap", "CREATE EXTENSION vector;");
+				}
+				dirty = true;
+			},
+		};
+	} catch (error) {
+		await close();
+		throw error;
 	}
 };
 

@@ -6,6 +6,7 @@
 // from the account's secret file into tmpfs (/dev/shm, memory only) with mode 0600, names it by PGPASSFILE (a path, not
 // a secret), and removes it when the command ends, also on a signal.
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { createServer } from "node:net";
 
 export const DATABASE = "agent_factory";
@@ -185,6 +186,23 @@ export const composeFilePath = (): string => decodeURIComponent(COMPOSE_FILE.pat
 
 export const composeArgs = (project: string, ...rest: string[]): string[] => ["compose", "-p", project, "-f", composeFilePath(), ...rest];
 
+const runLabelFilePath = (): string => decodeURIComponent(new URL("./compose.run.yml", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1"));
+
+// Same, for a project that a command created itself: a second compose file puts the label af.run=<runId> on its
+// container, volume and network, so that removal can select exactly what this run created.
+export const ownedComposeArgs = (project: string, runId: string, ...rest: string[]): string[] => [
+	"compose", "-p", project, "-f", composeFilePath(), "-f", runLabelFilePath(), ...rest,
+];
+
+export const RUN_LABEL = "af.run";
+const RUN_ID = /^[0-9a-f]{12}$/;
+
+const assertRunId = (runId: string): void => {
+	if (!RUN_ID.test(runId)) throw new Error(`bad run id: ${runId}`);
+};
+
+export const newRunId = (): string => randomBytes(6).toString("hex");
+
 // Time as a dependency: a test injects a clock whose sleep only moves its own now, so no test waits on a wall clock.
 export interface Clock {
 	now(): number;
@@ -226,21 +244,81 @@ export interface StackOptions {
 	readonly project: string;
 	readonly secretsDir: string;
 	readonly port: number;
+	// The run that owns the project: every resource it creates carries the label af.run=<runId>.
+	readonly runId: string;
 }
 
-const stackEnv = (options: StackOptions): Record<string, string> => ({ AF_SECRETS_DIR: options.secretsDir, AF_PG_PORT: String(options.port) });
+export const stackEnv = (options: StackOptions): Record<string, string> => ({
+	AF_SECRETS_DIR: options.secretsDir,
+	AF_PG_PORT: String(options.port),
+	AF_RUN_ID: options.runId,
+});
+
+// The compose command line of a stack that a run owns.
+export const stackArgs = (options: StackOptions, ...rest: string[]): string[] => ownedComposeArgs(options.project, options.runId, ...rest);
 
 // Starts a compose project of the server and waits until it is healthy; returns the container id.
 export const startStack = async (options: StackOptions): Promise<string> => {
-	await runChecked("docker", composeArgs(options.project, "up", "-d"), { env: stackEnv(options) });
+	assertRunId(options.runId);
+	await runChecked("docker", stackArgs(options, "up", "-d"), { env: stackEnv(options) });
 	const container = await findContainer(options.project);
 	await waitHealthy(container);
 	return container;
 };
 
-// Removes the containers, network and volume of a compose project (only this project: -p scopes it).
-export const removeStack = async (options: StackOptions): Promise<void> => {
-	await run("docker", composeArgs(options.project, "down", "-v", "--remove-orphans"), { env: stackEnv(options) });
+export interface OwnedResources {
+	readonly containers: string[];
+	readonly networks: string[];
+	readonly volumes: string[];
+}
+
+const lines = (text: string): string[] => text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+
+// What carries this run's label. Each listing must succeed: a failed listing throws, it never reads as "nothing".
+export const ownedResources = async (runId: string): Promise<OwnedResources> => {
+	assertRunId(runId);
+	const filter = `label=${RUN_LABEL}=${runId}`;
+	return {
+		containers: lines(await runChecked("docker", ["ps", "-a", "-q", "--no-trunc", "--filter", filter])),
+		networks: lines(await runChecked("docker", ["network", "ls", "-q", "--no-trunc", "--filter", filter])),
+		volumes: lines(await runChecked("docker", ["volume", "ls", "-q", "--filter", filter])),
+	};
+};
+
+// Removes exactly what carries this run's label (containers with their anonymous volumes, then networks, then volumes).
+// Every command's exit code is checked; failures are collected and thrown together, after all steps were tried.
+export const removeOwned = async (runId: string): Promise<void> => {
+	const found = await ownedResources(runId);
+	const errors: string[] = [];
+	const step = async (args: string[], ids: string[]): Promise<void> => {
+		if (ids.length === 0) return;
+		const result = await run("docker", [...args, ...ids]);
+		if (result.code !== 0) errors.push(`docker ${args.join(" ")} failed (exit ${result.code}): ${result.stderr.trim() || result.stdout.trim()}`);
+	};
+	await step(["rm", "-f", "-v"], found.containers);
+	await step(["network", "rm"], found.networks);
+	await step(["volume", "rm"], found.volumes);
+	if (errors.length > 0) throw new Error(errors.join("; "));
+	const left = await ownedResources(runId);
+	const count = left.containers.length + left.networks.length + left.volumes.length;
+	if (count > 0) throw new Error(`${count} resource(s) with label ${RUN_LABEL}=${runId} remain after removal`);
+};
+
+// Removes what a run created for its stack (by label, nothing else).
+export const removeStack = (options: StackOptions): Promise<void> => removeOwned(options.runId);
+
+// Whether anything of the given compose project name exists: containers (also stopped), volumes or networks, by the
+// compose project label and by the name prefix `<project>_` / `<project>-`. A failed listing throws.
+export const projectResourcesExist = async (project: string): Promise<string[]> => {
+	const byLabel = `label=com.docker.compose.project=${project}`;
+	const found: string[] = [];
+	for (const name of lines(await runChecked("docker", ["ps", "-a", "--format", "{{.Names}}", "--filter", byLabel]))) found.push(`container ${name}`);
+	for (const name of lines(await runChecked("docker", ["ps", "-a", "--format", "{{.Names}}", "--filter", `name=${project}-`]))) found.push(`container ${name}`);
+	for (const name of lines(await runChecked("docker", ["volume", "ls", "--format", "{{.Name}}", "--filter", byLabel]))) found.push(`volume ${name}`);
+	for (const name of lines(await runChecked("docker", ["volume", "ls", "--format", "{{.Name}}", "--filter", `name=${project}_`]))) found.push(`volume ${name}`);
+	for (const name of lines(await runChecked("docker", ["network", "ls", "--format", "{{.Name}}", "--filter", byLabel]))) found.push(`network ${name}`);
+	for (const name of lines(await runChecked("docker", ["network", "ls", "--format", "{{.Name}}", "--filter", `name=${project}_`]))) found.push(`network ${name}`);
+	return [...new Set(found)];
 };
 
 // The id of the running server container of a compose project.

@@ -64,6 +64,38 @@ describe("streams", () => {
 		assert.equal(source.destroyed, true);
 	});
 
+	it("streamDump destroys an endless source and the sink when the writable fails", async () => {
+		// An endless source ends only if the pipeline destroys it (a plain pipe would leave it open and paused).
+		const source = new Readable({
+			read() {
+				this.push(Buffer.alloc(1024));
+			},
+		});
+		const sink = new Writable({
+			write(_chunk, _encoding, callback) {
+				callback(new Error("disk full"));
+			},
+		});
+		await assert.rejects(streamDump(source, sink), /disk full/);
+		assert.equal(source.destroyed, true, "the source must be destroyed");
+	});
+
+	it("streamDump destroys the sink and rejects when the source fails midway", async () => {
+		const source = new Readable({
+			read() {
+				this.push(Buffer.alloc(16));
+				this.destroy(new Error("pipe broke"));
+			},
+		});
+		const sink = new Writable({
+			write(_chunk, _encoding, callback) {
+				callback();
+			},
+		});
+		await assert.rejects(streamDump(source, sink), /pipe broke/);
+		assert.equal(sink.destroyed, true, "the sink must be destroyed, not left open");
+	});
+
 	it("captureDump keeps the file of a dump that ends well", async () => {
 		const file = join(work, "ok.dump");
 		const digest = await captureDump(fakeDump("PGDMP-bytes", 0), file);
@@ -194,8 +226,9 @@ describe("backup files are validated by content", () => {
 	it("rejects a manifest that is not valid JSON or lacks fields", async () => {
 		const bad = join(work, "badjson");
 		await import("node:fs/promises").then((fs) => fs.mkdir(bad, { recursive: true }));
-		await writeFile(join(bad, "x.manifest.json"), "{ nope");
-		await assert.rejects(verifyBackupFiles(join(bad, "x.manifest.json")), /not valid JSON/);
+		const badName = "af-20260101T000000Z-aabbccdd.manifest.json";
+		await writeFile(join(bad, badName), "{ nope");
+		await assert.rejects(verifyBackupFiles(join(bad, badName)), /not valid JSON/);
 		const manifest = goodManifest();
 		for (const [field, value] of [["format", "other"], ["createdAt", "yesterday"], ["serverVersion", ""], ["image", 5], ["database", "postgres"]] as const) {
 			assert.notDeepEqual(manifestProblems({ ...manifest, [field]: value }), [], field);

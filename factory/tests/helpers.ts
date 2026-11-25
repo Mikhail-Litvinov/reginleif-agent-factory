@@ -10,7 +10,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createSecrets } from "../deploy/setup-secrets.ts";
-import { composeArgs, freePort, removeStack, run, startStack, type RunResult } from "../deploy/lib.ts";
+import { freePort, newRunId, ownedResources, removeOwned, run, stackArgs, stackEnv, startStack, type RunResult } from "../deploy/lib.ts";
 
 // A stack of undo actions, run last-registered first; one failing action does not stop the rest.
 export class Cleanups {
@@ -35,6 +35,7 @@ export class Cleanups {
 
 export interface TestStack {
 	readonly project: string;
+	readonly runId: string;
 	readonly secretsDir: string;
 	readonly port: number;
 	container: string;
@@ -55,11 +56,19 @@ export const newSecretsDir = async (cleanups: Cleanups): Promise<string> => {
 	return dir;
 };
 
-// Registers the removal of a compose project, then returns its name; nothing exists yet, and removing nothing is fine.
-export const trackedProject = (cleanups: Cleanups, secretsDir: string, port: number): string => {
+// Registers the removal of everything that carries a new run id, then returns the project and the id; nothing exists yet,
+// and removing nothing is fine. The removal fails (with docker's output) when a docker command fails or anything is left.
+export const trackedProject = (cleanups: Cleanups): { project: string; runId: string } => {
 	const project = newProject();
-	cleanups.add(() => removeStack({ project, secretsDir, port }));
-	return project;
+	const runId = newRunId();
+	cleanups.add(() => removeOwned(runId));
+	return { project, runId };
+};
+
+// Everything this run created that still exists, by its label. Throws when a listing fails (never reads as "empty").
+export const leftovers = async (runId: string): Promise<string[]> => {
+	const found = await ownedResources(runId);
+	return [...found.containers.map((n) => `container ${n}`), ...found.volumes.map((n) => `volume ${n}`), ...found.networks.map((n) => `network ${n}`)];
 };
 
 // Creates the stack and waits until it is healthy. If anything fails on the way, what was created is removed.
@@ -68,8 +77,9 @@ export const createTestStack = async (): Promise<TestStack> => {
 	try {
 		const secretsDir = await newSecretsDir(cleanups);
 		const port = await freePort();
-		const project = trackedProject(cleanups, secretsDir, port);
+		const { project, runId } = trackedProject(cleanups);
 		const stack: TestStack = {
+			runId,
 			project,
 			secretsDir,
 			port,
@@ -77,7 +87,7 @@ export const createTestStack = async (): Promise<TestStack> => {
 			dispose: () => cleanups.runAll(),
 			secret: (name) => readFile(join(secretsDir, name), "utf8"),
 		};
-		stack.container = await startStack({ project, secretsDir, port });
+		stack.container = await startStack({ project, secretsDir, port, runId });
 		return stack;
 	} catch (error) {
 		await cleanups.runAll().catch(() => {});
@@ -86,4 +96,4 @@ export const createTestStack = async (): Promise<TestStack> => {
 };
 
 export const compose = (stack: TestStack, ...args: string[]): Promise<RunResult> =>
-	run("docker", composeArgs(stack.project, ...args), { env: { AF_SECRETS_DIR: stack.secretsDir, AF_PG_PORT: String(stack.port) } });
+	run("docker", stackArgs(stack, ...args), { env: stackEnv(stack) });

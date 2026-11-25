@@ -1,11 +1,12 @@
 // Secrets: created once and never overwritten, kept out of the container's inspect data, required to start the stack.
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { composeFilePath, run } from "../deploy/lib.ts";
-import { SECRET_NAMES, createSecrets } from "../deploy/setup-secrets.ts";
+import { SECRET_NAMES, SID_ADMINISTRATORS, SID_SYSTEM, aclSids, createSecrets, verifySecretsAccess } from "../deploy/setup-secrets.ts";
 import { createTestStack, newProject, type TestStack } from "./helpers.ts";
 
 const SETUP_CLI = new URL("../deploy/setup-secrets.ts", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
@@ -62,6 +63,49 @@ describe("secrets", () => {
 		assert.equal(result.code, 2);
 	});
 
+	const onWindows = { skip: process.platform !== "win32" };
+	const USERS_SID = "S-1-5-32-545";
+	// Inheritance flags apply to a directory only (on a file icacls accepts them and records nothing).
+	const grantUsers = (path: string, isDirectory = true): void => {
+		const result = spawnSync("icacls", [path, "/grant", `*${USERS_SID}:${isDirectory ? "(OI)(CI)" : ""}R`], { encoding: "utf8" });
+		assert.equal(result.status, 0, result.stderr || result.stdout);
+	};
+
+	it("the ACL read back by SID holds only the current user, SYSTEM and Administrators, on the directory and each file", onWindows, () => {
+		const dir = join(work, "acl-ok");
+		createSecrets(dir);
+		assert.deepEqual(verifySecretsAccess(dir), []);
+		for (const path of [dir, ...SECRET_NAMES.map((n) => join(dir, n))]) {
+			const sids = new Set(aclSids(path));
+			assert.equal(sids.has(USERS_SID), false, path);
+			assert.ok(sids.has(SID_SYSTEM) && sids.has(SID_ADMINISTRATORS), path);
+		}
+	});
+
+	it("a reused directory with a grant to the Users SID is refused, named, and not changed", onWindows, async () => {
+		const dir = join(work, "acl-users-dir");
+		createSecrets(dir);
+		grantUsers(dir);
+		assert.throws(() => createSecrets(dir), /refused[\s\S]*S-1-5-32-545/);
+		assert.ok(aclSids(dir).includes(USERS_SID), "the refusal must not silently fix the access");
+		const check = await run("node", [SETUP_CLI, "--check", dir]);
+		assert.equal(check.code, 1);
+		assert.match(check.stderr, /S-1-5-32-545/);
+	});
+
+	it("a grant to the Users SID on one secret file only is refused too", onWindows, () => {
+		const dir = join(work, "acl-users-file");
+		createSecrets(dir);
+		grantUsers(join(dir, "af_api"), false);
+		assert.throws(() => createSecrets(dir), /refused[\s\S]*af_api[\s\S]*S-1-5-32-545/);
+	});
+
+	it("an empty existing directory that carries a Users grant ends in an error, not in a silent success", onWindows, async () => {
+		const dir = await mkdtemp(join(work, "acl-empty-"));
+		grantUsers(dir);
+		assert.throws(() => createSecrets(dir), /not restricted as required[\s\S]*S-1-5-32-545/);
+	});
+
 	it("the stack refuses to start without AF_SECRETS_DIR", async () => {
 		// A random project, removed in a finally also when the guard under test fails and something does start.
 		const project = newProject();
@@ -75,7 +119,8 @@ describe("secrets", () => {
 			const ps = await run("docker", ["ps", "-a", "--filter", `label=com.docker.compose.project=${project}`, "-q"]);
 			assert.equal(ps.stdout.trim(), "");
 		} finally {
-			await run("docker", ["compose", "-p", project, "-f", composeFilePath(), "down", "-v", "--remove-orphans"], { env: { AF_SECRETS_DIR: tmpdir() } });
+			const down = await run("docker", ["compose", "-p", project, "-f", composeFilePath(), "down", "-v", "--remove-orphans"], { env: { AF_SECRETS_DIR: tmpdir() } });
+			assert.equal(down.code, 0, `cleanup failed: ${down.stderr}`);
 		}
 	});
 

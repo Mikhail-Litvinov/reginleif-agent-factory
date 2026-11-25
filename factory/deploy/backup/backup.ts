@@ -12,10 +12,10 @@
 // in this order, so that a crash or a failure leaves no file that looks complete (a failed run removes its own files):
 //   <name>.dump.partial  -> pg_dump output; linked to <name>.dump after pg_dump succeeded (fails if that exists)
 //   <name>.dump.sha256   -> "<hex>  <name>.dump"
-//   <name>.manifest.json -> written last (temporary name, then renamed): its presence marks a finished backup
+//   <name>.manifest.json -> written last (temporary name, then linked to its final name): its presence marks a finished backup
 import { spawn, type ChildProcessByStdio } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { open, link, mkdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { open, link, mkdir, rm, stat, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type { Readable, Writable } from "node:stream";
 import { Transform } from "node:stream";
@@ -43,6 +43,8 @@ export interface BackupOptions {
 	readonly clock?: Clock;
 	// How long to wait for a healthy server before giving up (default one minute).
 	readonly healthTimeoutMs?: number;
+	// Test hook: the base name of the run's files (default: a fresh unique name), to force a collision on purpose.
+	readonly nameFor?: () => string;
 }
 
 export interface BackupResult {
@@ -121,7 +123,7 @@ export const backup = async (options: BackupOptions): Promise<BackupResult> => {
 	await waitHealthy(container, options.healthTimeoutMs ?? 60_000, { clock: options.clock ?? realClock });
 	const image = (await runChecked("docker", ["inspect", "--format", "{{.Config.Image}}", container])).trim();
 
-	const name = uniqueName();
+	const name = (options.nameFor ?? uniqueName)();
 	const partial = join(target, `${name}.dump.partial`);
 	const dumpPath = join(target, `${name}.dump`);
 	const sumPath = join(target, `${name}.dump.sha256`);
@@ -162,8 +164,10 @@ export const backup = async (options: BackupOptions): Promise<BackupResult> => {
 		};
 		await writeFile(manifestTemp, `${JSON.stringify(manifest, null, 2)}\n`, { flag: "wx" });
 		mine.push(manifestTemp);
-		await rename(manifestTemp, manifestPath);
+		// link, not rename: a rename silently replaces a manifest that already has this name; link fails with EEXIST.
+		await link(manifestTemp, manifestPath);
 		mine.push(manifestPath);
+		await rm(manifestTemp);
 		finished = true;
 		return { manifestPath, dumpPath, manifest };
 	} finally {

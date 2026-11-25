@@ -1,0 +1,18 @@
+# Ownership labels, added to compose.yml (a second -f file) only by commands that create a project of their own (restore,
+# restore check, tests). Every container, volume and network of such a project carries the run id, so cleanup removes
+# exactly what that run created and nothing else. The real stack is started from compose.yml alone, so its configuration
+# (and its container) does not change.
+services:
+  postgres:
+    labels:
+      af.run: "${AF_RUN_ID:?set AF_RUN_ID}"
+
+volumes:
+  pgdata:
+    labels:
+      af.run: "${AF_RUN_ID:?set AF_RUN_ID}"
+
+networks:
+  default:
+    labels:
+      af.run: "${AF_RUN_ID:?set AF_RUN_ID}"
