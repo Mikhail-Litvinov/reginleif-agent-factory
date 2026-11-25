@@ -1,7 +1,8 @@
 # Agent Factory testing
 
-Design, nothing is built. [architecture.md](architecture.md) is binding (D1 to D28 are its decisions; "call" marks a choice made in these documents, open to veto); threats and their
-check ids (`secret-canary`, `path-escape`, ...) are in [security.md](security.md). A check named here must be able to
+Design, nothing is built. [architecture.md](architecture.md) is binding (D1 to D30 are its decisions; "call" marks a choice made in these documents, open to veto); threats and their
+check ids (`secret-canary`, `path-escape`, ...) are in [security.md](security.md); the decision registry, the regulation
+and their check ids are in [governance.md](governance.md). A check named here must be able to
 fail: each has a pass criterion and a fail criterion, and a new check is first shown failing on the old or broken code.
 
 ## Rules
@@ -51,6 +52,24 @@ Table-driven where the rule is data; each can fail (a cell removed, a check drop
 | `cleanup-command` | Cleanup of a final task, a task not final, a task awaiting approval, a worktree with unpublished changes; and a day count passing on the injected clock | nothing is deleted by itself; the command removes only files and keeps rows; refusals as listed in [database.md](database.md) | anything removed without the command, or a row deleted |
 | `review-provider` | Review of a task whose implementer ran on one provider, with and without another provider eligible (D20) | another provider reviews; with none the task waits and a notice is sent | the same provider reviews |
 | `check-not-run` | A mandatory check that cannot run (D26) | agents get a repair attempt; then BLOCKED `check_environment`; never AWAITING_APPROVAL | a `not_run` check counted as passed or sent to the owner as complete |
+
+## Registry and regulation checks
+
+The ten checks are defined in [governance.md](governance.md) (section "Checks"), each with its pass and fail criterion;
+they are not copied here. They run on the disposable database and a fake clock like the rest, and a new one is first
+shown failing on the broken code.
+
+| Id | Level | Phase |
+|---|---|---|
+| `registry-first`, `registry-fail-open` | integration: API gate, the hub question hook as a fake command, a timeout on the injected clock | 2 |
+| `registry-capture`, `registry-scope`, `registry-authority` | unit (order and scope rules as data) and integration (the relay press path) | 2 |
+| `registry-not-a-guard` | integration: every permission prompt, profile and second press with and without a matching active record | 2 |
+| `registry-history`, `regulation-change` | database (triggers, grants) and integration (two presses, version size, guard conflict) | 2 |
+| `registry-search` | measured on a set of questions with the chosen model; also runs without the model (`degraded`) | 2 |
+| `registry-import` | integration: Factory documents and project memories as input, a second run | 2 |
+
+The gate for `agent_question` and BLOCKED `scope` in a workflow, and `RecordPrecedent`, are covered by the lifecycle tests of
+phase 3 (`ops-matrix` and `state-exit` run with the gate on and off); the registry checks above do not need Temporal.
 
 ## Failure scenarios (spec 20.3)
 
@@ -103,7 +122,8 @@ design, not the suite.
 | S6 worker credentials cannot decide | with the worker's certificate and token: start a workflow, send an Update, poll workflow tasks, call a decision route; then poll and complete an activity of its own queue; then run a workflow with server steps and read its history (D28) | the first four are refused; polling and completing succeed; the history has no activity task of the `control` queue | any of the first four is accepted, or polling is refused, or a server step appears as an activity task. Also runs with a connection that has no certificate: refused |
 
 State: S1, S2 and S4 are confirmed (S1 without a heartbeat timeout; S2 and S4 with fake agents). S6 is confirmed for the
-methods and the missing certificate; the D28 part has not been run and belongs to phase 1.
+methods and the missing certificate; the D28 part has not been run and belongs to phase 3, where the first workflow
+with server steps exists (Temporal comes after the registry, phase 2).
 
 Each proof also runs a control: the same call with the owner or Control Worker identity must succeed, so a refusal is not a
 broken harness.

@@ -8,8 +8,9 @@ section 12. Tables: [database.md](database.md).
 - JSON over HTTPS only. Times are RFC 3339 UTC. Ids are UUIDs. Unknown request fields are refused.
 - A task mutation is *recorded*, never *applied*: decision, event and outbox row commit in one PostgreSQL
   transaction; `delivery_state` shows the delivery to Temporal.
-- Roles: `owner`, `worker`, `relay`, `reader`; an agent process has no token. A Temporal outage never fails a mutation;
-  a PostgreSQL outage does (`503`, nothing recorded). "Call" marks a design choice made here, open to veto.
+- Roles: `owner`, `worker`, `relay`, `reader`, `registry`; an agent process has no token except `registry`, bound to one
+  session or run (see Registry). A Temporal outage never fails a mutation; a PostgreSQL outage does (`503`, nothing
+  recorded). "Call" marks a design choice made here, open to veto.
 - The relay is the Telegram client. It reads like a reader, acknowledges notices and submits a decision only with the
   hub's `press_id` and the Telegram user id, which `owners.telegram_user_id` must map to an owner; each `press_id` is
   accepted once. The decision's actor is that owner and its `channel` is `telegram`.
@@ -31,8 +32,8 @@ section 12. Tables: [database.md](database.md).
 
 ## Endpoints
 
-Roles: O owner, W worker, L relay, R reader (L reads wherever R does, acknowledges notices, and submits decisions as
-described above). Mutations need `Idempotency-Key`; a relay decision also carries `press_id` and `telegram_user_id`. Lists take `limit`, `cursor` and the filters named.
+Roles: O owner, W worker, L relay, R reader, G registry (L reads wherever R does, acknowledges notices, and submits
+decisions as described above; G only where the Registry table says). Mutations need `Idempotency-Key`; a relay decision also carries `press_id` and `telegram_user_id`. Lists take `limit`, `cursor` and the filters named.
 
 ### Projects and policy
 
@@ -90,7 +91,8 @@ deleted. A refused decision stays as history.
 
 #### Second press (D23)
 
-A dangerous operation (`cancel`, `reject`, `force-close`, publication, loosening a policy, forcing a cleanup) takes two
+A dangerous operation (`cancel`, `reject`, `force-close`, publication, loosening a policy, forcing a cleanup, activating
+a regulation version) takes two
 presses in the same channel and by the same actor. The first request records a `confirmations` row (actor, channel,
 operation, target, request hash) and answers `409 confirmation_required` with `confirmation_id`, a one-time `nonce`
 and `expires_at` (`confirm.windowSeconds`). The second request repeats the same body with the header
@@ -118,6 +120,36 @@ and sends both presses with their press ids (call: the confirmation is the serve
 | `POST /tokens` | O | `name`, `role`, `worker_id`, `expires_at`. 201 with the secret, shown once. |
 | `POST /tokens/{id}/rotate`, `DELETE /tokens/{id}` | O | Rotate: 201 with the new secret, old valid until `valid_until`. Delete revokes at once. |
 | `GET /notifications`, `POST /notifications/{id}/ack` | O R / O | Filters `state`, `event_type`; ack marks seen only. |
+
+### Registry and regulation
+
+Design: [governance.md](governance.md); tables: [database.md](database.md). The registry is off by default (G1); when it
+is off or unreachable, the routes answer `503 unavailable` and an agent asks as it does today. Ids are UUIDs; each record
+also shows its number (`DEC-00042`), accepted in `GET /registry/records/{id}` as well. Paths are a call, open to veto.
+
+| Method and path | Role | Body and answer |
+|---|---|---|
+| `POST /registry/inquiries` | G O | `problem`, `category`, `project_id`, `action`, `target`, `reuse_intent` (`standing` or `once`; undeclared is `once`). Searches, stores what was found with versions, answers 201 with the inquiry id and the found records. The `registry` token opens inquiries only for its own session or run. |
+| `GET /registry/inquiries/{id}` | G O R | The inquiry, its results and verdicts. |
+| `POST /registry/inquiries/{id}/verdicts` | G | One verdict per found record: `record_id`, `verdict` (`applies` or `not_applicable`), `difference` (required for `not_applicable`), or a `revision_request` with the changed circumstances. 201. Never changes a record. |
+| `POST /registry/gate` | G | The check before a question (G9): `inquiry_id`, the real question text. Searches once more and answers `200 {pass}` or `200 {pass: false, records[]}` with the records that lack a verdict or have the verdict `applies`. It is a decision of the gate, not an HTTP error; after `registry.gateTimeoutMs` the caller lets the question pass. |
+| `GET /registry/search` | G O R | Filters `project_id`, `category`, `kind`, `status`, `scope`, `q`; answers items with id, kind, authority, scope, matched fields, the ranking that found them, and `degraded` when the embedder is down. Lists take `limit` and `cursor`. |
+| `GET /registry/records`, `GET /registry/records/{id}` | O R | Records with status, links and the history of status changes. Filters as in search plus `source`. |
+| `POST /registry/records` | G O | A draft proposal: kind, scope, category, fields, the quotation, the evidence. An agent can only create a `draft` with authority `agent`; its summary and tags serve the search only. 201. |
+| `GET /registry/drafts` | O R | The list of drafts waiting for the owner, with source; the owner confirms them as one list (call: batched, never a message each). |
+| `POST /registry/records/{id}/activate` | O | Activation by the owner's button; also bulk, `ids[]`. A sensitive category, global scope or an ordinary message needs this. A `rule` is refused `409 rule_needs_regulation`: it becomes active only with its regulation version. Refused `409 guard_conflict` when the draft conflicts with the list of guards, and the answer names conflicting active records (`conflicts_with`). |
+| `POST /registry/records/{id}/revoke`, `.../supersede` | O | Revoke, or create the draft that would supersede this one: the old record changes status only in the transaction that activates the draft. The old row and its link stay. |
+| `POST /registry/polls` | L | Before the hub sends a poll: `inquiry_id`, `question`, `options` as shown. 201 with the poll id and the line of category, project and reuse to show. Immutable. |
+| `POST /registry/captures` | L | A poll press from the hub: `press_id`, `telegram_user_id`, `poll_id`, `option_index`. Checked as a relay decision (T10), then writes one record word for word from the registered poll; active only inside one project, a category of the harmless list that the server's own check does not contradict, and an offered option (G2, G8), else a draft. A replayed `press_id` is `409 press_replayed`; one poll gives one record. |
+| `GET /regulation/versions`, `GET /regulation/versions/{id}` | O R G | Versions with clauses, status and the owner's confirmation; the active one is marked. A session start reads the active version number and its clauses (limited by the clause-size setting). |
+| `POST /regulation/versions` | O G | A draft version (an agent's right ends here). Checked for conflicts with guards, clauses and active owner decisions; the answer lists them. 201. |
+| `GET /regulation/versions/{id}/diff` | O R | The difference to the active version. |
+| `POST /regulation/versions/{id}/activate` | O | A dangerous operation (D23): two presses, `409 confirmation_required` first. Refused `409 guard_conflict`, `409 regulation_conflict` or `422 regulation_too_large`. Audited. |
+| `POST /regulation/versions/{id}/revoke` | O | Second press. Applies from the next start of a session or run. |
+
+Role `registry`: search, open an inquiry, give a verdict, ask the gate, propose a draft or a draft version; nothing else.
+It never activates, revokes or supersedes. A press is recorded only through the relay role. Orchestrator writes
+(precedents, drafts) come from the Control Worker's service account and carry the run id.
 
 ### Worker and artifact endpoints
 
@@ -172,6 +204,10 @@ Every error is `application/problem+json` with `type`, `title`, `status`, `code`
 | `dependency_cycle`, `depth_exceeded`, `project_active`, `task_active` | 409 | A fact of PostgreSQL forbids it. |
 | `queue_isolation_required` | 409 | A second machine registers while no gateway binds certificates to queues (D28). |
 | `checksum_mismatch`, `payload_too_large` | 422, 413 | Upload checks. |
+| `guard_conflict` | 409 | A draft record or regulation version conflicts with the list of guards in code (governance.md G7); refused also for the owner. |
+| `regulation_conflict`, `regulation_too_large` | 409, 422 | A version conflicts with an active clause or owner decision (the body lists them); a version over the clause-size setting. |
+| `rule_needs_regulation` | 409 | A single activation of a `rule` record. |
+| `registry_scope_required` | 422 | An inquiry or record without a project or `global` scope. |
 | `contract_unsupported` | 426 | The worker's contract version is outside the supported range; the machine gets no work. |
 
 `revision_stale` and `task_closed` are not HTTP errors: they are refusal reasons of a recorded decision (see Answers of a mutation).
@@ -207,8 +243,10 @@ Every error is `application/problem+json` with `type`, `title`, `status`, `code`
 
 ## Endpoints an agent can never call
 
-An agent process receives no API token: only the worker and the owner's clients hold one, and the worker never passes
-it into the agent's environment. Even a worker token can never: record any decision, create, rotate or revoke a token,
+An agent process receives no API token of the roles owner, worker, relay or reader: only the worker and the owner's
+clients hold those, and the worker never passes them into the agent's environment. The one token an agent may hold is
+`registry`, bound to its session or run (search, inquiry, verdict, gate, draft; security.md T5); it can never activate,
+revoke or supersede a record, change a regulation version, or record a press. Even a worker token can never: record any decision, create, rotate or revoke a token,
 write a project, agent, policy or routing rule, create a task other than through `proposals` of a run it owns, change
 a confirmed artifact, read another machine's runs, or read the audit log. Acceptance needs an owner actor in code and
 in the database. Residual risk (D13): a same-user process could read the worker's credentials.

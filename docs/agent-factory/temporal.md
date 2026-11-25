@@ -1,6 +1,7 @@
 # Agent Factory: Temporal design
 
-Binding: [architecture.md](architecture.md) (D1-D28, the state table, state ownership). Facts: [audit.md](audit.md).
+Binding: [architecture.md](architecture.md) (D1-D30, the state table, state ownership); the registry and the regulation:
+[governance.md](governance.md). Facts: [audit.md](audit.md).
 Spec sections: "spec 5.2". Numbers are named settings; defaults are set in the measuring phase. "Call" marks a design
 choice made here, open to veto. Table and column names are those of [database.md](database.md).
 
@@ -19,7 +20,8 @@ workflow already ran, never starts again, so an expired history cannot restart i
 `TaskWorkflow` keeps in memory: status, `revision`, counters (`attempt`, `rework`, `autoFix`), `executionId` and machine of
 the current run (empty when no run is alive), worktree reference, `pauseRequested`, `stopping`, `endUnconfirmed`,
 `resumeTo`, `blockKind`, `blockReason`, `allowedAgents` (agents the owner allowed for this task), the map `handled`
-(decision id to outcome), the settings snapshot. Waiting for the owner or a dependency is `condition()` on this state: no
+(decision id to outcome), the settings snapshot, `regulationVersionId` (of the current run: read anew when each run
+starts, kept to that run's end and stored as `task_runs.regulation_version_id`, governance.md). Waiting for the owner or a dependency is `condition()` on this state: no
 worker is held and no timer polls. Every state change is a call to `PersistTaskEvent` before the next step. Names in
 the database are the snake_case forms (`block_kind`, `resume_to`, `pause_requested`, `end_unconfirmed`).
 
@@ -38,7 +40,8 @@ Main path by state (all moves follow the architecture's table; each arrow is one
 6. RUNNING: `MonitorExecution` until an outcome; then `CollectResults`, `UploadResults`. Outcome `finished` goes to
    VERIFYING (or PAUSED if `pauseRequested`); `died` starts a new attempt in the same worktree within `attempt.max` and
    budget limits (ASSIGNED, D16); `unclear` goes to BLOCKED `execution` after the read-only inspection settles nothing;
-   `limit` to BLOCKED `usage_limit`; `question` to BLOCKED `agent_question`; a non-retryable error to FAILED.
+   `limit` to BLOCKED `usage_limit`; `question` to BLOCKED `agent_question` after the question gate (below); a
+   non-retryable error to FAILED.
 7. VERIFYING: `RunAutomatedChecks`, then `RequestReview` (picks a reviewer of another provider than the implementer, D20;
    the review run is the same activities). Pass goes to AWAITING_APPROVAL; confirmed findings to REWORK_REQUIRED;
    `rework.maxRounds` reached to BLOCKED `rework_limit`. Details below. Input no attempt can make valid goes to FAILED.
@@ -86,6 +89,16 @@ infrastructure faults. A new agent attempt is a workflow loop bounded by `attemp
 `resolve_block` with a choice; a choice that does not belong to the kind is refused `block_kind_mismatch`. Before
 blocking, agents try to settle a technical cause (D18).
 
+**The question gate (G9, governance.md).** When the registry is on, `agent_question` and BLOCKED `scope` raised by an
+agent's question go through the gate on the server before the owner is asked: the question needs an inquiry id of the run,
+a verdict on every found active record, and a second search by the real text. A failed check or a verdict
+`applies` sends the found records to the agent in a new run of the same attempt budget (`attempt.max`); when that budget
+is spent, the task goes to the owner with the question and the records. The other kinds (`dependency`, `execution`,
+`usage_limit`, `check_environment`, `rework_limit`) are not questions of an agent: they never pass the gate and notify
+the owner at once. After `registry.gateTimeoutMs` the question passes (fail open), so a down
+registry never holds a task. The owner's answer to the poll is recorded as a registry record by the API from the press
+(not by the workflow), and the next run's inquiry finds it.
+
 | Kind | Entered when | Choices | Exit |
 |---|---|---|---|
 | `scope` | plan or finding outside the approved scope; a dispute about requirements, scope or cost | `answer` | PLANNING |
@@ -113,6 +126,8 @@ Worker sets `enableNonLocalActivities: false` and workflow code reaches these st
   setting). Anything long belongs to a machine activity.
 - A wait longer than `localRetryThreshold` becomes a server timer, so a PostgreSQL outage holds no worker.
 - `MachineLivenessWorkflow` follows the same rule.
+- `RecordPrecedent` is a local activity for the same reason: the registry write is a server step, and no machine
+  certificate can answer it. It exists from phase 3; the registry itself (phase 2) works without it.
 - A machine activity's result is data about a run. No machine result is read as a decision of the owner.
 
 | Activity | Queue / where | Key | Timeouts | Class | Non-retryable | Escalation |
@@ -139,6 +154,7 @@ Worker sets `enableNonLocalActivities: false` and workflow code reaches these st
 | `RunGpuJob` | `machine-<id>-gpu`, one slot | job key in the generator's queue | S Q H | workerLost | `invalid` | BLOCKED `execution` |
 | `ReconcileMachine` | machine, at worker start before polling | none, read mostly | S | infra | none | machine not registered |
 | `LoadSettings` | local | read only | S | infra | none | none |
+| `RecordPrecedent` | local; writes through `RegistryService` | task id + run id + case (settled dispute, resolved block, answered question) | S C | infra | none | none; a lost write is repeated by its key. Writes only an agent `precedent` or a `draft`, never an active owner record |
 
 Heartbeat details of `MonitorExecution` and `RunGpuJob` are the log offset and the execution id, so a retry attaches. The
 SDK throttles heartbeats to the smaller of 0.8 x heartbeat timeout and 60 s; `act.*.H` is set above that. Cancellation of
@@ -243,7 +259,7 @@ Triggered when `continueAsNewSuggested` is true or `history.maxEvents` is passed
 flight and `allHandlersFinished()`. A long `MonitorExecution` does not force it (heartbeats add no events). It carries:
 task id, status and flags (`pauseRequested`, `stopping`, `endUnconfirmed`, `resumeTo`, `blockKind`, `blockReason`),
 `revision`, `attempt`, `rework`, `autoFix`, current `executionId` and machine, worktree reference, `allowedAgents`,
-`handled` (decision ids and outcomes), dependency and child ids, the settings snapshot, budget used, the contract
+`handled` (decision ids and outcomes), dependency and child ids, the settings snapshot, `regulationVersionId`, budget used, the contract
 version. The Update dedupe of Temporal does not cross a roll-over; `handled` and the unique key in PostgreSQL do.
 
 ## Failure scenarios (spec 8), step by step

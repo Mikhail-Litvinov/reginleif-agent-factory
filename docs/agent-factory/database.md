@@ -1,7 +1,8 @@
 # Agent Factory database
 
-The application database of Agent Factory. Binding sources: [architecture.md](architecture.md) (decisions D1-D28, the
-task states, state ownership) and the task specification section 4. Status: design. Types are PostgreSQL 16. The
+The application database of Agent Factory. Binding sources: [architecture.md](architecture.md) (decisions D1-D30, the
+task states, state ownership), [governance.md](governance.md) (the Decision Registry and the regulation, whose tables
+are listed below) and the task specification section 4. Status: design. Types are PostgreSQL 16. The
 Temporal database is separate and not described here. "Call" marks a design choice made here, open to veto. The schema
 is written in Drizzle (D27): the table definitions live in `factory/db/schema/` and are the source of the migrations
 (see Migrations and backup); this document is the design the definitions follow.
@@ -29,7 +30,7 @@ is written in Drizzle (D27): the table definitions live in `factory/db/schema/` 
 | `tasks` | `id`; `project_id` FK; `parent_task_id` FK nullable; `title`; `description`; `priority int`; `status` enum (the 16 states of the architecture: CREATED, PLANNING, READY, WAITING_DEPENDENCIES, ASSIGNED, RUNNING, VERIFYING, AWAITING_APPROVAL, REWORK_REQUIRED, BLOCKED, ACCEPTED, REJECTED, CANCELLED, FAILED, PAUSED, CANCELLING); `current_revision int` (the applied revision, see Revisions); `created_by` (owner id); `assigned_agent_id` FK nullable (the current assignee; the history is in `task_runs`); `workflow_id text` unique, `check (workflow_id = 'task-' \|\| id)`; `workflow_run_id` nullable; `block_kind` enum nullable (`scope`, `dependency`, `execution`, `usage_limit`, `agent_question`, `check_environment`, `rework_limit`); `block_reason text`; `resume_to` enum nullable (the state RESUME goes to); `pause_requested bool`; `stopping bool` (a run is being stopped for new requirements, shown as RUNNING); `end_unconfirmed bool` (set by a force-close: CANCELLED without the machine's confirmation); `origin_type`, `origin_task_id`, `origin_run_id` (a foreign key to `task_runs`, added by an `alter table` in the migration that creates `task_runs`, see Creation order), `depth` (see Child tasks); `created_at`; `updated_at`; `completed_at` (set once, on a final state); `deleted_at`; `row_version`. Checks: `(status = 'BLOCKED') = (block_kind is not null)`, `(status = 'PAUSED') = (resume_to is not null)`. |
 | `task_revisions` | `id`; `task_id` FK; `revision_number int`, unique with `task_id`, contiguous from 1; `requirements text`; `acceptance_criteria jsonb` (a list of items, each with a stable `id` that proposals cite); `constraints jsonb`; `change_reason text not null`; `author_id` (owner); `decision_id` FK nullable (the decision that asked for it); `created_at`. Immutable. |
 | `task_dependencies` | `task_id` FK; `depends_on_task_id` FK; `dependency_type` enum (`requires_accepted`); primary key `(task_id, depends_on_task_id)`; `check (task_id <> depends_on_task_id)`; both tasks in one project (a trigger refuses otherwise, architecture: dependencies stay inside one project); `created_at`; `removed_at` (removal is a mark, the row stays for history); `removed_by` |
-| `task_runs` | `id`; `task_id` FK; `attempt_number int`, unique with `task_id` (counts all roles, never reused); `role` enum (`planner`, `implementer`, `tester`, `reviewer`); `agent_id` FK; `worker_id` FK nullable; `temporal_activity_id`; `execution_id uuid` unique (created on the server before the activity is scheduled); `session_id` nullable; `workspace_id` FK nullable; `task_revision int` (the revision the run works on); `policy_id` FK (the policy version in force); `contract_version int`; `status` enum (`created`, `starting`, `running`, `finished`, `failed`, `died`, `unclear`, `cancelling`, `cancelled`); `gpu_wait_since timestamptz` nullable (set while the run waits for the GPU slot); `started_at`; `heartbeat_at`; `finished_at`; `exit_code`; `error_code`; `error_message`; `result_summary`; `usage_metrics jsonb`; `created_at`; `row_version` |
+| `task_runs` | `id`; `task_id` FK; `attempt_number int`, unique with `task_id` (counts all roles, never reused); `role` enum (`planner`, `implementer`, `tester`, `reviewer`); `agent_id` FK; `worker_id` FK nullable; `temporal_activity_id`; `execution_id uuid` unique (created on the server before the activity is scheduled); `session_id` nullable; `workspace_id` FK nullable; `task_revision int` (the revision the run works on); `policy_id` FK (the policy version in force); `regulation_version_id` FK nullable (the regulation version the run started with and keeps to its end; null while the registry is off; the column is added by the registry migration, see Creation order); `contract_version int`; `status` enum (`created`, `starting`, `running`, `finished`, `failed`, `died`, `unclear`, `cancelling`, `cancelled`); `gpu_wait_since timestamptz` nullable (set while the run waits for the GPU slot); `started_at`; `heartbeat_at`; `finished_at`; `exit_code`; `error_code`; `error_message`; `result_summary`; `usage_metrics jsonb`; `created_at`; `row_version` |
 | `agents` | `id`; `name` unique among live rows; `provider`; `adapter_type`; `capabilities jsonb`; `enabled bool`; `concurrency_limit int`; `configuration jsonb` (no secrets); `created_at`; `updated_at`; `deleted_at`; `row_version` |
 | `workers` | `id`; `machine_id text` unique; `name`; `platform`; `capabilities jsonb` (including checked tool paths); `version`; `contract_version int`; `last_seen_at`; `status` enum (`online`, `offline`, `outdated`, `disabled`); `concurrency_limit int`; `created_at`; `updated_at`; `row_version` |
 | `task_events` | `id`; `seq` identity unique; `task_id` FK; `run_id` FK nullable; `event_type`; `actor_type` enum (`owner`, `worker`, `workflow`, `system`); `actor_id`; `payload jsonb`; `correlation_id` (the request id); `dedupe_key text`, unique with `task_id`; `created_at`. Immutable, kept for good (D24). |
@@ -57,7 +58,32 @@ is written in Drizzle (D27): the table definitions live in `factory/db/schema/` 
 | `routing_rules` | Spec 3.1 and 6.5 routing settings | `id`; `project_id` nullable (null is global); `position int`; `match jsonb`; `preferred_agent_ids uuid[]`; `row_version`. Starting profiles are data, not code. |
 | `notifications` | Spec 16.2, no repeated notices | See Notifications. |
 | `api_tokens` | Authentication | See Accounts. |
-| `audit_log` | Spec 12, 4.2: administrative operations | `id`; `seq` identity; `actor_id`; `token_id`; `request_id`; `action`; `target_type`; `target_id`; `outcome` enum (`ok`, `denied`, `failed`, `needs_confirmation`); `request_hash` (never the body); `created_at`. Immutable. |
+| `audit_log` | Spec 12, 4.2: administrative operations | `id`; `seq` identity; `actor_id`; `token_id`; `request_id`; `action`; `target_type`; `target_id`; `outcome` enum (`ok`, `denied`, `failed`, `needs_confirmation`); `request_hash` (never the body); `details jsonb` nullable (old and new status, press or confirmation id; never a body or a secret); `created_at`. Immutable. |
+
+## The Decision Registry and the regulation
+
+Six tables (34 in all with the 28 above), design in [governance.md](governance.md); they hold everything the registry
+knows. The registry is off by
+default (G1): the tables exist, and nothing in the core reads them. Ids are `uuid` v7; a record also carries a number
+from an identity column, shown as `DEC-00042` (the prefix is formatting, not data).
+
+| Table | Columns |
+|---|---|
+| `regulation_versions` | `id`; `number int` unique (the version number a session sees); `status` enum (`draft`, `active`, `superseded`, `revoked`); `clauses jsonb` (the ordered clauses: each item holds the id of a `rule` record, a trigger checks that it exists, is of kind `rule` and in scope, and makes the rules active with the version, in its transaction); `clauses_bytes int` (checked against `registry.clauseMaxBytes`; a larger draft is refused activation); `basis_version_id` FK nullable (the version it was drafted from); `proposed_by` (actor type and id: an owner or an agent's `registry` token); `conflict_report jsonb` (the result of the check against guards, clauses and active owner decisions at the time of the press); `confirmed_by` FK owners nullable; `confirmation_id` FK nullable (the second press, D23); `created_at`; `activated_at`; `status_changed_at`. Activating a version makes its rules active and the rules it leaves out `superseded`; revoking it revokes its rules, in one transaction. Content (`clauses`, `basis_version_id`, `proposed_by`) is immutable; only the status columns and, once, `conflict_report`, `confirmed_by`, `confirmation_id` and `activated_at` change, and every change is an `audit_log` row. At most one `active` row (partial unique index). Empty until the owner writes the text (G6). |
+| `registry_records` | `id`; `number bigint generated always as identity` unique; `kind` enum (`rule`, `decision`, `exception`, `precedent`, `fact`); `authority` enum (`owner`, `agent`); `status` enum (`draft`, `active`, `superseded`, `revoked`, `rejected`); `scope_type` enum (`global`, `project`); `project_id` FK nullable, `check ((scope_type = 'project') = (project_id is not null))`; `repository`, `machine_id`, `action`, `target` text nullable (narrowing of the scope); `category` (a value of the list in the code; the list of sensitive categories is code, never a column); `problem`; `decision`; `exceptions_text`; `grounds`; `consequences`; `reuse` enum (`standing`, `once`); `version int` (starts at 1; a supersede is a new row, never a new version of the row); `question`, `options jsonb`, `pressed_option` (set for a record made from a poll press, word for word; `check ((source = 'poll_press') = (pressed_option is not null))`); `summary`, `tags text[]` (written by an agent, used only by the search, never binding); `evidence jsonb` (ids of runs, artifacts and checks; a `fact` and a `precedent` need it); `source` enum (`poll_press`, `owner_button`, `owner_message`, `orchestrator`, `agent_proposal`, `import`); `source_ref text` (press id, inquiry id, or the named file of an import); `press_id text` unique where not null (a press is accepted once); `poll_option int` nullable (the index pressed in the registered poll of `inquiry_id`); `inquiry_id` FK nullable (the inquiry the answer belongs to); `run_id` FK nullable; `created_by` (actor type and id); `search_ru`, `search_en` tsvector, generated columns over the text fields (full text, Russian and English configurations); `created_at`; `status_changed_at`; `status_changed_by`. The content columns are immutable. Only `status`, `status_changed_at` and `status_changed_by` change, by column grant, and a trigger writes an `audit_log` row for each change and refuses a move that is not in the table of allowed moves (`draft` to `active` or `rejected`; `active` to `superseded` or `revoked`; the rest are final). Checks: `check (authority = 'agent' or kind in ('rule', 'decision', 'exception'))`, `check (kind <> 'precedent' or authority = 'agent')`; only two kinds of row are ever inserted as `active`: a `poll_press` decision and an `orchestrator` precedent, both in project scope and a category that is not sensitive. Every other record starts as `draft` and becomes active by the owner's button; a `rule` becomes active only in the transaction that activates its regulation version, never alone. |
+| `registry_links` | `id`; `from_record_id` FK; `to_record_id` FK; `link_type` enum (`supersedes`, `exception_to`, `evidence`, `conflicts_with`); `created_by`; `created_at`. Immutable; unique `(from_record_id, to_record_id, link_type)`; `check (from_record_id <> to_record_id)`. A `supersedes` link of a draft changes nothing by itself; the old record becomes `superseded` in the transaction that activates the draft. |
+| `registry_embeddings` | `id`; `record_id` FK; `model_version text`; `dimensions int`; `embedding vector(N)` (`pgvector`; N is that of the pinned model, written into the migration once the model is chosen by the measurement); `created_at`. Unique `(record_id, model_version)`; immutable. A new model adds rows in the background; the setting `registry.embeddingModel` switches the search to it when complete. A record without a row of the current model is searched by the two text rankings only. |
+| `registry_inquiries` | `id`; `number bigint generated always as identity` unique; `token_id` FK `api_tokens` (the `registry` token that opened it); `session_ref text`; `run_id` FK nullable; `project_id` FK nullable; `problem`; `category`; `action`; `target`; `reuse_intent` enum (`standing`, `once`; undeclared is `once`); `regulation_version_id` FK nullable; `poll_question`, `poll_options jsonb`, `poll_registered_at` nullable (the poll as shown, registered by the relay before it is sent; set once); `created_at`. Immutable except the poll columns. A question carries this id in `metadata.source`; the gate (G9) checks that the inquiry belongs to the session. |
+| `registry_inquiry_results` | `id`; `inquiry_id` FK; `record_id` FK; `record_version int`; `found_by` enum (`inquiry`, `gate`; the gate's own search by the real question text adds rows); `ranking` enum (`fulltext`, `trigram`, `vector`) and `score numeric`; `matched_fields jsonb`; `verdict` enum nullable (`applies`, `not_applicable`); `difference text` (required for `not_applicable`); `revision_request text` nullable (changed circumstances; it never changes the record); `verdict_at`. Unique `(inquiry_id, record_id)`. Immutable except the verdict columns, which are set once (null to a value). `applies` and `not_applicable` verdicts of an inquiry with an answer record are linked through `registry_records.inquiry_id`. |
+
+Indexes: `gin (search_ru)` and `gin (search_en)` for full text; `gin` with `gin_trgm_ops` over the problem and decision
+text (extension `pg_trgm`); `hnsw (embedding vector_cosine_ops)` on `registry_embeddings`; btree on `(status,
+scope_type, project_id, category)` for the filters that run first. The
+extensions `pg_trgm` and `vector` are created by the migration under `af_migrator`.
+
+Audit: no table of its own. The status triggers of `registry_records` and `regulation_versions` write `audit_log` rows
+(`action` `registry.status` or `regulation.status`, the old and new status and the press or confirmation in `details`, the actor) in the same transaction, so a status change cannot happen unrecorded. Content is never updated; a
+change is a new record that `supersedes` the old one (D24). Nothing is deleted.
 
 ## Revisions and the version of a row
 
@@ -86,7 +112,9 @@ is written in Drizzle (D27): the table definitions live in `factory/db/schema/` 
 - Never updated and never deleted by any application account: `task_revisions`, `task_events`, `task_reviews`,
   `review_finding_outcomes`, `task_approvals`, `run_checks`, `audit_log`, `execution_policies` (a change is a new
   version row), `task_dependencies` (except the removal mark), `task_artifacts` after `confirmed` (except the removal
-  mark), `confirmations` (except use), and the content of `task_decisions`. A trigger raises on `update` or `delete` of
+  mark), `confirmations` (except use), the content of `task_decisions`, the content of `registry_records` and
+  `regulation_versions` (their status columns change under audit), `registry_links`, `registry_embeddings`,
+  `registry_inquiries` (except the poll columns, set once) and `registry_inquiry_results` (except the verdict columns, set once). A trigger raises on `update` or `delete` of
   the immutable columns, so the rule holds even for a mistake in code.
 - Soft delete (`deleted_at`) exists on `projects`, `tasks`, `agents`: the owner marks a row; every list hides it unless
   asked; unique names apply to live rows only (partial unique indexes). A task can be soft deleted only in a final state;
@@ -158,6 +186,7 @@ Names in the other documents map to one place:
 | `attempt.max`, `autoFix.max`, `rework.maxRounds`, `run.maxSeconds`, `child.maxDepth`, `child.maxPerParent` | Policy columns `max_attempts`, `max_auto_fixes`, `max_rework_rounds`, `max_run_seconds`, `max_child_depth`, `max_children_per_task` |
 | Budgets (tokens, cost) | Policy columns `max_tokens`, `max_cost` |
 | `retry.*`, `act.*`, `limit.maxWait`, `gpu.maxSeconds`, `history.maxEvents`, `disk.minFreeGb`, `clock.maxSkew`, `confirm.windowSeconds`, `token.overlapSeconds`, `rate.*`, `page.*`, `notice.repeatHours` | Table `settings`, global |
+| `registry.*`: `enabled` (default off, G1), `gateTimeoutMs`, `clauseMaxBytes`, `embeddingModel`, `searchLimit`, the text and vector thresholds, `draftNoticeHours` | Table `settings`, global; thresholds are set in phase 2 by the measurement of `registry-search` |
 
 The workflow reads both through `LoadSettings` into its snapshot.
 
@@ -205,14 +234,23 @@ Database accounts (none is a superuser; Temporal's account has no right on this 
 | `af_control` | As `af_api`, plus the outbox lease updates and the projection updates of `tasks` and `task_runs` |
 | `af_backup` | `select` on everything (`pg_dump`) |
 
-Application accounts (API tokens, in `api_tokens`): `id`; `name`; `role` enum (`owner`, `worker`, `relay`, `reader`);
+Registry tables: `af_api` has `select` and `insert` on all six; `update` only on the columns `status`,
+`status_changed_at`, `status_changed_by` of `registry_records`, on the status and activation columns of
+`regulation_versions` (activation columns once), on the poll columns of `registry_inquiries` and the verdict columns of
+`registry_inquiry_results` (both once) and on nothing else; no `delete`. `af_control` inserts precedents and drafts only (a check on
+`source`). The status triggers write `audit_log` as the table owner, so no account needs more. The `registry` token has no
+database account: it reaches these tables only through the API routes.
+
+Application accounts (API tokens, in `api_tokens`): `id`; `name`; `role` enum (`owner`, `worker`, `relay`, `reader`, `registry`);
 `owner_id` FK nullable (required for `owner`); `worker_id` FK nullable (a worker token is bound to one machine);
+`session_ref text` and `run_id` FK nullable (a `registry` token is bound to one session or run; one of them is required for it);
 `prefix text` unique (shown in lists); `token_hash` (sha-256 of 32 random bytes; the secret is shown once);
 `created_by`; `created_at`; `expires_at`; `last_used_at`; `revoked_at`; `replaces_token_id`; `valid_until` (end of the
 overlap during rotation); `row_version`. Rights: owner decides, writes and manages tokens; worker registers, reports,
 uploads for runs of its own machine and posts proposals; relay (the Telegram client) reads like a reader, acknowledges
 notices and submits decisions only with a hub press id and a Telegram user that `owners.telegram_user_id` maps to an
-owner, each `press_id` once; reader reads. The web panel runs as an owner token (a reader token for a read-only view).
+owner, each `press_id` once, and records the poll presses of the registry; reader reads; `registry` (the one token an
+agent may hold) searches, opens an inquiry, gives a verdict and proposes a draft, nothing more. The web panel runs as an owner token (a reader token for a read-only view).
 
 ## Migrations and backup
 
@@ -235,7 +273,8 @@ owner, each `press_id` once; reader reads. The web panel runs as an owner token 
   | 0003 | `task_decisions.confirmation_id` and `confirmations.decision_id` | create `confirmations` without `decision_id`, create `task_decisions`, then `alter table confirmations add foreign key (decision_id)`; the first press inserts a confirmation, the decision's insert sets `used_at` and `decision_id` in the same transaction |
   | 0003 | `task_revisions.decision_id` | created after `task_decisions`, no cycle (`tasks.current_revision` is a number, not a key) |
   | 0004 | `workspaces`, `task_runs`, `task_events`, `task_artifacts`, `run_checks` | in this order: runs need `workspaces`, events need runs, checks need artifacts |
-  | 0006 | `gpu_leases` to `workers.machine_id`, `task_runs.execution_id`, `tasks` | all exist since 0001, 0002, 0004 |
+  | 0006 | the registry tables (`regulation_versions`, `registry_records`, `registry_links`, `registry_embeddings`, `registry_inquiries`, `registry_inquiry_results`; extensions `pg_trgm` and `vector`) point to `projects`, `owners`, `task_runs`, `api_tokens`; `task_runs.regulation_version_id` points to `regulation_versions` | all targets exist since 0001 to 0004; `regulation_versions` is created first, then the column is added to `task_runs` by an `alter table` (nullable, an expand step), then the other five in order inquiries, records (its key `inquiry_id` needs them), links, embeddings, results; the `registry` value of `api_tokens.role` and its two binding columns are added in the same file |
+  | 0007 | `gpu_leases` to `workers.machine_id`, `task_runs.execution_id`, `tasks` | all exist since 0001, 0002, 0004 |
 
   A test applies the migrations one by one to an empty database and checks the schema after each file; it fails when a
   table of this document is in no file or in two (`migration-order`).

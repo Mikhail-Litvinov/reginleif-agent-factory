@@ -1,6 +1,7 @@
 # Agent Factory security
 
-Design, nothing is built. [architecture.md](architecture.md) is binding (D1 to D28 are its decisions; "call" marks a choice made in these documents, open to veto); facts about Rig and
+Design, nothing is built. [architecture.md](architecture.md) is binding (D1 to D30 are its decisions; "call" marks a choice made in these documents, open to veto); the Decision Registry and
+the regulation are in [governance.md](governance.md); facts about Rig and
 the hub are in [audit.md](audit.md); tests are in [testing.md](testing.md). This file states weakness classes and defences,
 never steps to exploit the existing hub.
 
@@ -44,7 +45,7 @@ There is no border between an agent and the Windows user who runs it (D4, D13).
 | T2 | The worker's credentials start a workflow or send an Update | separate certificates and a proxy with a method allowlist: the worker may poll, heartbeat and complete activities; workflow-task polling and completion stay off the list (without it they were accepted in the trial) | config | S6 |
 | T3 | Forged decision: sent as a Temporal message, or as the answer to the workflow's own read of it | the Update carries only a decision id; the workflow reads the decision from PostgreSQL in a local activity (D28), so the read is never in a queue, and checks actor, revision and single use | code | `wf-forged-update`, `control-no-queue`, S6 |
 | T4 | Forged or replayed API call | token hash, role check on every route, unique idempotency key, revision check | code | `api-authz-matrix`, F6 |
-| T5 | An agent holding a deciding token | agent environment is built from an allowlist; no API token, no Temporal credential, no push credential | code | `env-allowlist` |
+| T5 | An agent holding a deciding token | agent environment is built from an allowlist; no Temporal credential, no push credential, and no API token except one: the `registry` token, bound to one session or run, which can only search, open an inquiry, give a verdict and propose a draft; it decides nothing and activates nothing | code | `env-allowlist`, `api-authz-matrix` |
 | T6 | An agent pushes or publishes | push and publication done by the worker after an owner decision; profile denies Git remote operations; no credentials in the agent environment | code plus profile | S3. Not stopped: saved credentials of the same Windows user (T8) |
 | T7 | An agent leaves its directory or uses a forbidden tool | permission mode, tool and directory lists (Claude), sandbox (Codex), worker checks of repository, directories, Git operations | profile plus code | S3, `path-escape` |
 | T8 | A process of the same Windows user reads files, saved credentials, the hub key, the worker's credentials | none in version one (D13); untrusted repositories must not run | undefended | none possible on one user |
@@ -66,6 +67,10 @@ There is no border between an agent and the Windows user who runs it (D4, D13).
 | T24 | Backup exposes secrets | backups encrypted; key stored apart from the backup. Off-host copy needs a server | config | open until a server exists |
 | T25 | Cross-site or token theft from the web panel from outside | TLS for any non-loopback access | config | open until a server exists |
 | T26 | A worker certificate takes another machine's activity and answers it with a forged result (the method allowlist does not see queue names; accepted in the S6 trial) | one machine only: the API refuses a second one until a gateway that binds a certificate to its own queues is in place (D28) | code | `second-machine-refused`; the gateway gets its own proof before it is switched on |
+| T27 | A record is used as a permission: a matching decision makes a guard let something through (G7) | no guard reads the registry; a draft in conflict with the list of guards is refused activation, also for the owner (`guard_conflict`); the order of authority puts guards first | code | `registry-not-a-guard`, `registry-authority` |
+| T28 | A forged press creates a wrong project record (same Windows user, T8, D13) | the press names a poll the hub registered before sending, never text of its own, and is checked like a relay decision (T10: press id, mapped Telegram user, once); the category an agent gave is not trusted; only an offered option pressed in Telegram becomes active (G8); the result is a project record, never a permission, and it is listed with its source | code; the forgery itself is undefended (T8) | `registry-capture`, `registry-not-a-guard` |
+| T29 | Prompt injection through text in records: a record steers a later agent | only what the owner pressed or confirmed by the button binds (a poll's question, options and pressed option word for word; a draft's shown text); fields the owner was not shown (summary, tags) serve the search and never bind; a precedent is advice; a verdict `applies` cites a record, it does not copy its text into a command | code plus prompt | `registry-capture`, `registry-authority`. Injection into the agent's reading stays T13 |
+| T30 | An agent changes the regulation | the `registry` role may only propose a draft version; activation needs the owner and two presses (D23); the rules on changing the regulation are guards in code, not clauses | code | `regulation-change` |
 
 ## Roles and rights
 
@@ -73,10 +78,11 @@ There is no border between an agent and the Windows user who runs it (D4, D13).
 |---|---|---|
 | owner | decide (accept, request changes, reject, pause, resume, cancel, force-close, resolve a block, allow an agent, priority), edit requirements, budgets and allowlists, create and rotate tokens, install a release, confirm dangerous operations | nothing is blocked; dangerous ones need the second press |
 | worker (a machine) | poll activity queues, heartbeat, upload results and logs, read tasks assigned to it | decide, start workflows, send Updates, poll workflow tasks, reach PostgreSQL, read other machines' data through the API. Temporal does not hold it to its own queues (T26) |
-| relay (the Telegram client) | read like a reader, acknowledge notices, submit a decision with a hub press id and a Telegram user mapped to an owner, each press id once | act for an unmapped user; reuse a press id; hold any other right |
+| relay (the Telegram client) | read like a reader, acknowledge notices, submit a decision or record a poll press with a hub press id and a Telegram user mapped to an owner, each press id once | act for an unmapped user; reuse a press id; hold any other right |
 | reader | read tasks, history, status | read secrets or raw agent logs flagged sensitive; any change |
 | Control Worker (internal service identity) | start workflows, send Updates for recorded decisions, run server steps as local activities | accept anything by itself |
-| agent | nothing against the API | holds no token of any role |
+| registry (an agent's token, bound to one session or run, T5) | search the registry, open an inquiry, give a verdict, propose a draft | activate, revoke or supersede a record, change the regulation, record a press, read anything else through the API |
+| agent | nothing else against the API | holds a token of any role except `registry` |
 
 Temporal roles follow this table (T2). Temporal admin and UI access are held by the owner only and are not reachable
 from the PC.
@@ -121,6 +127,8 @@ Windows user or a container, which is not planned for version one.
 | Codex launcher survives a reboot looking alive | D3 | closed by the identity change; test T19 |
 | Cleartext traffic until TLS exists | D6 | acceptable only on loopback |
 | Automatic acceptance | architecture, last section | off; turning it on is a dangerous operation |
+| The question gate fails open: a slow or down registry lets a question pass | G1 | by design; the owner is asked as today |
+| A question in plain text at the end of a turn is not gated | G9 | stated limit; only the rule and the reflection check act |
 
 ## Self-modification
 
@@ -153,6 +161,7 @@ the other to be reachable).
 | Restore a backup or run a migration | state loss |
 | Delete a worktree with unpublished changes (cleanup `force`) | work loss |
 | Allow network or push in a profile | reach |
+| Activate or revoke a regulation version | changes what agents must do |
 | REJECT, CANCEL and force-close of a task | closes a task for good (D7, D21, D23) |
 
 REJECT, CANCEL, force-close and publication always take two presses (D23). PAUSE takes one: it only stops new work and

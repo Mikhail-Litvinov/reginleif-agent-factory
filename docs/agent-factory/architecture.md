@@ -9,8 +9,9 @@ Agent Factory keeps tasks, requirements, decisions and results, and runs them on
 restart of the PC, the server, an agent or the network loses nothing. Agents do the work; the owner keeps requirements,
 permissions, budget, publication and acceptance.
 
-Anti-goals: ordinary Rig needs no PostgreSQL, Temporal, Node or background process; agents never accept their own
-results; no second recovery scheduler next to Temporal; no success reported for a check that did not run.
+Anti-goals: ordinary Rig needs no PostgreSQL, Temporal, Node or background process (the registry is off by default and
+fails open, governance.md G1); agents never accept their own results; no second recovery scheduler next to Temporal; no
+success reported for a check that did not run.
 
 ## Decisions
 
@@ -44,6 +45,8 @@ results; no second recovery scheduler next to Temporal; no success reported for 
 | D26 | A mandatory check that could not run is first repaired by agents; if that fails, the task is BLOCKED with the reason. It never counts as passed. | Call from D18 |
 | D27 | Drizzle (as the task spec recommends; Rig has no database code to reuse) defines the schema and types; its generated SQL migrations are reviewed, committed, completed by hand where Drizzle cannot express a rule, and applied forward only. | Call, from spec 4 |
 | D28 | Server steps run as local activities inside the Control Worker, so no task queue carries them and no worker can take them. A gateway that binds a certificate to its own queues comes before a second machine; until then a second machine is refused. | Owner (the refusal in code is a call) |
+| D29 | Decisions, exceptions, precedents and facts, and the regulation, live in PostgreSQL as the Decision Registry. An agent consults it before a question to the owner. Details: [governance.md](governance.md). | Owner |
+| D30 | The registry is built and works before Temporal is installed. | Owner |
 
 Rejected: a separate repository (Rig updates and rolls back only itself and the hub); code in the Rig core (ordinary Rig
 would pull Temporal and PostgreSQL); the worker's own child processes (an agent would die with the worker).
@@ -53,7 +56,9 @@ would pull Temporal and PostgreSQL); the worker's own child processes (an agent 
 Server contour (Docker Compose; on the PC until a server exists):
 
 - **PostgreSQL 16**, two databases with separate accounts: application and Temporal persistence. 16 is the newest major
-  on the list of versions Temporal tests.
+  on the list of versions Temporal tests. The application database needs the `pgvector` extension (image pinned).
+- **Embedder**: a container with a local embedding model on the CPU, no outward network, pinned by checksum. It serves
+  the registry's search by meaning (governance.md); without it the search degrades to text rankings.
 - **Temporal Server** and **admin-tools** for schema steps, pinned. The `auto-setup` image is deprecated and the official
   Compose samples are for development, so the configuration is our own. No Elasticsearch: SQL visibility is enough.
 - **Temporal UI**, diagnostics only, not reachable from outside.
@@ -74,6 +79,7 @@ factory/
   workflows/   deterministic workflow code only
   control/     server activities, outbox relay
   api/         HTTP API and web panel
+  registry/    Decision Registry: records, search, inquiries, gate, import
   worker/      local worker, workspaces, execution store
   runner/      program that rig exec starts around one agent run
   adapters/    claude, codex, openai, comfyui, lmstudio
@@ -260,8 +266,8 @@ Numbers (attempts, timeouts, budgets, depth) are settings with defaults set in t
 
 - Temporal authorizes nobody by default: the frontend needs mTLS with required client certificates and a private network
   before it leaves the PC. PostgreSQL and the UI are never published.
-- API tokens are stored as hashes and carry a role: owner, worker, relay, reader. An agent process gets no token that can
-  decide. The Telegram client has the relay role: it may submit a decision (dangerous ones after the hub's second press) only with the hub's press id and a Telegram user
+- API tokens are stored as hashes and carry a role: owner, worker, relay, reader, registry. An agent process gets no
+  token that can decide; the only token it may hold is `registry` (search, inquiry, verdict, draft; security.md T5). The Telegram client has the relay role: it may submit a decision (dangerous ones after the hub's second press) only with the hub's press id and a Telegram user
   that is mapped to an owner, and each press id works once.
 - The hub's local endpoints have no authentication today. The new generic mechanism needs a per-client key; a button press
   is checked against the hub's allowed users and works once; dangerous actions need a second press.
@@ -313,12 +319,12 @@ saved histories.
 
 0. Audit, this document, contracts for data, API and security; proofs S1 to S6 (S3 spends a little of the Claude limit,
    S5 needs ComfyUI running).
-1. Infrastructure in Docker on the PC, with restart and restore checks.
-2. Database and API.
-3. Workflows.
+1. PostgreSQL in Docker on the PC, with restart and restore checks.
+2. Database, API, the registry with the embedder, the question gate, the hub's buttons and relay for it, the import (D30).
+3. Temporal installation (with its restart checks, the proxy, S6 and the D28 part) and workflows.
 4. Local worker, Claude and Codex adapters, Rig feature.
 5. Several agents, OpenAI, ComfyUI and LM Studio adapters, independent review.
-6. Hub fork mechanism, Telegram client, web panel.
+6. Task commands and notices in Telegram, web panel.
 7. Limits, monitoring, backups, failure scenarios.
 
 Open until a server exists: permanent operation, work while the PC is off, external TLS, backups outside the host.
