@@ -169,7 +169,7 @@ needs a clause, so with an empty regulation this part waits too. Cancel, reject,
 the owner's.
 
 **The chief engineer.** A request names the run, the action, the target, the reason and what was tried. Code first:
-a right already in the role is answered at once; a request for something on the owner's list (G15) is answered
+a right already held (role, record, live grant) is answered at once and makes no request row; a request for something on the owner's list (G15) is answered
 `call_owner` by the code itself (a `code` step, not final: it puts the request on the owner's list and the owner's step
 follows); a repeat of a refused request in the same task gets the same refusal. The rest goes to a fresh Claude run that sees the
 request, the task, the role, the active regulation, and nothing else. It has no tools, and the request's text is data
