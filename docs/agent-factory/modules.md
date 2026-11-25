@@ -60,6 +60,7 @@ and the import work before Temporal exists ([governance.md](governance.md)).
 | `F/registry/gate.ts` | The gate command (G9): inquiry id, verdicts, a second search by the real question text, fail open after `registry.gateTimeoutMs` | service |
 | `F/registry/import.ts` | One-time import of drafts from the Factory documents and the projects' memories (G4); source named, a second run adds nothing | service |
 | `F/api/handlers/registry.ts` | The registry and regulation routes of api.md; poll press capture on the relay role | service |
+| Rig hooks of the `factory` feature | Session start gives the active clauses; before a prompt and a tool call the difference when the version changed (G10); both do nothing while the registry is off | api |
 | Rig command `rig factory registry find`, `verdict`, `propose`, `import` | The client of the `registry` role for Claude and Codex; the same command for both | api |
 | raf-hub (separate repository): gate command, poll registration, buttons | The hub's own question hook runs the gate command first, registers the poll (a failure or the timeout sends it unregistered), and only then sends it (hooks run in parallel, so a separate hook cannot go first); the generic button mechanism with per-client keys (D5) for confirming drafts; generic, off by default | gate command |
 | `F/telegram/client.ts`, `F/telegram/relay-role.ts` | The part the registry needs before Temporal: relay token, mapping of a Telegram user to an owner, polls, presses, the list of drafts with buttons; idempotent send, button ids, replay refusal | contracts, api |
@@ -80,7 +81,7 @@ Migrations, in order (foreign keys decide the order; each table is in exactly on
 | 0003 | outbox_events, confirmations, task_decisions, idempotency_keys, task_revisions, notifications | outbox_id and decision_id form a deferrable pair; `confirmations.decision_id` added by `alter`; task_revisions after the decisions (database.md Creation order). notifications is here because `NotifyUser` (phase 3) and the refused-decision notice write to it before phase 6 |
 | 0004 | workspaces, task_runs, task_events, task_artifacts, run_checks | run-role trigger; one `in_use` row per worktree path; adds the foreign key `tasks.origin_run_id` to `task_runs` by `alter` |
 | 0005 | task_reviews, review_finding_outcomes, task_approvals, task_proposals | review-independence trigger |
-| 0006 | regulation_versions, registry_inquiries, registry_records, registry_links, registry_embeddings, registry_inquiry_results | extensions `pg_trgm` and `vector` first; `regulation_versions` before the `alter` that adds `task_runs.regulation_version_id` (an expand step); the `registry` role value and binding columns of `api_tokens`; status audit triggers (database.md) |
+| 0006 | regulation_versions, registry_inquiries, registry_records, registry_links, registry_embeddings, registry_inquiry_results | extensions `pg_trgm` and `vector` first; `regulation_versions` before the `alter` that adds `task_runs.regulation_version_id` and `regulation_seen_id` (an expand step); the `registry` role value and binding columns of `api_tokens`; status audit triggers (database.md) |
 | 0007 | gpu_leases | lands in phase 5 with its use; its keys target tables that exist by then |
 
 Count: 9+3+6+5+4+6+1 = 34 tables, each in exactly one file (see Verification).

@@ -145,7 +145,7 @@ also shows its number (`DEC-00042`), accepted in `GET /registry/records/{id}` as
 | `POST /regulation/versions` | O G | A draft version (an agent's right ends here). Checked for conflicts with guards, clauses and active owner decisions; the answer lists them. 201. |
 | `GET /regulation/versions/{id}/diff` | O R | The difference to the active version. |
 | `POST /regulation/versions/{id}/activate` | O | A dangerous operation (D23): two presses, `409 confirmation_required` first. Refused `409 guard_conflict`, `409 regulation_conflict` or `422 regulation_too_large`. Audited. |
-| `POST /regulation/versions/{id}/revoke` | O | Second press. Applies from the next start of a session or run. |
+| `POST /regulation/versions/{id}/revoke` | O | Second press. Applies at once (G10). |
 
 Role `registry`: search, open an inquiry, give a verdict, ask the gate, propose a draft or a draft version; nothing else.
 It never activates, revokes or supersedes. A press is recorded only through the relay role. Orchestrator writes

@@ -25,8 +25,11 @@ switches off a security guard; a registry that stops ordinary work when it is do
 | G5 | The registry is built and working before Temporal is installed. | Owner |
 | G6 | The regulation's text is written by the owner later; until then the regulation is empty and only the mechanism exists. | Owner |
 | G7 | No guard reads the registry. Permission prompts, profiles and second presses work as if it did not exist. | Call, from the owner's rule not to bypass security confirmations |
-| G8 | A poll answer is recorded by itself only when an offered option was pressed in Telegram. Typed answers and answers in the terminal become drafts. | Call |
+| G8 | A poll answer is recorded by itself only when an offered option was pressed in Telegram. Typed answers and answers in the terminal become drafts. | Owner |
 | G9 | The check before a question is code, not only a rule in a prompt. | Call |
+| G10 | A new version of the regulation applies at once, also to work in progress. | Owner |
+| G11 | Drafts are confirmed as one list, daily or on demand. | Owner |
+| G12 | The hub's buttons and the relay for the registry are built in phase 2. | Owner |
 
 G8 because a typed answer is often a counter-question, and a terminal answer has no checked Telegram user behind it.
 
@@ -122,18 +125,23 @@ difference, changed circumstances or conflict is always open to the agent.
 - **Buttons and the relay** for polls and drafts are built in phase 2, before Temporal: the hub's generic button
   mechanism (D5) and the relay client move there from phase 6.
 - **Confirmations are batched**: drafts wait for one list on the owner's demand or a daily notice, never a message each
-  (call).
+  (G11).
 - **Import (G4)**: a one-time command reads the decision tables of the Factory documents and the memories of the projects
   and makes drafts with the source named. The list is shown once. Nothing is active before the press. The contents stay in
   the database and never enter the repository.
 
 ## Regulation and its changes
 
-A version is an ordered set of clauses with a number, status and the owner's confirmation; one is active. A session or run
-stores the version it started with and keeps it to its end (call); a change applies from the next start. Its inquiries search
-the rules of its own version and the active records of the other kinds. Rules live and
-end with the version: activating one makes its rules active and the rules it leaves out `superseded`, revoking one
-revokes its rules, all in one transaction. A task takes the active version anew for each run.
+A version is an ordered set of clauses with a number, status and the owner's confirmation; one is active. A change
+applies at once, also to sessions and runs at work (G10): every inquiry, gate and review uses the active version, and a
+rule that left it is no longer found. Rules live and end with the version: activating one makes its rules active and
+the rules it leaves out `superseded`, revoking one revokes its rules, all in one transaction. A session or run stores
+the version it started with and the last one delivered to it, so a result tells which versions stood behind it.
+
+How a change reaches work in progress: in Claude a hook before a prompt and before a tool call compares the number and
+gives the difference when it changed. A Codex run and a model without hooks cannot be told in the middle: they learn it
+with their next inquiry, and the review of their result uses the active version. A change of the regulation does not
+stop a run; only a requirements change does (D14).
 
 A change is a draft version: proposed by the owner or an agent, checked for conflicts with guards, clauses and active owner
 decisions, shown as a difference, made active by two presses of the owner (a dangerous operation, D23), audited. The rules
@@ -176,7 +184,7 @@ Russian and English: the criterion is the right record among the first results, 
 | `registry-scope` | a record of another project, repository or target, and a `once` record, is never offered as an answer | it is |
 | `registry-authority` | a precedent or project decision never outranks a rule; an exception only its own record; an equal conflict returns both | an order is broken |
 | `registry-not-a-guard` | with a matching active record every permission prompt, profile and second press behaves as without it | a guard reads a record |
-| `registry-history` | supersede and revoke keep the old row and its link; the old record stays active until the new one is activated; rules left out of a version are found only by a session that started with it; a pressed answer to `outdated` supersedes the named record; update or delete of content raises | content changes, a link is missing, no record is active in between, or a left-out rule is found |
-| `regulation-change` | an agent token, one press, a conflict with a guard or an oversized version never activates | a version becomes active |
+| `registry-history` | supersede and revoke keep the old row and its link; the old record stays active until the new one is activated; rules left out of a version are not found, also by a session at work; a pressed answer to `outdated` supersedes the named record; update or delete of content raises | content changes, a link is missing, no record is active in between, or a left-out rule is found |
+| `regulation-change` | an agent token, one press, a conflict with a guard or an oversized version never activates; after an activation a session at work gets the difference before its next tool call, and its next inquiry uses the new version | a version becomes active, or a session at work goes on by the old one |
 | `registry-search` | measured set: the right record among the first results, none for unrelated questions; works without the model as `degraded` | a threshold is missed |
 | `registry-import` | drafts only, source named, a second run adds nothing | an active record or a duplicate appears |

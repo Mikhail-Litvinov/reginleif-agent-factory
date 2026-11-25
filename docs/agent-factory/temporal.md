@@ -20,8 +20,8 @@ workflow already ran, never starts again, so an expired history cannot restart i
 `TaskWorkflow` keeps in memory: status, `revision`, counters (`attempt`, `rework`, `autoFix`), `executionId` and machine of
 the current run (empty when no run is alive), worktree reference, `pauseRequested`, `stopping`, `endUnconfirmed`,
 `resumeTo`, `blockKind`, `blockReason`, `allowedAgents` (agents the owner allowed for this task), the map `handled`
-(decision id to outcome), the settings snapshot, `regulationVersionId` (of the current run: read anew when each run
-starts, kept to that run's end and stored as `task_runs.regulation_version_id`, governance.md). Waiting for the owner or a dependency is `condition()` on this state: no
+(decision id to outcome), the settings snapshot, `regulationVersionId` (the version the current run
+started with, stored as `task_runs.regulation_version_id`; rules are always read from the active version, G10 of governance.md). Waiting for the owner or a dependency is `condition()` on this state: no
 worker is held and no timer polls. Every state change is a call to `PersistTaskEvent` before the next step. Names in
 the database are the snake_case forms (`block_kind`, `resume_to`, `pause_requested`, `end_unconfirmed`).
 
