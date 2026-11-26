@@ -55,7 +55,7 @@ and the import work before Temporal exists ([governance.md](governance.md)).
 | `F/lib/log.ts` | Structured JSON logs carrying `project_id`, `task_id`, `run_id`, `workflow_id`, `worker_id`, `correlation_id` (spec 16) | none |
 | `F/api/server.ts` | HTTP server, token auth, roles owner, worker, relay, reader, registry, hub, device (device session), request id | repo |
 | `F/api/decisions.ts` | Decision record, idempotency, confirmation (second press, D23), outbox write in one transaction | repo |
-| `F/api/handlers/` | One file per route group: projects, tasks, revisions, dependencies, events, tokens, settings, cleanup | decisions |
+| `F/api/handlers/` | One file per route group: projects, tasks, revisions, dependencies, events, decisions, agents, workers (`POST /workers/register` among them, which `second-machine-refused` needs), tokens, notifications, settings, system, cleanup | decisions |
 | `F/api/handlers/client.ts` | The client routes of api.md (D33): device codes and sessions, conversations and messages, polls and the first-answer rule, `GET /events/stream` (one opaque cursor per stream over `task_events`, `audit_log`, `notifications` and `messages`, `cursor.ts` below), the poll answer requests of the two arbiters (a request row with an idempotency key; for an `api` poll the API decides, for a `hub` poll it only stores the request and takes the result from the hub's route), `POST /system/stop-all` (a suspension of every agent with the reason `owner_stop`); contracts and routes only, nothing of the interface. No web panel is built: no cookies, no CSRF layer | server, decisions |
 | `F/api/cursor.ts` | The one event cursor for every `after_seq`: opaque, names its stream, orders by `(commit_xid, seq)` and reads only rows with `commit_xid` below the oldest running transaction (`pg_snapshot_xmin`), so a row committed late is never skipped; a bad cursor is refused `bad_cursor`. Used by the event stream, the audit and task event lists, the notices and the messages | repo |
 | `F/control/` | Control Worker skeleton: connection, `LoadSettings`, `PersistTaskEvent` | repo |
@@ -113,8 +113,9 @@ Rig files changed: the command `rig factory registry` (the registry client above
 are phase 4) and the permission hook of the `factory` feature, which the owner installs at the PC (D31). Separate repository: the gate command option in raf-hub. Open check of this phase: whether the Codex sandbox
 reaches the loopback API; if not, the launcher does the search ([governance.md](governance.md) Access).
 
-Proving check: `ops-matrix`, `decision-recorded`, `decision-kinds`, `second-press`,
-`state-exit`, `api-authz-matrix`, `second-machine-refused`, `sql-param`, `migration-order` (applies every migration that exists, in number order, the robotics one only once robotics has started, to an empty database, and the
+Proving check: `ops-matrix` and `state-exit` (phase 2 proves the API and database side: the transition table, the
+refusals with every reason, the decision row and the 202 answer; the workflow side is phase 3, as testing.md says),
+`decision-recorded`, `decision-kinds`, `second-press`, `relay-press-once`, `api-authz-matrix`, `second-machine-refused`, `sql-param`, `migration-order` (applies every migration that exists, in number order, the robotics one only once robotics has started, to an empty database, and the
 regeneration test shows the schema files and the generated migrations agree), the openapi regeneration test, and the
 registry checks of governance.md "Checks" (testing.md): `registry-first`, `registry-fail-open`, `registry-capture`,
 `registry-scope`, `registry-authority`, `permission-by-record`, `permission-second-press`, `role-rights` (the
