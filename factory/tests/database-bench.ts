@@ -49,6 +49,7 @@ export const createDatabaseBench = async (testFileUrl: string): Promise<Database
 			`CREATE DATABASE ${quotedDatabase} WITH TEMPLATE template0 OWNER af_migrator;`,
 			`GRANT CONNECT ON DATABASE ${quotedDatabase} TO af_api, af_control, af_backup;`,
 		].join("\n"), { database: "postgres" });
+		await psql(stack.container, "af_bootstrap", "CREATE EXTENSION IF NOT EXISTS vector;", { database });
 		return makeBench(database, stack, migratorPassword, apiPassword, controlPassword, backupPassword, dropDatabase);
 	} catch (error) {
 		const cleanupErrors: unknown[] = [];
