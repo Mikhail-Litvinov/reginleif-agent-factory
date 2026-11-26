@@ -159,11 +159,11 @@ No permanent deputy is kept only to cover an unreliable chief. Requests wait mea
 session it compares the session with the approved work. The chief stopped with work left when four things hold together:
 an item assigned to the chief is still open, no question waits on the owner, no blocker is named, and nothing the chief
 started still runs. The assistant then wakes the chief with the item to continue and records the fact for the chief's
-assessment. A stop the owner asked for, a pending question, a named blocker or a running job wakes nothing. Whether
+assessment as a fact, not an incident. A stop the owner asked for, a pending question, a named blocker or a running job wakes nothing. Whether
 something runs is computed from the records, never judged by a model; a small model of any provider reads only the open
 items and the last messages. The assistant has no rights over tasks, decisions or rights: it reads the chief's queue and
-writes wakes and facts. It never wakes the chief twice for the same point; a second stop at the same point with nothing
-changed becomes an incident for the evaluator.
+writes wakes and facts. A stop again at the same point wakes the chief again, at most three times in a row without a
+message from the owner; after the third the assistant tells the owner which item the chief stands on.
 
 ## Modes
 
