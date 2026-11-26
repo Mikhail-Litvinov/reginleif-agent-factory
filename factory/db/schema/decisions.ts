@@ -17,7 +17,7 @@ export const outboxEvents = pgTable("outbox_events", {
 	payload: jsonb("payload"), state: text("state"), attempts: integer("attempts"), nextAttemptAt: time("next_attempt_at"), leaseOwner: text("lease_owner"), leaseUntil: time("lease_until"), lastError: text("last_error"), createdAt: created(), doneAt: time("done_at"), updatedAt: updated(), rowVersion: version(),
 }, (t) => [foreignKey({ columns: [t.decisionId], foreignColumns: [taskDecisions.id], name: "outbox_events_decision_id_task_decisions_id_fk" }).onDelete("restrict"),
 	uniqueIndex("outbox_start_workflow").on(t.kind, t.taskId).where(sql`${t.kind} = 'start_workflow'`), index("outbox_pending").on(t.nextAttemptAt).where(sql`${t.state} IN ('pending','sent')`),
-	check("outbox_kind", sql`${t.kind} IN ('start_workflow','deliver_decision','wake','notify','cleanup')`), check("outbox_state", sql`${t.state} IN ('pending','sent','done','failed')`)]);
+	check("outbox_kind", sql`${t.kind} IN ('start_workflow','deliver_decision','wake','notify','cleanup','stop_run')`), check("outbox_state", sql`${t.state} IN ('pending','sent','done','failed')`)]);
 
 export const confirmations = pgTable("confirmations", {
 	id: uuid("id").primaryKey(), actorId: uuid("actor_id").references(() => owners.id, { onDelete: "restrict" }), channel: text("channel"), deviceSessionId: uuid("device_session_id").references(() => deviceSessions.id, { onDelete: "restrict" }), operation: text("operation"), targetType: text("target_type"), targetId: uuid("target_id"), requestHash: text("request_hash"), nonceHash: text("nonce_hash"), issuedAt: time("issued_at").notNull().defaultNow(), expiresAt: time("expires_at"), usedAt: time("used_at"), decisionId: uuid("decision_id"), updatedAt: updated(), rowVersion: version(),

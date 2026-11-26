@@ -1,5 +1,5 @@
 {
-  "id": "4a2ea204-2c29-4b12-abb3-167704fbad87",
+  "id": "3006b57f-4eb2-407c-810d-2f366a025812",
   "prevId": "53399a29-67ff-4f75-affb-6260d9e649b5",
   "version": "7",
   "dialect": "postgresql",
@@ -3552,18 +3552,6 @@
           "type": "jsonb",
           "primaryKey": false,
           "notNull": false
-        },
-        "right": {
-          "name": "right",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "consumed_at": {
-          "name": "consumed_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
         }
       },
       "indexes": {
@@ -3742,7 +3730,7 @@
         },
         "registry_records_kind": {
           "name": "registry_records_kind",
-          "value": "\"registry_records\".\"kind\" IN ('rule','decision','exception','precedent','fact','permission')"
+          "value": "\"registry_records\".\"kind\" IN ('rule','decision','exception','precedent','fact')"
         },
         "registry_records_authority": {
           "name": "registry_records_authority",
@@ -3766,31 +3754,11 @@
         },
         "registry_records_owner_kind": {
           "name": "registry_records_owner_kind",
-          "value": "\"registry_records\".\"authority\" = 'agent' OR \"registry_records\".\"kind\" IN ('rule','decision','exception','permission')"
+          "value": "\"registry_records\".\"authority\" = 'agent' OR \"registry_records\".\"kind\" IN ('rule','decision','exception')"
         },
         "registry_records_precedent": {
           "name": "registry_records_precedent",
           "value": "\"registry_records\".\"kind\" <> 'precedent' OR \"registry_records\".\"authority\" = 'agent'"
-        },
-        "registry_records_permission_owner": {
-          "name": "registry_records_permission_owner",
-          "value": "\"registry_records\".\"kind\" <> 'permission' OR \"registry_records\".\"authority\" = 'owner'"
-        },
-        "registry_records_permission_source": {
-          "name": "registry_records_permission_source",
-          "value": "\"registry_records\".\"kind\" <> 'permission' OR \"registry_records\".\"source\" = 'owner_button'"
-        },
-        "registry_records_right": {
-          "name": "registry_records_right",
-          "value": "(\"registry_records\".\"kind\" = 'permission') = (\"registry_records\".\"right\" IS NOT NULL)"
-        },
-        "registry_records_right_shape": {
-          "name": "registry_records_right_shape",
-          "value": "\"registry_records\".\"right\" IS NULL OR (jsonb_typeof(\"registry_records\".\"right\") = 'object' AND jsonb_typeof(\"registry_records\".\"right\"->'action') IS NOT DISTINCT FROM 'string' AND jsonb_typeof(\"registry_records\".\"right\"->'target') IS NOT DISTINCT FROM 'string' AND (jsonb_typeof(\"registry_records\".\"right\"->'conditions') IS NULL OR jsonb_typeof(\"registry_records\".\"right\"->'conditions') = 'object'))"
-        },
-        "registry_records_consumed": {
-          "name": "registry_records_consumed",
-          "value": "\"registry_records\".\"consumed_at\" IS NULL OR (\"registry_records\".\"kind\" = 'permission' AND \"registry_records\".\"reuse\" = 'once')"
         }
       },
       "isRLSEnabled": false

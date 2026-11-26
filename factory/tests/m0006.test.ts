@@ -71,15 +71,24 @@ it("enforces database grants and registry token binding", async () => {
     await assert.rejects(sql.unsafe(`DELETE FROM ${table}`), /permission denied/i);
     if (role === "backup") await assert.rejects(sql.unsafe(`INSERT INTO ${table} (id) VALUES ($1)`, [randomUUID()]), /permission denied/i);
     else if (table === "registry_records") await sql`INSERT INTO registry_records (id, status, source) VALUES (${randomUUID()}, 'draft', 'agent_proposal')`;
+    // database.md line 531 and 535-543: af_control reads like af_api, inserts only precedents and drafts (registry_records)
+    // and updates nothing in the registry; only af_api inserts and updates the other tables.
+    else if (role === "control") await assert.rejects(sql.unsafe(`INSERT INTO ${table} (id) VALUES ($1)`, [randomUUID()]), /permission denied/i);
     else await sql.unsafe(`INSERT INTO ${table} (id) VALUES ($1)`, [randomUUID()]);
    }
-   if (role === "backup") await assert.rejects(sql`INSERT INTO registry_inquiries (id) VALUES (${randomUUID()})`, /permission denied/i);
-   else {
+   if (role === "backup" || role === "control") await assert.rejects(sql`INSERT INTO registry_inquiries (id) VALUES (${randomUUID()})`, /permission denied/i);
+   if (role === "control") {
+    await assert.rejects(sql`UPDATE registry_inquiries SET poll_question = 'x' WHERE false`, /permission denied/i);
+    await assert.rejects(sql`UPDATE registry_records SET status = 'active' WHERE false`, /permission denied/i);
+   }
+   if (role === "api") {
     await sql`INSERT INTO registry_inquiries (id) VALUES (${randomUUID()})`;
     await sql`UPDATE registry_inquiries SET poll_question = 'x' WHERE false`;
     await assert.rejects(sql`UPDATE registry_inquiries SET problem = 'x' WHERE false`, /permission denied/i);
     await assert.rejects(sql`UPDATE registry_links SET link_type = 'evidence' WHERE false`, /permission denied/i);
     await assert.rejects(sql`UPDATE registry_embeddings SET dimensions = 1024 WHERE false`, /permission denied/i);
+   }
+   if (role !== "backup") {
     if (role === "control") await assert.rejects(sql`INSERT INTO registry_records (id, status, source) VALUES (${randomUUID()}, 'draft', 'owner_message')`, /control/i);
    }
   } finally { await sql.end(); }

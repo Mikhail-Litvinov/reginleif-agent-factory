@@ -37,8 +37,8 @@ it("enforces task transitions, hierarchy, dependencies and account rights", asyn
 		await assert.rejects(sql`UPDATE tasks SET status = 'READY', block_kind = NULL WHERE id = ${root}`, /block/i);
 		await sql`UPDATE tasks SET status = 'READY', block_kind = NULL, block_handler = NULL WHERE id = ${root}`;
 		await assert.rejects(sql`UPDATE tasks SET block_handler = 'owner' WHERE id = ${root}`, /block/i);
-		await sql`INSERT INTO tasks (id, project_id, origin_type, depth) VALUES (${randomUUID()}, ${project}, 'standing', 0)`;
-		await assert.rejects(sql`INSERT INTO tasks (id, project_id, origin_type, depth) VALUES (${randomUUID()}, ${project}, 'standing', 0)`, /unique/i);
+		await sql`INSERT INTO tasks (id, project_id, status, origin_type, depth) VALUES (${randomUUID()}, ${project}, 'RUNNING', 'standing', 0)`; // database.md line 418: RUNNING from insert
+		await assert.rejects(sql`INSERT INTO tasks (id, project_id, status, origin_type, depth) VALUES (${randomUUID()}, ${project}, 'RUNNING', 'standing', 0)`, /unique/i);
 		await sql`UPDATE projects SET archived_at = now() WHERE id = ${project}`;
 		await assert.rejects(sql`UPDATE projects SET deleted_at = now() WHERE id = ${project}`, /active tasks/i);
 		const deletedProject = randomUUID();

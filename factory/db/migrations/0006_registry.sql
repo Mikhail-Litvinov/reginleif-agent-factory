@@ -96,24 +96,17 @@ CREATE TABLE registry_records (
  created_at timestamptz NOT NULL DEFAULT now(),
  status_changed_at timestamptz,
  status_changed_by jsonb,
- "right" jsonb,
- consumed_at timestamptz,
  CONSTRAINT registry_records_number_unique UNIQUE (number),
  CONSTRAINT registry_records_scope CHECK ((scope_type = 'project') = (project_id IS NOT NULL)),
  CONSTRAINT registry_records_press CHECK ((source = 'poll_press') = (pressed_option IS NOT NULL)),
- CONSTRAINT registry_records_kind CHECK (kind IN ('rule','decision','exception','precedent','fact','permission')),
+ CONSTRAINT registry_records_kind CHECK (kind IN ('rule','decision','exception','precedent','fact')),
  CONSTRAINT registry_records_authority CHECK (authority IN ('owner','agent')),
  CONSTRAINT registry_records_status CHECK (status IN ('draft','active','superseded','revoked','rejected')),
  CONSTRAINT registry_records_scope_type CHECK (scope_type IN ('global','project')),
  CONSTRAINT registry_records_reuse CHECK (reuse IN ('standing','once')),
  CONSTRAINT registry_records_source CHECK (source IN ('poll_press','owner_button','owner_message','orchestrator','agent_proposal','import')),
- CONSTRAINT registry_records_owner_kind CHECK (authority = 'agent' OR kind IN ('rule','decision','exception','permission')),
+ CONSTRAINT registry_records_owner_kind CHECK (authority = 'agent' OR kind IN ('rule','decision','exception')),
  CONSTRAINT registry_records_precedent CHECK (kind <> 'precedent' OR authority = 'agent'),
- CONSTRAINT registry_records_permission_owner CHECK (kind <> 'permission' OR authority = 'owner'),
- CONSTRAINT registry_records_permission_source CHECK (kind <> 'permission' OR source = 'owner_button'),
- CONSTRAINT registry_records_right CHECK ((kind = 'permission') = ("right" IS NOT NULL)),
- CONSTRAINT registry_records_right_shape CHECK ("right" IS NULL OR (jsonb_typeof("right") = 'object' AND jsonb_typeof("right"->'action') IS NOT DISTINCT FROM 'string' AND jsonb_typeof("right"->'target') IS NOT DISTINCT FROM 'string' AND (jsonb_typeof("right"->'conditions') IS NULL OR jsonb_typeof("right"->'conditions') = 'object'))),
- CONSTRAINT registry_records_consumed CHECK (consumed_at IS NULL OR (kind = 'permission' AND reuse = 'once')),
  CONSTRAINT registry_records_project_id_projects_id_fk FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE RESTRICT,
  CONSTRAINT registry_records_inquiry_id_registry_inquiries_id_fk FOREIGN KEY (inquiry_id) REFERENCES registry_inquiries(id) ON DELETE RESTRICT,
  CONSTRAINT registry_records_run_id_task_runs_id_fk FOREIGN KEY (run_id) REFERENCES task_runs(id) ON DELETE RESTRICT
@@ -222,22 +215,14 @@ CREATE TRIGGER registry_embeddings_immutable BEFORE UPDATE OR DELETE ON registry
 CREATE TRIGGER registry_inquiries_content BEFORE UPDATE OR DELETE ON registry_inquiries FOR EACH ROW EXECUTE FUNCTION af_0003_guard_content('{poll_question,poll_options,poll_registered_at}', '{poll_question,poll_options,poll_registered_at}');
 CREATE TRIGGER registry_results_content BEFORE UPDATE OR DELETE ON registry_inquiry_results FOR EACH ROW EXECUTE FUNCTION af_0003_guard_content('{verdict,difference,conflicts_with_id,verdict_at}', '{verdict,difference,conflicts_with_id,verdict_at}');
 -- Stored generated columns are not populated in NEW until after BEFORE triggers.
--- Only status, status_changed_at, status_changed_by and consumed_at may change; consumed_at is set once.
+-- Only status, status_changed_at and status_changed_by may change.
 CREATE FUNCTION af_0006_record_content() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
  IF TG_OP = 'DELETE' THEN RAISE EXCEPTION 'registry_records is immutable'; END IF;
- IF (to_jsonb(NEW) - ARRAY['status','status_changed_at','status_changed_by','consumed_at','search_ru','search_en']) IS DISTINCT FROM (to_jsonb(OLD) - ARRAY['status','status_changed_at','status_changed_by','consumed_at','search_ru','search_en']) THEN RAISE EXCEPTION 'registry_records content is immutable'; END IF;
- IF OLD.consumed_at IS NOT NULL AND NEW.consumed_at IS DISTINCT FROM OLD.consumed_at THEN RAISE EXCEPTION 'registry_records consumed_at is set once'; END IF;
+ IF (to_jsonb(NEW) - ARRAY['status','status_changed_at','status_changed_by','search_ru','search_en']) IS DISTINCT FROM (to_jsonb(OLD) - ARRAY['status','status_changed_at','status_changed_by','search_ru','search_en']) THEN RAISE EXCEPTION 'registry_records content is immutable'; END IF;
  RETURN NEW;
 END $$;
 CREATE TRIGGER registry_records_content BEFORE UPDATE OR DELETE ON registry_records FOR EACH ROW EXECUTE FUNCTION af_0006_record_content();
--- Every use of a permission writes one audit row; the consuming actor is not stored on the record, so actor_id stays NULL.
-CREATE FUNCTION af_0006_record_consume() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
-BEGIN
- INSERT INTO public.audit_log(id,actor_id,action,target_type,target_id,outcome,details) VALUES (gen_random_uuid(),NULL,'registry.consume','registry_records',NEW.id,'ok',jsonb_build_object('number',NEW.number,'consumed_at',NEW.consumed_at));
- RETURN NULL;
-END $$;
-CREATE TRIGGER registry_records_consume AFTER UPDATE OF consumed_at ON registry_records FOR EACH ROW WHEN (OLD.consumed_at IS DISTINCT FROM NEW.consumed_at) EXECUTE FUNCTION af_0006_record_consume();
 CREATE TRIGGER regulation_versions_content BEFORE UPDATE OR DELETE ON regulation_versions FOR EACH ROW EXECUTE FUNCTION af_0003_guard_content('{status,status_changed_at,conflict_report,confirmed_by,confirmation_id,activated_at}', '{conflict_report,confirmed_by,confirmation_id,activated_at}');
 CREATE FUNCTION af_0006_status_audit() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
 DECLARE actor uuid; details jsonb;
@@ -260,12 +245,16 @@ BEGIN
 END $$;
 CREATE TRIGGER registry_records_status BEFORE UPDATE ON registry_records FOR EACH ROW EXECUTE FUNCTION af_0006_status_audit();
 CREATE TRIGGER regulation_versions_status BEFORE UPDATE ON regulation_versions FOR EACH ROW EXECUTE FUNCTION af_0006_status_audit();
-GRANT SELECT, INSERT ON regulation_versions, registry_inquiries, registry_records, registry_links, registry_embeddings, registry_inquiry_results TO af_api, af_control;
-GRANT UPDATE (status,status_changed_at,conflict_report,confirmed_by,confirmation_id,activated_at) ON regulation_versions TO af_api, af_control;
-GRANT UPDATE (status,status_changed_at,status_changed_by) ON registry_records TO af_api, af_control;
-GRANT UPDATE (consumed_at) ON registry_records TO af_api;
-GRANT UPDATE (poll_question,poll_options,poll_registered_at) ON registry_inquiries TO af_api, af_control;
-GRANT UPDATE (verdict,difference,conflicts_with_id,verdict_at) ON registry_inquiry_results TO af_api, af_control;
+-- database.md: af_api has select and insert on all six registry tables; af_control only inserts precedents and drafts
+-- (the af_0006_record_insert check on source), so it gets select on all six (database.md "As af_api"), insert on registry_records and no update.
+GRANT SELECT, INSERT ON regulation_versions, registry_inquiries, registry_records, registry_links, registry_embeddings, registry_inquiry_results TO af_api;
+GRANT SELECT, INSERT ON registry_records TO af_control;
+GRANT SELECT ON regulation_versions, registry_inquiries, registry_links, registry_embeddings, registry_inquiry_results TO af_control;
+GRANT UPDATE (status,status_changed_at,conflict_report,confirmed_by,confirmation_id,activated_at) ON regulation_versions TO af_api;
+GRANT UPDATE (status,status_changed_at,status_changed_by) ON registry_records TO af_api;
+GRANT UPDATE (poll_question,poll_options,poll_registered_at) ON registry_inquiries TO af_api;
+GRANT UPDATE (verdict,difference,conflicts_with_id,verdict_at) ON registry_inquiry_results TO af_api;
 GRANT SELECT ON regulation_versions, registry_inquiries, registry_records, registry_links, registry_embeddings, registry_inquiry_results TO af_backup;
-GRANT USAGE, SELECT ON SEQUENCE registry_inquiries_number_seq, registry_records_number_seq TO af_api, af_control;
+GRANT USAGE, SELECT ON SEQUENCE registry_inquiries_number_seq, registry_records_number_seq TO af_api;
+GRANT USAGE, SELECT ON SEQUENCE registry_records_number_seq TO af_control;
 GRANT SELECT ON SEQUENCE registry_inquiries_number_seq, registry_records_number_seq TO af_backup;

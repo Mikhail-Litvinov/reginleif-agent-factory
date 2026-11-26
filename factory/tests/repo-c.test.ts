@@ -45,12 +45,22 @@ describe("migration 0003 repositories", () => {
 		assert.equal((await repo.decisions.byActorKey(id(1), "cancel-1"))?.id, id(3));
 		assert.equal((await repo.decisions.listForTask(id(2))).length, 1);
 		assert.equal((await repo.decisions.updateDelivery(id(3), { deliveryState: "applied", deliveredAt: new Date() }))?.deliveryState, "applied");
-		// An engineer decision needs a chief_engineer run of its task; none exists here, so the database refuses it with the trigger's reason.
+		// An engineer decision needs a chief_engineer run of its task (role exists since 0007): a run of another role is refused with the trigger's reason, a chief_engineer run is accepted.
+		const { taskRuns } = await import("../db/schema/runs.ts");
+		const { taskDecisions } = await import("../db/schema/decisions.ts");
+		// database.md line 437: a chief_engineer run needs a right request naming its task as handler (or a BLOCKED task handled by the chief engineer).
+		await client`INSERT INTO right_requests (id, task_id, handling_task_id, participant, action, target, conditions, request_hash) VALUES (${id(56)}, ${id(2)}, ${id(2)}, 'implementer', 'read', 'example', '{}'::jsonb, 'repo-c-request')`;
+		await db.insert(taskRuns).values([
+			{ id: id(54), taskId: id(2), attemptNumber: 1, role: "implementer", status: "created" },
+			{ id: id(53), taskId: id(2), attemptNumber: 2, role: "chief_engineer", status: "created" },
+		]);
 		await assert.rejects(
-			db.insert((await import("../db/schema/decisions.ts")).taskDecisions).values({ id: id(52), taskId: id(2), kind: "physical_decision", engineerRunId: id(53), channel: "api", idempotencyKey: "engineer-1", deliveryState: "applied" }),
+			db.insert(taskDecisions).values({ id: id(55), taskId: id(2), kind: "physical_decision", engineerRunId: id(54), channel: "api", idempotencyKey: "engineer-0", deliveryState: "applied" }),
 			(error) => databaseRefusal(error)?.reason === "engineer decision requires chief engineer run of task" && databaseRefusal(error)?.sqlstate === "P0001",
 		);
-		assert.equal(await repo.decisions.byEngineerKey(id(53), "engineer-1"), undefined);
+		assert.equal(await repo.decisions.byEngineerKey(id(54), "engineer-0"), undefined);
+		await db.insert(taskDecisions).values({ id: id(52), taskId: id(2), kind: "physical_decision", engineerRunId: id(53), channel: "api", idempotencyKey: "engineer-1", deliveryState: "applied" });
+		assert.equal((await repo.decisions.byEngineerKey(id(53), "engineer-1"))?.id, id(52));
 		assert.equal((await repo.outbox.get(id(4)))?.id, id(4));
 		assert.equal((await repo.outbox.listPending()).some((row) => row.id === id(4)), true);
 		await assert.rejects(db.transaction(async (tx) => {
