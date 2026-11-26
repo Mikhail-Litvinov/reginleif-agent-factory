@@ -1,5 +1,5 @@
 // PsqlSession reads the output of a child process in chunks, and a chunk boundary can fall inside a multibyte character
-// (an identifier such as a table named "таблица" or a stderr message that quotes one). Each chunk decoded on its own would
+// (an identifier such as a table named with Cyrillic letters or a stderr message that quotes one). Each chunk decoded on its own would
 // turn the split character into replacement characters, so stdout and stderr are decoded as streams (a decoder that holds
 // the incomplete tail of one chunk until the next arrives).
 import assert from "node:assert/strict";
@@ -7,7 +7,8 @@ import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import { Utf8Lines, Utf8Text } from "../deploy/lib.ts";
 
-const NAME = "таблица_日本語_😀";
+// The first part is a Cyrillic word ("table"), written as escapes so the source holds no Cyrillic.
+const NAME = "\u0442\u0430\u0431\u043b\u0438\u0446\u0430_日本語_😀";
 
 // Every split of the bytes into two chunks, so that each multibyte character is cut at each of its inner positions.
 const splits = (text: string): Buffer[][] => {
