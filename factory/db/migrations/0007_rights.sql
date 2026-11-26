@@ -87,16 +87,20 @@ BEGIN
 END $$;
 CREATE TRIGGER right_answers_order BEFORE INSERT ON right_answers FOR EACH ROW EXECUTE FUNCTION af_0007_answer_order();
 CREATE FUNCTION af_0007_grant_guard() RETURNS trigger LANGUAGE plpgsql AS $$
-DECLARE a right_answers; r right_requests;
+DECLARE a right_answers; r right_requests; task_status text;
 BEGIN
  SELECT * INTO a FROM right_answers WHERE id = NEW.answer_id;
  SELECT * INTO r FROM right_requests WHERE id = NEW.request_id;
- IF EXISTS (SELECT 1 FROM task_runs run JOIN rights_suspensions s ON s.agent_id = run.agent_id AND s.ended_at IS NULL WHERE run.id = r.run_id) THEN RAISE EXCEPTION 'requesting agent suspended'; END IF;
  IF a.answer IS DISTINCT FROM 'grant' OR a.request_id IS DISTINCT FROM NEW.request_id OR
     (a.step_kind = 'owner') IS DISTINCT FROM (NEW.clause_id IS NULL) OR
     (a.step_kind = 'owner') IS DISTINCT FROM (NEW.granted_by_run_id IS NULL) OR
     (a.step_kind = 'chief_engineer' AND (NEW.clause_id IS DISTINCT FROM a.clause_id OR NEW.granted_by_run_id IS DISTINCT FROM a.answer_run_id)) OR
     NEW.task_id IS DISTINCT FROM r.task_id OR NEW.session_ref IS DISTINCT FROM r.session_ref OR NEW.participant IS DISTINCT FROM r.participant THEN RAISE EXCEPTION 'grant requires matching grant answer and request'; END IF;
+ -- A concurrent task ending or suspension must either see the new grant or prevent it.
+ SELECT status INTO task_status FROM tasks WHERE id = NEW.task_id FOR SHARE;
+ IF NEW.ended_at IS NULL AND task_status IN ('ACCEPTED','REJECTED','CANCELLED','FAILED') THEN RAISE EXCEPTION 'grant task has ended'; END IF;
+ PERFORM 1 FROM agents agent JOIN task_runs requester ON requester.agent_id = agent.id WHERE requester.id = r.run_id FOR UPDATE OF agent;
+ IF EXISTS (SELECT 1 FROM task_runs run JOIN rights_suspensions s ON s.agent_id = run.agent_id AND s.ended_at IS NULL WHERE run.id = r.run_id) THEN RAISE EXCEPTION 'requesting agent suspended'; END IF;
  RETURN NEW;
 END $$;
 CREATE TRIGGER right_grants_answer BEFORE INSERT ON right_grants FOR EACH ROW EXECUTE FUNCTION af_0007_grant_guard();
@@ -229,6 +233,69 @@ BEGIN
  RETURN NEW;
 END $$;
 CREATE TRIGGER registry_records_consumption_audit AFTER UPDATE OF consumed_at ON registry_records FOR EACH ROW EXECUTE FUNCTION af_0007_consumption_audit();
+CREATE FUNCTION af_0007_enqueue_stops(source_id uuid DEFAULT NULL, role_source boolean DEFAULT false,
+ assignment_id uuid DEFAULT NULL, suspended_agent uuid DEFAULT NULL) RETURNS void
+ LANGUAGE sql SET search_path = pg_catalog, public AS $$
+ INSERT INTO public.outbox_events(id,kind,task_id,payload,state,attempts)
+ -- Several rights can end together, including grants closed by the suspension trigger.
+ SELECT md5('af_0007:stop_run:' || pg_current_xact_id()::text || ':' || run.id::text)::uuid,
+        'stop_run', run.task_id, jsonb_build_object('run_id',run.id,'execution_id',run.execution_id), 'pending', 0
+ FROM public.task_runs run
+ LEFT JOIN public.role_assignments assignment ON assignment.id = run.role_assignment_id
+ WHERE run.execution_id IS NOT NULL AND run.finished_at IS NULL
+   AND (run.status IS NULL OR run.status NOT IN ('finished','failed','died','cancelled'))
+   AND (assignment_id IS NULL OR run.role_assignment_id = assignment_id)
+   AND (run.agent_id = suspended_agent
+        OR (source_id IS NOT NULL AND run.profile_rights @> jsonb_build_array(jsonb_build_object('source',source_id)))
+        OR (role_source AND run.profile_rights @> '[{"source":"role"}]'::jsonb
+            AND (assignment_id IS NOT NULL OR assignment.role_id = source_id)))
+ ON CONFLICT (id) DO NOTHING;
+$$;
+REVOKE EXECUTE ON FUNCTION af_0007_enqueue_stops(uuid,boolean,uuid,uuid) FROM PUBLIC;
+
+CREATE FUNCTION af_0007_stop_on_right_end() RETURNS trigger
+ LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+BEGIN
+ CASE TG_TABLE_NAME
+  WHEN 'right_grants', 'registry_records' THEN
+   PERFORM public.af_0007_enqueue_stops(source_id => NEW.id);
+  WHEN 'roles' THEN
+   PERFORM public.af_0007_enqueue_stops(source_id => NEW.id, role_source => true);
+  WHEN 'role_assignments' THEN
+   PERFORM public.af_0007_enqueue_stops(source_id => NEW.role_id, role_source => true, assignment_id => NEW.id);
+  WHEN 'tasks' THEN
+   UPDATE public.right_grants SET ended_at = now(), ended_by = 'task_end'
+   WHERE task_id = NEW.id AND ended_at IS NULL;
+  WHEN 'rights_suspensions' THEN
+   UPDATE public.right_grants grant_row
+   SET ended_at = now(), ended_by = 'critical', suspension_id = NEW.id
+   WHERE grant_row.ended_at IS NULL AND (
+    grant_row.session_ref = NEW.session_ref OR EXISTS (
+     SELECT 1 FROM public.right_requests request
+     JOIN public.task_runs requester ON requester.id = request.run_id
+     WHERE request.id = grant_row.request_id AND requester.agent_id = NEW.agent_id
+    )
+   );
+   PERFORM public.af_0007_enqueue_stops(suspended_agent => NEW.agent_id);
+ END CASE;
+ RETURN NEW;
+END $$;
+REVOKE EXECUTE ON FUNCTION af_0007_stop_on_right_end() FROM PUBLIC;
+
+CREATE TRIGGER right_grants_stop AFTER UPDATE OF ended_at ON right_grants FOR EACH ROW
+ WHEN (OLD.ended_at IS NULL AND NEW.ended_at IS NOT NULL) EXECUTE FUNCTION af_0007_stop_on_right_end();
+CREATE TRIGGER registry_permission_stop AFTER UPDATE OF status ON registry_records FOR EACH ROW
+ WHEN (OLD.kind = 'permission' AND OLD.status = 'active' AND NEW.status = 'revoked') EXECUTE FUNCTION af_0007_stop_on_right_end();
+CREATE TRIGGER roles_stop AFTER UPDATE OF status ON roles FOR EACH ROW
+ WHEN (OLD.status = 'active' AND NEW.status = 'superseded') EXECUTE FUNCTION af_0007_stop_on_right_end();
+CREATE TRIGGER role_assignments_stop AFTER UPDATE OF superseded_at ON role_assignments FOR EACH ROW
+ WHEN (OLD.superseded_at IS NULL AND NEW.superseded_at IS NOT NULL) EXECUTE FUNCTION af_0007_stop_on_right_end();
+CREATE TRIGGER tasks_end_grants AFTER UPDATE OF status ON tasks FOR EACH ROW
+ WHEN (OLD.status IS DISTINCT FROM NEW.status AND NEW.status IN ('ACCEPTED','REJECTED','CANCELLED','FAILED'))
+ EXECUTE FUNCTION af_0007_stop_on_right_end();
+CREATE TRIGGER rights_suspensions_stop AFTER INSERT ON rights_suspensions FOR EACH ROW
+ WHEN (NEW.ended_at IS NULL) EXECUTE FUNCTION af_0007_stop_on_right_end();
+
 CREATE OR REPLACE FUNCTION af_0006_record_content() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
  IF TG_OP = 'DELETE' THEN RAISE EXCEPTION 'registry_records is immutable'; END IF;
