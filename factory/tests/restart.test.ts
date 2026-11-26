@@ -1,7 +1,7 @@
 // Data survive every way the server container can go away and come back, short of deleting its volume.
 import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
-import { psql, run, runChecked, waitHealthy, findContainer } from "../deploy/lib.ts";
+import { psql, realClock, run, runChecked, waitHealthy, findContainer } from "../deploy/lib.ts";
 import { compose, createTestStack, type TestStack } from "./helpers.ts";
 
 describe("restart", () => {
@@ -34,10 +34,12 @@ describe("restart", () => {
 		const name = stack.container;
 		await runChecked("docker", ["exec", name, "sh", "-c", "kill -QUIT 1"]);
 		// Wait on the restart counter and then on health, not on a guessed time.
-		const deadline = Date.now() + 120_000;
+		const deadline = realClock.now() + 120_000;
 		let count = "0";
-		while (Date.now() < deadline && count === "0") {
+		while (realClock.now() < deadline && count === "0") {
 			count = (await run("docker", ["inspect", "--format", "{{.RestartCount}}", name])).stdout.trim();
+				// A short pause between polls: back-to-back `docker inspect` processes only load the host the restart needs.
+				if (count === "0") await realClock.sleep(200);
 		}
 		assert.notEqual(count, "0", "the restart policy did not restart the container");
 		await waitHealthy(name);

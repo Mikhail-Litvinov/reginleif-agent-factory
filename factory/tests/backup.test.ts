@@ -19,6 +19,8 @@ describe("backup and restore check", () => {
 	let good: { manifestPath: string; dumpPath: string; manifest: Manifest };
 
 	let scratch: ScratchServer;
+	let scratchStarting: Promise<ScratchServer>;
+	let cliCheck: Promise<Awaited<ReturnType<typeof run>>>;
 
 	// The real command, once (the intact backup); every other case runs in process against one shared scratch server.
 	const checkCli = (manifestPath: string) => run("node", [CHECK_CLI, "--manifest", manifestPath, "--prefix", "af-test-rc"]);
@@ -38,6 +40,9 @@ describe("backup and restore check", () => {
 
 	before(async () => {
 		work = await mkdtemp(join(tmpdir(), "af-test-backup-"));
+		// The shared scratch server does not depend on the stack: it starts at the same time (its removal is in after()).
+		scratchStarting = startScratch("af-test-rc");
+		scratchStarting.catch(() => {});
 		stack = await createTestStack();
 		const c = stack.container;
 		await psql(c, "af_migrator", [
@@ -48,12 +53,16 @@ describe("backup and restore check", () => {
 			"INSERT INTO child SELECT g, 1 + g % 50 FROM generate_series(1, 200) g;",
 		].join("\n"));
 		good = await backup({ project: stack.project, target: join(work, "good") });
-		scratch = await startScratch("af-test-rc");
+		// The real command starts its own scratch server (about 40 s), so it runs while the in-process cases use the shared one;
+		// the test that reports its result awaits this promise (run() never rejects, so it cannot go unhandled).
+		cliCheck = checkCli(good.manifestPath);
+		scratch = await scratchStarting;
 	});
 	after(async () => {
 		const errors: unknown[] = [];
 		try {
-			await scratch?.close();
+			await cliCheck;
+			await (await scratchStarting?.catch(() => undefined))?.close();
 		} catch (error) {
 			errors.push(error);
 		}
@@ -137,7 +146,7 @@ describe("backup and restore check", () => {
 	});
 
 	it("restore check passes on an intact backup", async () => {
-		const result = await checkCli(good.manifestPath);
+		const result = await cliCheck;
 		assert.equal(result.code, 0, result.stderr);
 		assert.match(result.stdout, /passed/);
 	});

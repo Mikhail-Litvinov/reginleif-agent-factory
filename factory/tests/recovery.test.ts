@@ -24,15 +24,19 @@ const PROBES: Record<(typeof ROLES)[number], string[]> = {
 };
 
 const behaviour = async (container: string): Promise<Record<string, string[]>> => {
-	const result: Record<string, string[]> = {};
-	for (const role of ROLES) {
-		result[role] = [];
-		for (const sql of PROBES[role]) {
-			const answer = await tryPsql(container, role, sql);
-			result[role].push(answer.code === 0 ? `ok:${answer.stdout.trim()}` : "denied");
-		}
-	}
-	return result;
+	// The accounts are probed side by side (each account's statements stay in order): the probes of different accounts touch
+	// different rows (ids 900, 901, 902) or only read, so they do not depend on each other.
+	const perRole = await Promise.all(
+		ROLES.map(async (role) => {
+			const answers: string[] = [];
+			for (const sql of PROBES[role]) {
+				const answer = await tryPsql(container, role, sql);
+				answers.push(answer.code === 0 ? `ok:${answer.stdout.trim()}` : "denied");
+			}
+			return [role, answers] as const;
+		}),
+	);
+	return Object.fromEntries(perRole);
 };
 
 describe("recovery into a new project", () => {
