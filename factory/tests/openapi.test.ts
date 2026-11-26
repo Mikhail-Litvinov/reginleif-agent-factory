@@ -203,6 +203,7 @@ test('worker registration takes a text machine identifier and an integer contrac
 const textIdColumns: Record<string, string> = {
   machine_id: 'database.md:47 workers.machine_id text unique; database.md:85 registry_records.machine_id text nullable',
   press_id: 'database.md:61 task_decisions.press_id text nullable; database.md:85 registry_records.press_id text unique where not null',
+  temporal_activity_id: 'database.md:45 task_runs.temporal_activity_id (no type stated; an arbitrary Temporal id, text in db/schema/runs.ts)',
 };
 const textIdFields = new Set(Object.keys(textIdColumns));
 
