@@ -249,6 +249,25 @@ component stops by process identity every live run whose stored profile contains
 the ending (the outbox `stop_run`); the task goes on with a new attempt and a fresh profile. A run whose profile does not
 contain the right goes on.
 
+## Finishing a stage
+
+The goal of the factory is a working product, not hypothetical absolute perfection. A stage (a phase of
+[modules.md](modules.md), or a stage of a task plan) is finished by this rule, which binds the chief engineer and every
+agent that accepts work:
+
+1. The mandatory checks and the readiness criteria are fixed before the stage starts. For a phase they are its
+   `Criterion` and its `Proving check` in modules.md.
+2. Passing the mandatory checks is the ground for finishing the stage.
+3. A further test is allowed only for a concrete defect, a material risk or a mandatory requirement not yet verified.
+4. Minor remarks, optimisations and better test coverage become separate tasks and do not block the stage.
+5. A repeat review checks that the named defects are fixed and that nothing regressed. It is not an audit of the whole
+   system.
+6. The readiness criteria are not widened during acceptance without grounds.
+7. Cyclic testing, endless reviews and unjustified dragging of a stage are detected by the chief engineer's assistant
+   (personnel.md).
+8. Checks of security, data integrity and recovery are never skipped to save time.
+9. When the criteria are met, the chief engineer finishes the stage and moves to the next.
+
 ## Regulation and its changes
 
 A version is an ordered set of clauses with a number, status and the owner's confirmation; one is active. A change

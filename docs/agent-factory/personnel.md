@@ -165,6 +165,12 @@ items and the last messages. The assistant has no rights over tasks, decisions o
 writes wakes and facts. A stop again at the same point wakes the chief again, at most three times in a row without a
 message from the owner; after the third the assistant tells the owner which item the chief stands on.
 
+Duty 7 of the stage-finishing rule (governance.md, Finishing a stage): the assistant also detects a looping stage, that is
+repeated review or test rounds on a stage whose checks already passed, or added work that names no defect and only adds
+tests or speed. It then wakes the chief with the order to finish the stage by the rule, not to continue. A defect of the
+result, security, data integrity or recovery is never a loop. When unsure it stays silent, and the fact is recorded like
+any other wake.
+
 ## Modes
 
 `personnel.mode`: `observe` first. Facts, assessments and incidents are collected, measures of levels 3 to 6 are only

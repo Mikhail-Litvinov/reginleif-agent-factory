@@ -13,6 +13,11 @@ process with the same pid, a pruned `rig exec` record, a crash before `identity.
 without its tree. S1, S3, S5 and S6 are proven in the phase that builds on them (S6 in phase 3 against the real
 proxy, with the D28 part that the trial did not cover).
 
+The `Criterion` line of each phase below is its readiness criterion, fixed before the phase starts, and its `Proving check`
+names the mandatory checks. Both are the up-front criteria of the stage-finishing rule
+([governance.md](governance.md), Finishing a stage): when they pass, the phase is finished; they are not widened during
+acceptance, and findings outside them become separate tasks.
+
 ## Phase 1: PostgreSQL
 
 Criterion (spec): infrastructure keeps state after a reboot and passes a restore check. The Temporal server is not part
