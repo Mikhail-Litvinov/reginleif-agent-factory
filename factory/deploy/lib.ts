@@ -287,7 +287,12 @@ export const ownedResources = async (runId: string): Promise<OwnedResources> => 
 
 // Removes exactly what carries this run's label (containers with their anonymous volumes, then networks, then volumes).
 // Every command's exit code is checked; failures are collected and thrown together, after all steps were tried.
-export const removeOwned = async (runId: string): Promise<void> => {
+//
+// This is the only place of the package that removes docker resources (tests/removal-guard.test.ts fails when any other
+// file does): a removal is always selected by the run's own label, never by a project name or a name pattern, so it
+// cannot reach anything this run did not create. `keepVolumes` leaves the labelled volumes in place (a stack that is taken
+// down and brought up again on the same data); the final check then ignores them.
+export const removeOwned = async (runId: string, options: { keepVolumes?: boolean } = {}): Promise<void> => {
 	const found = await ownedResources(runId);
 	const errors: string[] = [];
 	const step = async (args: string[], ids: string[]): Promise<void> => {
@@ -297,10 +302,10 @@ export const removeOwned = async (runId: string): Promise<void> => {
 	};
 	await step(["rm", "-f", "-v"], found.containers);
 	await step(["network", "rm"], found.networks);
-	await step(["volume", "rm"], found.volumes);
+	if (!options.keepVolumes) await step(["volume", "rm"], found.volumes);
 	if (errors.length > 0) throw new Error(errors.join("; "));
 	const left = await ownedResources(runId);
-	const count = left.containers.length + left.networks.length + left.volumes.length;
+	const count = left.containers.length + left.networks.length + (options.keepVolumes ? 0 : left.volumes.length);
 	if (count > 0) throw new Error(`${count} resource(s) with label ${RUN_LABEL}=${runId} remain after removal`);
 };
 

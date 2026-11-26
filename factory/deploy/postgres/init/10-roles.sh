@@ -62,9 +62,9 @@ af_init_roles() {
 	} | af_psql_bootstrap
 }
 
-# psql as the bootstrap role with a passfile in tmpfs (mode 0600, removed on return), not the PGPASSWORD that the
-# entrypoint exports for its temporary server: the variable is dropped for this process, so no child environment
-# of the init holds a password. The passfile path is a path, not a secret.
+# psql as the bootstrap role with its own passfile in tmpfs (mode 0600, removed on return). The entrypoint wrapper
+# (../entrypoint.sh) exports no password variable, only the path of its passfile, which 99-finish.sh removes at the end;
+# this one is separate so the role statements do not depend on that file. A passfile path is a path, not a secret.
 af_psql_bootstrap() {
 	local passfile status
 	af_password af_bootstrap || return 1

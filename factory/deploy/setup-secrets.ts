@@ -11,10 +11,12 @@
 // the result must hold only those three, with no other entry. Elsewhere the check is the mode: nothing for group or
 // others. A directory that already holds secrets is never restricted silently: when its access is wider than that, the
 // command refuses and says which entry is the problem, and the owner decides. A directory that exists but is still empty
-// (for example one just made by mkdtemp) has nothing to protect yet, so it is restricted and then verified.
+// (for example one just made by mkdtemp) has nothing to protect yet, so its access is set explicitly (inheritance off,
+// every entry other than the three removed) and READ BACK before the first secret is written; when that verification
+// fails, nothing is written.
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 // One secret per account; the first is the bootstrap superuser of the server (init and recovery only).
@@ -43,9 +45,14 @@ const currentUserSid = (): string => {
 export const aclSids = (path: string): string[] => {
 	// Get-Acl asked for SecurityIdentifier objects: the SID is never translated to a (localized) name.
 	const script =
-		"$a = Get-Acl -LiteralPath $args[0]; " +
+		"$a = Get-Acl -LiteralPath $env:AF_ACL_PATH; " +
 		"$a.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) | ForEach-Object { $_.IdentityReference.Value }";
-	const result = spawnSync("powershell", ["-NoProfile", "-NonInteractive", "-Command", `& { ${script} }`, path], { encoding: "utf8" });
+	// The path goes through the environment: with -Command, extra arguments are joined into the command text, so a path
+	// with a space reached Get-Acl cut at the first space and the read-back came back empty.
+	const result = spawnSync("powershell", ["-NoProfile", "-NonInteractive", "-Command", script], {
+		encoding: "utf8",
+		env: { ...process.env, AF_ACL_PATH: path },
+	});
 	if (result.status !== 0) throw new Error(`could not read the ACL of ${path}: ${result.stderr || result.stdout}`);
 	return result.stdout.split(/\r?\n/).map((l) => l.trim()).filter((l) => /^S-1-\d+(?:-\d+)*$/.test(l));
 };
@@ -77,12 +84,27 @@ export const verifySecretsAccess = (directory: string): string[] => {
 	return problems;
 };
 
+// Sets the access of a directory that holds no secret yet, explicitly and not by what it happens to carry: inheritance
+// off, the three allowed holders granted, and every other entry the directory already had (a grant or a deny, inherited
+// ones were turned into explicit entries by the inheritance step) removed by SID. Elsewhere: mode 700.
 const restrict = (directory: string): void => {
-	if (process.platform !== "win32") return;
-	const grants = [currentUserSid(), SID_SYSTEM, SID_ADMINISTRATORS].map((sid) => `*${sid}:(OI)(CI)F`);
-	const result = spawnSync("icacls", [directory, "/inheritance:r", "/grant:r", ...grants], { encoding: "utf8" });
-	if (result.status !== 0) throw new Error(`icacls failed on the secrets directory: ${result.stderr || result.stdout}`);
+	if (process.platform !== "win32") {
+		chmodSync(directory, 0o700);
+		return;
+	}
+	const allowed = [currentUserSid(), SID_SYSTEM, SID_ADMINISTRATORS];
+	const icacls = (args: string[]): void => {
+		const result = spawnSync("icacls", [directory, ...args], { encoding: "utf8" });
+		if (result.status !== 0) throw new Error(`icacls failed on the secrets directory: ${result.stderr || result.stdout}`);
+	};
+	// "/inheritance:r" copies nothing (the inherited entries are dropped); "/grant:r" replaces those holders' own entries.
+	icacls(["/inheritance:r", "/grant:r", ...allowed.map((sid) => `*${sid}:(OI)(CI)F`)]);
+	for (const sid of new Set(aclSids(directory))) {
+		if (!allowed.includes(sid)) icacls(["/remove", `*${sid}`]);
+	}
 };
+
+type Lock = (directory: string) => void;
 
 const refuse = (target: string, problems: string[]): Error =>
 	new Error(
@@ -91,7 +113,11 @@ const refuse = (target: string, problems: string[]): Error =>
 			"\nRemove those entries yourself (for example icacls <path> /remove:g *<sid>) and run the command again.",
 	);
 
-export const createSecrets = (directory: string): SecretsResult => {
+// The order is the rule: no secret byte is written to a place whose protection was not verified first. A directory that
+// holds secrets is verified and refused when it is too open; one that holds none is locked, then READ BACK, and only a
+// verified directory gets files (they inherit its access, and are verified again after). `options.lock` replaces the
+// locking step, for the test that proves nothing is written when the verification fails.
+export const createSecrets = (directory: string, options: { lock?: Lock } = {}): SecretsResult => {
 	const target = resolve(directory);
 	const reused = existsSync(target) && secretFiles(target).length > 0;
 	if (reused) {
@@ -99,7 +125,9 @@ export const createSecrets = (directory: string): SecretsResult => {
 		if (problems.length > 0) throw refuse(target, problems);
 	} else {
 		mkdirSync(target, { recursive: true, mode: 0o700 });
-		restrict(target);
+		(options.lock ?? restrict)(target);
+		const problems = verifySecretsAccess(target);
+		if (problems.length > 0) throw new Error(`the secrets directory ${target} is not restricted as required; nothing was written:\n${problems.map((p) => `  - ${p}`).join("\n")}`);
 	}
 	const created: string[] = [];
 	const kept: string[] = [];

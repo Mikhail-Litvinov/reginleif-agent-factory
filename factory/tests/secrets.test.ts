@@ -1,13 +1,14 @@
 // Secrets: created once and never overwritten, kept out of the container's inspect data, required to start the stack.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { chmodSync } from "node:fs";
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
-import { composeFilePath, run } from "../deploy/lib.ts";
+import { ownedComposeArgs, run } from "../deploy/lib.ts";
 import { SECRET_NAMES, SID_ADMINISTRATORS, SID_SYSTEM, aclSids, createSecrets, verifySecretsAccess } from "../deploy/setup-secrets.ts";
-import { newProject, sharedStack, type TestStack } from "./helpers.ts";
+import { Cleanups, leftovers, sharedStack, trackedProject, type TestStack } from "./helpers.ts";
 
 const SETUP_CLI = new URL("../deploy/setup-secrets.ts", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
 
@@ -82,6 +83,21 @@ describe("secrets", () => {
 		}
 	});
 
+	// The documented commands take a path the user typed, and a Windows path often holds a space or a quote: the ACL is
+	// read back for the exact path, never for the part of it before the first space.
+	it("a directory whose path holds spaces is locked and verified like any other, and a Users grant on it is still found", onWindows, async () => {
+		const dir = join(work, "with some spaces", "secrets dir");
+		createSecrets(dir);
+		assert.deepEqual(verifySecretsAccess(dir), []);
+		assert.ok(aclSids(dir).length >= 3, "the ACL of a path with spaces must be read back, not come back empty");
+		grantUsers(dir);
+		assert.ok(aclSids(dir).includes(USERS_SID));
+		assert.throws(() => createSecrets(dir), /refused[\s\S]*S-1-5-32-545/);
+		const check = await run("node", [SETUP_CLI, "--check", dir]);
+		assert.equal(check.code, 1);
+		assert.match(check.stderr, /S-1-5-32-545/);
+	});
+
 	it("a reused directory with a grant to the Users SID is refused, named, and not changed", onWindows, async () => {
 		const dir = join(work, "acl-users-dir");
 		createSecrets(dir);
@@ -100,27 +116,40 @@ describe("secrets", () => {
 		assert.throws(() => createSecrets(dir), /refused[\s\S]*af_api[\s\S]*S-1-5-32-545/);
 	});
 
-	it("an empty existing directory that carries a Users grant ends in an error, not in a silent success", onWindows, async () => {
+	it("an empty existing directory that carries a Users grant has the grant removed before any secret is written", onWindows, async () => {
 		const dir = await mkdtemp(join(work, "acl-empty-"));
 		grantUsers(dir);
-		assert.throws(() => createSecrets(dir), /not restricted as required[\s\S]*S-1-5-32-545/);
+		assert.ok(aclSids(dir).includes(USERS_SID));
+		createSecrets(dir);
+		assert.deepEqual(verifySecretsAccess(dir), []);
+		for (const path of [dir, ...SECRET_NAMES.map((n) => join(dir, n))]) assert.equal(aclSids(path).includes(USERS_SID), false, path);
+	});
+
+	// No secret byte is written to a place whose protection was not verified first: when the directory cannot be made
+	// restricted (here the locking step is replaced by one that does nothing), the command fails with no secret file written.
+	it("when the directory is not verified restricted, no secret file is written at all", async () => {
+		const dir = await mkdtemp(join(work, "unverified-"));
+		if (process.platform === "win32") grantUsers(dir);
+		else chmodSync(dir, 0o755);
+		assert.throws(() => createSecrets(dir, { lock: () => {} }), /not restricted as required/);
+		assert.deepEqual(await readdir(dir), []);
 	});
 
 	it("the stack refuses to start without AF_SECRETS_DIR", async () => {
-		// A random project, removed in a finally also when the guard under test fails and something does start.
-		const project = newProject();
-		const env = { AF_SECRETS_DIR: "" };
+		// Everything this test could create carries its own run label, and only that label is removed in the finally, also
+		// when the guard under test fails and something does start.
+		const cleanups = new Cleanups();
+		const { project, runId } = trackedProject(cleanups);
+		const env = { AF_SECRETS_DIR: "", AF_RUN_ID: runId };
 		try {
-			const result = await run("docker", ["compose", "-p", project, "-f", composeFilePath(), "config"], { env });
+			const result = await run("docker", ownedComposeArgs(project, runId, "config"), { env });
 			assert.notEqual(result.code, 0);
 			assert.match(result.stderr, /AF_SECRETS_DIR/);
-			const up = await run("docker", ["compose", "-p", project, "-f", composeFilePath(), "up", "-d"], { env });
+			const up = await run("docker", ownedComposeArgs(project, runId, "up", "-d"), { env });
 			assert.notEqual(up.code, 0);
-			const ps = await run("docker", ["ps", "-a", "--filter", `label=com.docker.compose.project=${project}`, "-q"]);
-			assert.equal(ps.stdout.trim(), "");
+			assert.deepEqual(await leftovers(runId), []);
 		} finally {
-			const down = await run("docker", ["compose", "-p", project, "-f", composeFilePath(), "down", "-v", "--remove-orphans"], { env: { AF_SECRETS_DIR: tmpdir() } });
-			assert.equal(down.code, 0, `cleanup failed: ${down.stderr}`);
+			await cleanups.runAll();
 		}
 	});
 
@@ -145,10 +174,10 @@ describe("secrets", () => {
 			}
 		});
 
-		it("the container environment holds no password and only file references", async () => {
+		it("the container environment holds no password variable of either form, only the file path of the initdb option", async () => {
 			const env = (await run("docker", ["inspect", "--format", "{{json .Config.Env}}", stack.container])).stdout;
-			assert.match(env, /POSTGRES_PASSWORD_FILE=\/run\/secrets\/af_bootstrap/);
-			assert.equal(/POSTGRES_PASSWORD=/.test(env), false);
+			assert.equal(/POSTGRES_PASSWORD/.test(env), false);
+			assert.match(env, /--pwfile=\/run\/secrets\/af_bootstrap/);
 		});
 
 		it("the secrets are mounted read-only files, not copied into the image", async () => {

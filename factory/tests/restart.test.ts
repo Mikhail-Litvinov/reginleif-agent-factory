@@ -1,7 +1,7 @@
 // Data survive every way the server container can go away and come back, short of deleting its volume.
 import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
-import { psql, realClock, run, runChecked, waitHealthy, findContainer } from "../deploy/lib.ts";
+import { psql, realClock, removeOwned, run, runChecked, waitHealthy, findContainer } from "../deploy/lib.ts";
 import { compose, createTestStack, type TestStack } from "./helpers.ts";
 
 describe("restart", () => {
@@ -71,10 +71,10 @@ describe("restart", () => {
 
 	it("survive down and up without -v", async () => {
 		await writeRow();
-		const down = await compose(stack, "down");
-		assert.equal(down.code, 0, down.stderr);
+		// The container and network of this run go away (by the run's label), the volume stays.
+		await removeOwned(stack.runId, { keepVolumes: true });
 		const gone = await run("docker", ["ps", "-aq", "--filter", `label=com.docker.compose.project=${stack.project}`]);
-		assert.equal(gone.stdout.trim(), "", "the container must be gone after down");
+		assert.equal(gone.stdout.trim(), "", "the container must be gone after the removal");
 		const volume = await run("docker", ["volume", "inspect", `${stack.project}_pgdata`]);
 		assert.equal(volume.code, 0, "the volume must stay after down");
 		const up = await compose(stack, "up", "-d");

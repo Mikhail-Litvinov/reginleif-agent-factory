@@ -14,13 +14,22 @@ services:
     image: pgvector/pgvector:0.8.7-pg16-bookworm@sha256:484e838076e04939d27d3e176e91c86eea96236126023be8d3059761122e579f
     restart: unless-stopped
     stop_grace_period: 30s
+    # The wrapper (deploy/postgres/entrypoint.sh) hands the image's entrypoint the bootstrap password without any
+    # variable or argument: see it and docs/agent-factory/deployment.md "No password in any environment".
+    entrypoint: ["bash", "/etc/agent-factory/entrypoint.sh"]
     command: ["postgres", "-c", "hba_file=/etc/agent-factory/pg_hba.conf"]
     environment:
       POSTGRES_USER: af_bootstrap
       POSTGRES_DB: postgres
-      POSTGRES_PASSWORD_FILE: /run/secrets/af_bootstrap
+      # No POSTGRES_PASSWORD and no POSTGRES_PASSWORD_FILE: the image entrypoint exports the password to every child
+      # process, the initdb call and the psql calls of the init server alike. The password reaches initdb through
+      # --pwfile (a path to the secret file). The image refuses to initialise without a password variable unless this
+      # option is "trust"; here it only satisfies that check. It also makes the entrypoint append a "trust for all
+      # hosts" rule to the data directory's pg_hba.conf, which the server does not read (hba_file above) and which
+      # init/99-finish.sh rewrites to scram-sha-256 anyway.
+      POSTGRES_HOST_AUTH_METHOD: trust
       # Checksums on pages, and scram-sha-256 for local and network connections alike (the default is trust for local).
-      POSTGRES_INITDB_ARGS: --data-checksums --auth-local=scram-sha-256 --auth-host=scram-sha-256
+      POSTGRES_INITDB_ARGS: --data-checksums --auth-local=scram-sha-256 --auth-host=scram-sha-256 --pwfile=/run/secrets/af_bootstrap
     ports:
       - target: 5432
         published: "${AF_PG_PORT:-55432}"
@@ -30,6 +39,7 @@ services:
       - pgdata:/var/lib/postgresql/data
       - ./postgres/init:/docker-entrypoint-initdb.d:ro
       - ./postgres/pg_hba.conf:/etc/agent-factory/pg_hba.conf:ro
+      - ./postgres/entrypoint.sh:/etc/agent-factory/entrypoint.sh:ro
     secrets:
       - af_bootstrap
       - af_migrator
