@@ -15,12 +15,13 @@
 import { randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { after } from "node:test";
 import type { OwnedDir } from "../deploy/owned.ts";
 import { createSecrets } from "../deploy/setup-secrets.ts";
 import { currentOwner } from "./dead-owners.ts";
 import { disposeScratch, makeScratch } from "./scratch.ts";
-import { findContainer, freePort, newRunId, ownedResources, removeOwned, run, stackArgs, stackEnv, startStack, waitHealthy, type RunResult } from "../deploy/lib.ts";
+import { findContainer, freePort, newRunId, ownedResources, removeOwned, run, runChecked, stackArgs, stackEnv, startStack, waitHealthy, type RunResult } from "../deploy/lib.ts";
 
 // Every stack this process creates is labelled with this owner (compose.run.yml, read from the environment by compose).
 process.env.AF_OWNER = currentOwner();
@@ -172,6 +173,60 @@ export const sharedStack = async (): Promise<TestStack> => {
 		dispose: async () => {},
 		secret: (name) => readFile(join(info.secretsDir, name), "utf8"),
 	};
+};
+
+// The database bench stack: a second stack of the run, started by global-setup.ts only next to the shared one. It differs
+// from it by a third compose file that mounts a test pg_hba.conf allowing the application roles to log in to the per-file
+// databases af_test_* (the production pg_hba.conf allows the network only to agent_factory and stays as it is).
+export const BENCH_STACK_ENV = "AF_BENCH_STACK";
+const benchFile = (name: string): string => fileURLToPath(new URL(`./bench/${name}`, import.meta.url));
+
+/** Compose arguments of the bench stack: the owned project plus the test override. */
+export const benchStackArgs = (options: SharedStackInfo, ...rest: string[]): string[] =>
+	stackArgs(options, "-f", benchFile("compose.bench.yml"), ...rest);
+export const benchStackEnv = (options: SharedStackInfo): Record<string, string> => ({ ...stackEnv(options), AF_BENCH_HBA: benchFile("pg_hba.bench.conf") });
+
+/** Registers the cleanups of a bench stack and returns its info (nothing exists yet); the caller runs startBenchStack. */
+export const newBenchStackInfo = async (cleanups: Cleanups): Promise<SharedStackInfo> => {
+	const secretsDir = await newSecretsDir(cleanups);
+	const port = await freePort();
+	const { project, runId } = trackedProject(cleanups);
+	return { project, runId, secretsDir, port };
+};
+
+/** Starts the bench stack and waits until it is healthy. */
+export const startBenchStack = async (info: SharedStackInfo): Promise<string> => {
+	await runChecked("docker", benchStackArgs(info, "up", "-d"), { env: benchStackEnv(info) });
+	const container = await findContainer(info.project);
+	await waitHealthy(container);
+	return container;
+};
+
+// The run-wide bench stack of global setup (healthy on return). Without global setup (a file run by hand) it starts an
+// own one that dispose() removes.
+export const benchStack = async (): Promise<TestStack> => {
+	const text = process.env[BENCH_STACK_ENV];
+	if (text) {
+		const info = JSON.parse(text) as SharedStackInfo;
+		const container = await findContainer(info.project);
+		await waitHealthy(container);
+		return { ...info, container, dispose: async () => {}, secret: (name) => readFile(join(info.secretsDir, name), "utf8") };
+	}
+	const cleanups = new Cleanups();
+	try {
+		return await cleanups.track((async () => {
+			const info = await newBenchStackInfo(cleanups);
+			const container = await startBenchStack(info);
+			return { ...info, container, dispose: () => cleanups.runAll(), secret: (name: string) => readFile(join(info.secretsDir, name), "utf8") };
+		})());
+	} catch (error) {
+		try {
+			await cleanups.runAll();
+		} catch (cleanupError) {
+			throw new AggregateError([error, cleanupError], "creating the bench stack failed, and so did removing what it had created");
+		}
+		throw error;
+	}
 };
 
 export const compose = (stack: TestStack, ...args: string[]): Promise<RunResult> =>

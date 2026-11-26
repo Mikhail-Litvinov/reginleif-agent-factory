@@ -11,7 +11,7 @@
 import { freePort, newRunId, removeOwned, runChecked, stackArgs, stackEnv } from "../deploy/lib.ts";
 import { sweepStale } from "./dead-owners.ts";
 import { newPaths, snapshotUntracked, worktreeGuardMessage } from "./worktree-guard.ts";
-import { Cleanups, newProject, newSecretsDir, SHARED_STACK_ENV, type SharedStackInfo } from "./helpers.ts";
+import { BENCH_STACK_ENV, benchStackArgs, benchStackEnv, Cleanups, newBenchStackInfo, newProject, newSecretsDir, SHARED_STACK_ENV, type SharedStackInfo } from "./helpers.ts";
 
 const cleanups = new Cleanups();
 let untrackedAtStart: string[] | undefined;
@@ -36,6 +36,11 @@ export const globalSetup = async (): Promise<void> => {
 		const info: SharedStackInfo = { project, runId, secretsDir, port };
 		await runChecked("docker", stackArgs(info, "up", "-d"), { env: stackEnv(info) });
 		process.env[SHARED_STACK_ENV] = JSON.stringify(info);
+		// The bench stack (own secrets, run id and port; test pg_hba.conf), up next to the shared one; its health is awaited by
+		// the first bench file, like the shared stack's.
+		const bench = await newBenchStackInfo(cleanups);
+		await runChecked("docker", benchStackArgs(bench, "up", "-d"), { env: benchStackEnv(bench) });
+		process.env[BENCH_STACK_ENV] = JSON.stringify(bench);
 	} catch (error) {
 		try {
 			await cleanups.runAll();

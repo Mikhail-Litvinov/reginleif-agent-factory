@@ -1,0 +1,9 @@
+# Third compose file of the database bench stack (tests only): replaces the mount of pg_hba.conf with the test one.
+# AF_BENCH_HBA is the absolute path of tests/bench/pg_hba.bench.conf, set by the test harness.
+services:
+  postgres:
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+      - ${AF_BENCH_HBA:?set AF_BENCH_HBA}:/etc/agent-factory/pg_hba.conf:ro
+      - ./postgres/entrypoint.sh:/etc/agent-factory/entrypoint.sh:ro

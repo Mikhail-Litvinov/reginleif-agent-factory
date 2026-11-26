@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { after } from "node:test";
 import postgres from "postgres";
 import { psql, type Clock } from "../deploy/lib.ts";
-import { SHARED_STACK_ENV, sharedStack } from "./helpers.ts";
+import { BENCH_STACK_ENV, benchStack } from "./helpers.ts";
 
 export interface DatabaseBench {
 	readonly database: string;
@@ -36,7 +36,7 @@ const connectionUrl = (role: string, password: string, port: number, database: s
 	`postgres://${encodeURIComponent(role)}:${encodeURIComponent(password)}@127.0.0.1:${port}/${database}`;
 
 export const createDatabaseBench = async (testFileUrl: string): Promise<DatabaseBench> => {
-	const stack = await sharedStack();
+	const stack = await benchStack();
 	const database = databaseNameForFile(stack.runId, testFileUrl);
 	const quotedDatabase = quoteIdentifier(database);
 	const dropDatabase = () => psql(stack.container, "af_bootstrap", `DROP DATABASE IF EXISTS ${quotedDatabase} WITH (FORCE);`, { database: "postgres" });
@@ -51,13 +51,13 @@ export const createDatabaseBench = async (testFileUrl: string): Promise<Database
 	} catch (error) {
 		const cleanupErrors: unknown[] = [];
 		await dropDatabase().catch((cleanupError) => cleanupErrors.push(cleanupError));
-		if (!process.env[SHARED_STACK_ENV]) await stack.dispose().catch((cleanupError) => cleanupErrors.push(cleanupError));
+		if (!process.env[BENCH_STACK_ENV]) await stack.dispose().catch((cleanupError) => cleanupErrors.push(cleanupError));
 		if (cleanupErrors.length > 0) throw new AggregateError([error, ...cleanupErrors], "database setup failed and cleanup also failed");
 		throw error;
 	}
 };
 
-const makeBench = (database: string, stack: Awaited<ReturnType<typeof sharedStack>>, migratorPassword: string, apiPassword: string, dropDatabase: () => Promise<string>): DatabaseBench => {
+const makeBench = (database: string, stack: Awaited<ReturnType<typeof benchStack>>, migratorPassword: string, apiPassword: string, dropDatabase: () => Promise<string>): DatabaseBench => {
 	let disposed = false;
 	const bench: DatabaseBench = {
 		database,
@@ -69,7 +69,7 @@ const makeBench = (database: string, stack: Awaited<ReturnType<typeof sharedStac
 			if (disposed) return;
 			const errors: unknown[] = [];
 			await dropDatabase().catch((error) => errors.push(error));
-			if (!process.env[SHARED_STACK_ENV]) await stack.dispose().catch((error) => errors.push(error));
+			if (!process.env[BENCH_STACK_ENV]) await stack.dispose().catch((error) => errors.push(error));
 			if (errors.length > 0) throw new AggregateError(errors, "database bench cleanup failed");
 			disposed = true;
 		},
