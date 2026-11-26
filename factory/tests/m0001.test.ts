@@ -43,6 +43,9 @@ it("applies 0001 and enforces its history, soft deletion and account rights", as
 			VALUES ('00000000-0000-7000-8000-000000000008','00000000-0000-7000-8000-000000000009','action','project','00000000-0000-7000-8000-000000000002','ok','hash');
 		`);
 		for (const table of tables) await assert.rejects(admin.unsafe(`DELETE FROM ${table}`), /forbidden|immutable/i, table);
+		await assert.rejects(admin`DELETE FROM routing_rules`, /forbidden/i);
+		await admin`UPDATE routing_rules SET deleted_at = now()`;
+		assert.ok((await admin<{ deleted_at: Date }[]>`SELECT deleted_at FROM routing_rules WHERE id = '00000000-0000-7000-8000-000000000005'`)[0]?.deleted_at instanceof Date);
 		for (const table of immutable) await assert.rejects(admin.unsafe(`UPDATE ${table} SET id = id`), /immutable/i, table);
 		await assert.rejects(admin`UPDATE projects SET deleted_at = now()`, /archived/i);
 		await admin`UPDATE projects SET archived_at = now()`;
