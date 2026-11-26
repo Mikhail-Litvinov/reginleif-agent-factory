@@ -11,8 +11,11 @@ was touched by the session (or it is gone), the wake limit is reached. The Stop 
 list is the truth about background tasks when it is present (every running entry counts, the hook's own
 included: silence is the safe side); without it the shared module of the subagent-tasks-guard feature reads
 the transcript. Otherwise one cheap model (Haiku, through reflect.ask, the call reflection uses) reads the
-plans, the user's rules, the latest user messages and the current turn, and answers ok or idle. Idle wakes the
-session with the next item. Transcript parsing, rules loading and the model call are shared with reflection
+plans, the user's rules, the latest user messages and the current turn, and answers ok, idle or loop. Idle wakes the
+session with the next item. Loop (duty 7 of the stage-finishing rule, personnel.md) means the session circles on a
+stage whose mandatory checks passed: repeated review or test rounds, or added tests or speed with no defect named;
+it goes the same way as idle (one verdict, no extra model call, the same counter, limit and fail-closed checks),
+but its wake tells the session to finish the stage by the rule instead of continuing. Transcript parsing, rules loading and the model call are shared with reflection
 (features/reflection/hooks/reflect.py); reflection's own behaviour is not touched.
 
 The wake does not act by itself: it reaches the main session, which knows the whole context and decides, and
@@ -70,7 +73,7 @@ SCAN_VERSION = 1  # the layout of the saved scan state; a cache of another versi
 FINGERPRINT = 4096  # bytes hashed at the start of the transcript and just before the saved point
 SCAN_KEEP_DAYS = 7  # a session's scan cache unused for this long is removed when another is written
 MODEL = "haiku"
-VERDICTS = ["ok", "idle"]
+VERDICTS = ["ok", "idle", "loop"]
 SCHEMA = json.dumps({
     "type": "object",
     "properties": {
@@ -798,8 +801,28 @@ def normalized(item: str) -> str:
     return " ".join(item.lower().split())
 
 
+def loop_wake_text(answer: dict, wakes: int) -> str:
+    """The wake for a session that circles on a stage whose checks passed: finish the stage, do not continue."""
+    item = answer.get("item") or "the current stage"
+    head = (f"{OWN_MARKER} Your work on {item} looks like a loop: {answer.get('evidence', '')}. "
+            "First check whether the user has written since or work is running (a background task, an agent); if so, ignore this "
+            "reminder and answer it with one short line at most.")
+    rule = ("Otherwise finish the stage by the owner's stage-finishing rule instead of continuing: passing the mandatory checks and "
+            "readiness criteria fixed before the stage is the ground to finish it; an extra test is allowed only for a concrete defect, "
+            "a material risk or an unverified mandatory requirement; minor remarks, optimisations, speed and test coverage go to a "
+            "separate backlog task; a repeat review only checks the fixes and regressions; security, data integrity and recovery "
+            "checks are never skipped. "
+            f"Finish: {answer.get('next', '')} Report the stage as finished with the evidence of the passed checks and move to the next "
+            "stage, or say exactly which mandatory check has not passed.")
+    if wakes >= MAX_WAKES - 1:
+        return f"{head} {rule} This is the last reminder you get until the user writes."
+    return f"{head} {rule}"
+
+
 def wake_text(answer: dict, wakes: int) -> str:
-    item = answer.get("item") or answer.get("evidence") or "the open item"
+    if answer.get("verdict") == "loop":
+        return loop_wake_text(answer, wakes)
+    item =answer.get("item") or answer.get("evidence") or "the open item"
     head = (f"{OWN_MARKER} You ended your turn, but agreed work seems to be still open ({item}): {answer.get('evidence', '')}. "
             "First check whether the user has written since or work is running (a background task, an agent); if so, ignore this "
             "reminder and answer it with one short line at most.")
@@ -1004,7 +1027,8 @@ def assess(payload: dict, emit=None) -> str | None:
     if answer is None:
         log({**entry, "decision": "failed", "cost": cost, "seconds": seconds, "reason": "", "error": error})
         return None
-    if answer.get("verdict") != "idle":
+    verdict = answer.get("verdict")  # `ask` accepts only a verdict from VERDICTS
+    if verdict not in ("idle", "loop"):
         log({**entry, "decision": "ok", "verdict": "ok", "cost": cost, "seconds": seconds, "reason": answer.get("evidence", "")})
         return None
     unknown: set[str] = set()
@@ -1034,7 +1058,7 @@ def assess(payload: dict, emit=None) -> str | None:
         log({**entry, "wakes": before, "decision": outcome, "cost": cost, "seconds": seconds, "reason": reasons[outcome]})
         return None
     point = normalized(answer.get("item") or answer.get("next") or "")
-    log({**entry, "wakes": before, "decision": "idle", "verdict": "idle", "cost": cost, "seconds": seconds, "reason": answer.get("evidence", ""), "idle_point": point})
+    log({**entry, "wakes": before, "decision": verdict, "verdict": verdict, "cost": cost, "seconds": seconds, "reason": answer.get("evidence", ""), "idle_point": point})
     return wake
 
 

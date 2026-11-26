@@ -1025,10 +1025,10 @@ class ModelInputTests(AssistCase):
         self.assess(self.session())
         call = self.calls[0]
         self.assertEqual(call["model"], "haiku")
-        self.assertEqual(call["verdicts"], ["ok", "idle"])
+        self.assertEqual(call["verdicts"], ["ok", "idle", "loop"])
         self.assertEqual(call["kwargs"]["prompt_file"], ASSIST.PROMPT_FILE)
         schema = json.loads(call["kwargs"]["schema_text"])
-        self.assertEqual(schema["properties"]["verdict"]["enum"], ["ok", "idle"])
+        self.assertEqual(schema["properties"]["verdict"]["enum"], ["ok", "idle", "loop"])
         for field in ("next", "item", "evidence"):
             self.assertIn(field, schema["required"])
 
@@ -1176,6 +1176,69 @@ class WakeTests(AssistCase):
                 mock.patch.object(ASSIST.sys, "stdin", io.StringIO(json.dumps(payload))), \
                 mock.patch.object(ASSIST.sys, "stdout", io.TextIOWrapper(io.BytesIO(), encoding="utf-8")):
             ASSIST.main()
+
+
+class StageLoopTests(AssistCase):
+    """The `loop` verdict: the checks of a stage passed and the session circles on extra rounds. It reuses the idle wake
+    path (counter, lock, fail-closed superseded check) and changes only the wake text and the logged decision."""
+
+    def setUp(self):
+        super().setUp()
+        self.answer = {"verdict": "loop", "item": "Stage two: the hook", "evidence": "the checks passed and a third review round starts",
+                       "next": "Finish the stage, put the extra tests into a backlog task."}
+
+    def test_the_schema_accepts_the_loop_verdict_and_the_model_gets_it(self):
+        self.assertIn("loop", ASSIST.VERDICTS)
+        self.assess(self.session())
+        self.assertIn("loop", self.calls[0]["verdicts"])
+
+    def test_a_loop_verdict_wakes_with_the_instruction_to_finish_the_stage(self):
+        text = self.assess(self.session())
+        self.assertTrue(text.startswith(ASSIST.OWN_MARKER))
+        self.assertIn("Stage two: the hook", text)
+        self.assertIn("the checks passed and a third review round starts", text)
+        self.assertIn("stage-finishing rule", text)
+        self.assertIn("backlog", text)
+        self.assertIn("security, data integrity and recovery", text)
+        self.assertIn("Finish: Finish the stage, put the extra tests into a backlog task.", text)
+        self.assertIn("check whether the user has written since or work is running", text)
+        self.assertNotIn("Next step:", text)
+        self.assertNotIn("last reminder", text)
+
+    def test_the_last_loop_wake_says_it_is_the_last_reminder(self):
+        self.seed(ASSIST.MAX_WAKES - 1)
+        text = self.assess(self.session())
+        self.assertIn("last reminder you get until the user writes", text)
+
+    def test_a_loop_wake_is_logged_as_a_loop_and_counted_like_an_idle_wake(self):
+        self.assess(self.session())
+        entry = self.logged()[-1]
+        self.assertEqual(entry["decision"], "loop")
+        self.assertEqual(entry["verdict"], "loop")
+        self.assertEqual(entry["idle_point"], "stage two: the hook")
+        self.assertEqual(json.loads(ASSIST.counter_file("s1").read_text(encoding="utf-8"))["count"], 1)
+
+    def test_a_loop_verdict_without_an_item_names_the_current_stage(self):
+        self.answer["item"] = ""
+        self.assertIn("the current stage", self.assess(self.session()))
+
+    def test_loop_wakes_stop_at_the_wake_limit_like_idle_wakes(self):
+        self.seed(ASSIST.MAX_WAKES)
+        self.assertIsNone(self.assess(self.session()))
+        self.assertEqual(self.logged()[-1]["decision"], "wake-limit")
+
+    def test_the_ok_and_idle_paths_are_unchanged(self):
+        self.answer = dict(OK)
+        self.assertIsNone(self.assess(self.session()))
+        self.assertEqual(self.logged()[-1]["decision"], "ok")
+        self.answer = dict(IDLE)
+        text = self.assess(self.session(prefix="v"))
+        self.assertIn("Next step: Wire the hook (plan step two).", text)
+        self.assertNotIn("stage-finishing rule", text)
+
+    def test_a_failed_model_call_stays_silent(self):
+        self.answer = None
+        self.assertIsNone(self.assess(self.session()))
 
 
 class LoopGuardTests(AssistCase):
