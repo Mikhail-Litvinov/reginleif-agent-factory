@@ -1,0 +1,3 @@
+# Files mounted into the Linux container must keep LF line endings on Windows checkouts.
+deploy/postgres/** text eol=lf
+deploy/compose.yml text eol=lf
