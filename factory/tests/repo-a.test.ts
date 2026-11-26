@@ -105,7 +105,13 @@ describe("migration 0001 repositories", () => {
 	it("appends and reads audit rows without an update surface", async () => {
 		const row = await repo.audit.append({ id: id(10), actorId: id(7), action: "repo.test", targetType: "project", targetId: id(1), outcome: "ok", requestHash: "hash" });
 		assert.equal(row.action, "repo.test");
-		assert.equal((await repo.audit.list({ action: "repo.test" })).some((entry) => entry.id === row.id), true);
+		assert.equal((await repo.audit.list({ action: "repo.test", below: (BigInt(row.commitXid) + 1n).toString() })).some((entry) => entry.id === row.id), true);
+	});
+
+	it("lists only audit rows committed below the given xid bound", async () => {
+		const row = await repo.audit.append({ id: id(13), actorId: id(7), action: "repo.bound", targetType: "project", targetId: id(1), outcome: "ok", requestHash: "hash" });
+		assert.equal((await repo.audit.list({ action: "repo.bound", below: (BigInt(row.commitXid) + 1n).toString() })).some((entry) => entry.id === row.id), true);
+		assert.equal((await repo.audit.list({ action: "repo.bound", below: row.commitXid })).some((entry) => entry.id === row.id), false);
 	});
 
 	it("searches project names as plain text, so _ and % are not wildcards", async () => {
