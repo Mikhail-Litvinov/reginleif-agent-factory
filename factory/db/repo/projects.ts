@@ -1,4 +1,4 @@
-import { and, eq, ilike, isNotNull, isNull, type SQL } from "drizzle-orm";
+import { and, eq, isNotNull, isNull, sql, type SQL } from "drizzle-orm";
 import type { PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import { projects } from "../schema/projects.ts";
 
@@ -12,7 +12,8 @@ export const projectRepo = (db: PostgresJsDatabase<any>) => ({
 		if (!includeDeleted) conditions.push(isNull(projects.deletedAt));
 		if (archived === true) conditions.push(isNotNull(projects.archivedAt));
 		if (archived === false) conditions.push(isNull(projects.archivedAt));
-		if (q !== undefined) conditions.push(ilike(projects.name, `%${q}%`));
+		// Plain substring match: strpos reads % and _ in the search text literally (LIKE would treat them as wildcards).
+		if (q !== undefined) conditions.push(sql`strpos(lower(${projects.name}), lower(${q}::text)) > 0`);
 		return db.select().from(projects).where(and(...conditions)).orderBy(projects.name);
 	},
 	get: async (id: string, { includeDeleted = false }: { includeDeleted?: boolean } = {}): Promise<Project | undefined> =>

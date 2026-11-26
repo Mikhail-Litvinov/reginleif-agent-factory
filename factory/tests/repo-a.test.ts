@@ -102,6 +102,13 @@ describe("migration 0001 repositories", () => {
 		assert.equal(row.action, "repo.test");
 		assert.equal((await repo.audit.list({ action: "repo.test" })).some((entry) => entry.id === row.id), true);
 	});
+
+	it("searches project names as plain text, so _ and % are not wildcards", async () => {
+		await repo.projects.create({ id: id(20), name: "a_b", workspacePolicy: "worktree" });
+		await repo.projects.create({ id: id(21), name: "axb", workspacePolicy: "worktree" });
+		assert.deepEqual((await repo.projects.list({ q: "a_b" })).map((row) => row.name), ["a_b"]);
+		assert.deepEqual(await repo.projects.list({ q: "%" }), []);
+	});
 });
 
 it("repo queries use bound parameters and no string-built SQL", async () => {
