@@ -68,6 +68,14 @@ class Transcript:
     def user(self, text):
         return self.add("user", text)
 
+    def human(self, text):
+        """A message the user typed, as Claude Code 2.1.330 records it: origin kind human."""
+        return self.add("user", text, origin={"kind": "human"})
+
+    def channel(self, text):
+        """A message the user sent from Telegram: origin kind channel."""
+        return self.add("user", text, origin={"kind": "channel", "server": "plugin:telegram-hub:telegram-hub"})
+
     def assistant(self, text):
         return self.add("assistant", [{"type": "text", "text": text}])
 
@@ -117,6 +125,10 @@ class Transcript:
         """The session stopped a task itself: a TaskStop call; the task never sends a terminal notification."""
         self.result(self.call("TaskStop", {"task_id": task_id}), f"Successfully stopped task: {task_id}")
 
+    def failed_stop(self, task_id, text="Error: No task found with ID"):
+        """A TaskStop call that failed: its tool_result is an error, so the task may still run."""
+        self.result(self.call("TaskStop", {"task_id": task_id}), f"{text}: {task_id}", error=True)
+
     def fast_launch(self):
         """A background launch whose command ended before the answer: the result names no task."""
         ident = self.call("Bash", {"run_in_background": True, "command": "true"})
@@ -135,6 +147,15 @@ class Transcript:
         text = f"<task-notification>\n<task-id>{task_id}</task-id>\n" + (f"<status>{status}</status>\n" if status else "") + "</task-notification>"
         self.entries.append(self.link({"type": "attachment", "timestamp": self.stamp(),
                                        "attachment": {"type": "queued_command", "commandMode": "task-notification", "prompt": text}}))
+
+    def attach_wake(self, marker):
+        """A Stop-hook wake as Claude Code 2.1.330 records it: a queued_command attachment whose prompt wraps the hook's
+        stderr in a task-notification (the marker sits inside the wrapper, not at the start)."""
+        text = ("<task-notification>\n<summary>Stop hook feedback</summary>\n</task-notification>\n<system-reminder>\n"
+                f"Stop hook blocking error from command \"Stop\": {marker} You stopped with work left\n</system-reminder>")
+        self.entries.append(self.link({"type": "attachment", "timestamp": self.stamp(),
+                                       "attachment": {"type": "queued_command", "commandMode": "task-notification", "prompt": text,
+                                                      "origin": {"kind": "task-notification", "producer": "session-task"}}}))
 
     def write(self, path):
         path.write_text("".join(json.dumps(e) + "\n" for e in self.entries), encoding="utf-8")
@@ -385,6 +406,27 @@ class BackgroundLivenessTests(AssistCase):
         log.stop("bz9k")
         self.assertIsNotNone(self.assess(log))
 
+    def test_a_stop_that_failed_leaves_the_task_running(self):
+        log = self.session()
+        log.background("bz9k")
+        log.failed_stop("bz9k")
+        self.assertIsNone(self.assess(log))
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.logged()[-1]["decision"], "background")
+
+    def test_a_stop_that_says_the_task_is_not_running_counts_as_stopped(self):
+        log = self.session()
+        log.background("bz9k")
+        log.failed_stop("bz9k", "Error: Task is not running")
+        self.assertIsNotNone(self.assess(log))
+
+    def test_a_stop_call_without_a_result_yet_leaves_the_task_running(self):
+        log = self.session()
+        log.background("bz9k")
+        log.call("TaskStop", {"task_id": "bz9k"})
+        self.assertIsNone(self.assess(log))
+        self.assertEqual(self.calls, [])
+
     def test_a_launch_that_named_no_task_is_not_running(self):
         log = self.session()
         log.fast_launch()
@@ -580,6 +622,48 @@ class PlanDetectionTests(AssistCase):
         log.read_plan(first)
         self.assertEqual(self.plans_of(log), [third, second, first])
 
+    def shell_verdict(self, name, command_of):
+        """'edited' when a shell command naming the plan ranks it before a plain read of another plan that came later."""
+        other = self.others(1)[0]
+        log = Transcript()
+        log.result(log.call(name, {"command": command_of(str(self.plan))}), "ok")
+        log.read_plan(other)
+        order = self.plans_of(log)
+        self.assertCountEqual(order, [self.plan, other])
+        return "edited" if order[0] == self.plan else "read"
+
+    def test_a_shell_command_naming_a_plan_is_an_edit_unless_it_is_a_recognised_pure_read(self):
+        edits = (("Bash", lambda p: f"cp draft.md {p}"), ("Bash", lambda p: f"mv draft.md {p}"),
+                 ("Bash", lambda p: f"echo done > {p}"), ("Bash", lambda p: f"echo done >> {p}"),
+                 ("Bash", lambda p: f"python fix_plan.py {p}"), ("Bash", lambda p: f"python -I tools/mark.py --plan {p} --item 2"),
+                 ("Bash", lambda p: f"node tick.js {p}"), ("Bash", lambda p: f"git checkout HEAD -- {p}"),
+                 ("Bash", lambda p: f"sed -i 's/a/b/' {p}"), ("Bash", lambda p: f"sed -n 1,3p x.txt | tee {p}"),
+                 ("PowerShell", lambda p: f"Copy-Item draft.md '{p}'"), ("PowerShell", lambda p: f"Move-Item draft.md '{p}'"),
+                 ("PowerShell", lambda p: f"Set-Content '{p}' -Value done"), ("Bash", lambda p: f"cat {p} && python tick.py {p}"))
+        for name, command_of in edits:
+            with self.subTest(command=command_of("<plan>")):
+                self.assertEqual(self.shell_verdict(name, command_of), "edited")
+
+    def test_a_recognised_pure_read_of_a_plan_stays_a_read(self):
+        reads = (("Bash", lambda p: f"cat {p}"), ("PowerShell", lambda p: f"type '{p}'"), ("PowerShell", lambda p: f"Get-Content '{p}' | Select-Object -First 5"),
+                 ("Bash", lambda p: f"head -5 {p}"), ("Bash", lambda p: f"tail -n 5 {p}"), ("Bash", lambda p: f"less {p}"),
+                 ("Bash", lambda p: f"more {p}"), ("PowerShell", lambda p: f"Select-String -Path '{p}' -Pattern todo"),
+                 ("Bash", lambda p: f"grep -n 'a;b' {p}"), ("Bash", lambda p: f"rg 'step' {p}"), ("Bash", lambda p: f"wc -l {p}"),
+                 ("Bash", lambda p: f"git show HEAD -- {p}"), ("Bash", lambda p: f"git diff -- {p}"), ("Bash", lambda p: f"git log -p {p}"),
+                 ("Bash", lambda p: f"sed -n 1,5p {p}"), ("Bash", lambda p: f"cat {p} > out.txt"), ("Bash", lambda p: f"cat {p} | python summarize.py"))
+        for name, command_of in reads:
+            with self.subTest(command=command_of("<plan>")):
+                self.assertEqual(self.shell_verdict(name, command_of), "read")
+
+    def test_a_plan_called_like_a_write_word_is_not_a_write(self):
+        path = self.plan.with_name("write-up.md")
+        path.write_text("# Write up\n- [ ] one\n", encoding="utf-8")
+        other = self.others(1)[0]
+        log = Transcript()
+        log.result(log.call("Bash", {"command": f"cat {path}"}), "ok")
+        log.read_plan(other)
+        self.assertEqual(self.plans_of(log), [other, path])
+
     def test_a_plan_named_deep_in_another_tools_input_counts(self):
         log = Transcript()
         log.result(log.call("Agent", {"description": "review", "prompt": f"Review the plan {self.plan} and report", "extra": {"list": [f"see {self.plan}"]}}), "ok")
@@ -675,6 +759,55 @@ class PlanDetectionTests(AssistCase):
         self.assertIn("two: wire the hook", text)
         self.assertLess(text.count("x"), ASSIST.PLAN_LIMIT * 2)
         self.assertIn(str(self.plan.parent), [str(d) for d in self.calls[0]["dirs"]])
+
+    def test_a_plan_is_read_only_as_far_as_the_limit_and_an_omitted_plan_is_not_opened(self):
+        big = []
+        for i in range(6):
+            path = self.plan.with_name(f"huge{i}.md")
+            path.write_text(f"# Huge {i}\n- [ ] HUGE-STEP-{i}\n" + "x" * (ASSIST.PLAN_LIMIT * 50), encoding="utf-8")
+            big.append(path)
+        log = Transcript()
+        for path in big:
+            log.read_plan(path, "Edit")
+        opened, asked = [], []
+        real_open = open
+
+        class Recorder:
+            def __init__(self, handle):
+                self.handle = handle
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                self.handle.close()
+
+            def read(self, count=-1):
+                asked.append(count)
+                return self.handle.read(count)
+
+        def recording_open(path, *args, **kwargs):
+            opened.append(Path(path))
+            return Recorder(real_open(path, *args, **kwargs))
+
+        def guarded(real):
+            def read(path, *args, **kwargs):
+                if path.parent == self.plan.parent:
+                    raise AssertionError("a plan must not be loaded whole")
+                return real(path, *args, **kwargs)
+            return read
+
+        with mock.patch.object(ASSIST, "open", recording_open, create=True), \
+                mock.patch.object(Path, "read_text", guarded(Path.read_text)), \
+                mock.patch.object(Path, "read_bytes", guarded(Path.read_bytes)):
+            self.assess(log)
+        shown = ASSIST.PLAN_BUDGET // ASSIST.PLAN_LIMIT
+        self.assertEqual(opened, big[-1:-shown - 1:-1])
+        self.assertTrue(asked)
+        self.assertTrue(all(0 < count <= ASSIST.PLAN_LIMIT + 1 for count in asked), asked)
+        text = self.calls[0]["text"]
+        self.assertIn("plan cut at", text)
+        self.assertIn(str(big[0]), [row for row in text.splitlines() if row.startswith("PLANS NOT SHOWN")][0])
 
 
 class ModelInputTests(AssistCase):
@@ -970,6 +1103,134 @@ class MixedRecordTests(AssistCase):
         self.assertEqual(self.logged()[-1]["decision"], "wake-limit")
         self.assertEqual(self.calls, [])
 
+    def test_a_user_message_that_quotes_a_marker_resets_the_wake_counter(self):
+        for marker in (ASSIST.OWN_MARKER, REFLECT.WAKE_MARKER):
+            with self.subTest(marker):
+                log = self.session()
+                self.seed(3, 1)
+                log.user(f"What does {marker} in your last message mean?")
+                self.assertIsNotNone(self.assess(log))
+                self.assertEqual(self.logged()[-1]["wakes"], 0)
+
+    def test_a_user_message_that_quotes_a_marker_reaches_the_model(self):
+        for marker in (ASSIST.OWN_MARKER, REFLECT.WAKE_MARKER):
+            with self.subTest(marker):
+                log = Transcript()
+                log.user(f"What does {marker} in your last message mean?")
+                log.read_plan(self.plan)
+                self.calls.clear()
+                self.assess(log)
+                users = self.calls[0]["text"].split("USER'S LATEST MESSAGES\n", 1)[1].split("\n\n", 1)[0]
+                self.assertIn(marker, users)
+
+    def test_a_hook_wake_as_claude_code_records_it_neither_resets_the_counter_nor_reaches_the_model(self):
+        for marker in (ASSIST.OWN_MARKER, REFLECT.WAKE_MARKER):
+            with self.subTest(marker):
+                log = self.session()
+                self.seed(3, 1)
+                log.attach_wake(marker)
+                self.calls.clear()
+                self.assertIsNone(self.assess(log))
+                self.assertEqual(self.logged()[-1]["decision"], "wake-limit")
+                self.assertEqual(self.calls, [])
+        log = Transcript()
+        log.user("the real request of the user")
+        log.read_plan(self.plan)
+        log.assistant("Step one done.")
+        log.attach_wake(ASSIST.OWN_MARKER)
+        self.calls.clear()
+        ASSIST.counter_file("s1").unlink(missing_ok=True)
+        self.assess(log)
+        users = self.calls[0]["text"].split("USER'S LATEST MESSAGES\n", 1)[1].split("\n\n", 1)[0]
+        self.assertNotIn(ASSIST.OWN_MARKER, users)
+
+    def test_three_wakes_in_the_recorded_shape_in_a_row_then_the_fourth_idle_stop_is_silent(self):
+        log = self.session()
+        for i in range(3):
+            self.assertIsNotNone(self.assess(log, final=f"Stopped at {i}."))
+            log.attach_wake(ASSIST.OWN_MARKER)
+        self.calls.clear()
+        self.assertIsNone(self.assess(log, final="Stopped again."))
+        self.assertEqual(self.logged()[-1]["decision"], "wake-limit")
+        self.assertEqual(self.logged()[-1]["wakes"], 3)
+        self.assertEqual(self.calls, [])
+
+    def test_a_wake_record_with_an_origin_is_never_the_users_whatever_its_text(self):
+        """The origin decides, not the text: a task-notification record that carries the marker anywhere, or none."""
+        for text in (f'Stop hook blocking error from command "Stop": {ASSIST.OWN_MARKER} You stopped with work left',
+                     f"<system-reminder>{ASSIST.OWN_MARKER} You stopped</system-reminder>", "Something the session did not expect"):
+            with self.subTest(text):
+                log = self.session()
+                self.seed(3, 1)
+                log.add("user", text, origin={"kind": "task-notification", "producer": "session-task"})
+                self.calls.clear()
+                self.assertIsNone(self.assess(log))
+                self.assertEqual(self.logged()[-1]["decision"], "wake-limit")
+                self.assertEqual(self.calls, [])
+
+    def test_a_record_with_an_origin_that_is_not_the_users_does_not_reach_the_model_as_a_user_message(self):
+        for origin, text in (({"kind": "task-notification", "producer": "session-task"},
+                              f'Stop hook blocking error from command "Stop": {ASSIST.OWN_MARKER} You stopped with work left'),
+                             ({"kind": "plugin", "name": "agent-rig-window"}, "A message of a plugin")):
+            with self.subTest(origin):
+                log = Transcript()
+                log.human("the real request of the user")
+                log.read_plan(self.plan)
+                log.add("user", text, origin=origin)
+                self.calls.clear()
+                ASSIST.counter_file("s1").unlink(missing_ok=True)
+                self.assess(log)
+                users = self.calls[0]["text"].split("USER'S LATEST MESSAGES\n", 1)[1].split("\n\n", 1)[0]
+                self.assertIn("the real request of the user", users)
+                self.assertNotIn(text, users)
+
+    def test_a_plugin_or_hand_back_origin_is_not_the_user(self):
+        for origin in ({"kind": "plugin", "name": "agent-rig-window"}, {"body": "[Subagent hand-back] done"}):
+            with self.subTest(origin):
+                log = self.session()
+                self.seed(3, 1)
+                log.add("user", "Please continue with the work", origin=origin)
+                self.assertIsNone(self.assess(log))
+                self.assertEqual(self.logged()[-1]["decision"], "wake-limit")
+
+    def test_a_human_message_that_quotes_a_marker_resets_the_counter_and_reaches_the_model(self):
+        for marker in (ASSIST.OWN_MARKER, REFLECT.WAKE_MARKER):
+            with self.subTest(marker):
+                log = self.session()
+                self.seed(3, 1)
+                log.human(f"{marker} what is this?")
+                self.calls.clear()
+                self.assertIsNotNone(self.assess(log))
+                self.assertEqual(self.logged()[-1]["wakes"], 0)
+                users = self.calls[0]["text"].split("USER'S LATEST MESSAGES\n", 1)[1].split("\n\n", 1)[0]
+                self.assertIn(marker, users)
+
+    def test_a_telegram_message_resets_the_counter_but_a_message_of_the_hub_itself_does_not(self):
+        log = self.session()
+        self.seed(3, 1)
+        log.channel("Why did you stop?")
+        self.assertIsNotNone(self.assess(log))
+        self.assertEqual(self.logged()[-1]["wakes"], 0)
+        log = self.session()
+        self.seed(3, 1)
+        log.channel("[SYSTEM NOTIFICATION] a hub notice")
+        self.assertIsNone(self.assess(log))
+        self.assertEqual(self.logged()[-1]["decision"], "wake-limit")
+
+    def test_a_record_without_origin_falls_back_to_the_exact_wrapper_shape(self):
+        wrapped = (f"<task-notification>\n<summary>Stop hook feedback</summary>\n</task-notification>\n<system-reminder>\n"
+                   f'Stop hook blocking error from command "Stop": {ASSIST.OWN_MARKER} You stopped with work left\n</system-reminder>')
+        log = self.session()
+        self.seed(3, 1)
+        log.user(wrapped)
+        self.assertIsNone(self.assess(log))
+        self.assertEqual(self.logged()[-1]["decision"], "wake-limit")
+        log = self.session()
+        self.seed(3, 1)
+        log.user(f"Why does it say Stop hook blocking error from command \"Stop\": {ASSIST.OWN_MARKER} here?")  # a quote, not the wrapper
+        self.assertIsNotNone(self.assess(log))
+        self.assertEqual(self.logged()[-1]["wakes"], 0)
+
     def test_a_notification_text_next_to_a_tool_result_finishes_its_task(self):
         log = self.session()
         log.background("bz9k")
@@ -997,25 +1258,28 @@ class SupersededVerdictTests(AssistCase):
     and a doubt counts as stale: the hook stays silent and counts nothing. The check, the count and the emit happen
     under one lock."""
 
-    def stopped(self, name="session.jsonl"):
+    def stopped(self, name="session.jsonl", **extra):
         log = self.session()
         log.assistant("Step one is done.")
-        return self.payload_for(log, "Step one is done.", name=name)
+        return self.payload_for(log, "Step one is done.", name=name, **extra)
 
-    def stale_by(self, grow):
+    def stale_by(self, grow, **extra):
+        self.calls.clear()
         self.during_ask = grow
+        payload = self.stopped(**extra)
         emitted = []
-        payload = self.stopped()
         self.assertIsNone(ASSIST.assess(payload, emitted.append))
         self.assertEqual(emitted, [])
         self.assertEqual(len(self.calls), 1)
         self.assertEqual(self.logged()[-1]["decision"], "superseded")
         self.assertFalse(ASSIST.counter_file("s1").exists())
 
-    def fresh_by(self, grow):
+    def fresh_by(self, grow, **extra):
+        self.calls.clear()
+        ASSIST.counter_file("s1").unlink(missing_ok=True)
         self.during_ask = grow
         emitted = []
-        text = ASSIST.assess(self.stopped(), emitted.append)
+        text = ASSIST.assess(self.stopped(**extra), emitted.append)
         self.assertIsNotNone(text)
         self.assertEqual(emitted, [text])
         self.assertEqual(self.logged()[-1]["decision"], "idle")
@@ -1063,6 +1327,77 @@ class SupersededVerdictTests(AssistCase):
 
     def test_the_final_message_that_lands_in_the_file_late_does_not_discard_the_verdict(self):
         self.fresh_by(self.late(lambda log: log.assistant("Step one is done.")))
+
+    def attachment(self, kind, **extra):
+        return {"type": "attachment", "timestamp": "2026-01-01T11:00:00.000Z", "attachment": {"type": kind, **extra}}
+
+    def late_system(self, subtype, **extra):
+        return {"type": "system", "subtype": subtype, "timestamp": "2026-01-01T11:00:00.000Z", **extra}
+
+    def late_assistant(self, content, **extra):
+        return {"type": "assistant", "timestamp": "2026-01-01T11:00:00.000Z", "message": {"role": "assistant", "content": content}, **extra}
+
+    def test_a_late_text_that_is_not_the_final_message_discards_the_verdict(self):
+        self.stale_by(self.late(lambda log: log.assistant("Now continuing with step two")))
+
+    def test_a_late_text_discards_the_verdict_when_the_payload_names_no_final_message(self):
+        self.stale_by(self.late(lambda log: log.assistant("Step one is done.")), last_assistant_message=None)
+
+    def test_a_late_final_message_of_another_prompt_discards_the_verdict(self):
+        late = self.late_assistant([{"type": "text", "text": "Step one is done."}], promptId="p-old")
+        self.stale_by(lambda: self.append(late), prompt_id="p-now")
+
+    def test_a_late_final_message_of_the_same_prompt_does_not_discard_the_verdict(self):
+        late = self.late_assistant([{"type": "text", "text": "Step one is done."}], promptId="p-now")
+        self.fresh_by(lambda: self.append(late), prompt_id="p-now")
+
+    def test_a_late_final_message_that_carries_no_prompt_id_does_not_discard_the_verdict(self):
+        # Real assistant records carry no promptId (only user records do), so its absence is no mismatch.
+        self.fresh_by(self.late(lambda log: log.assistant("Step one is done.")), prompt_id="p-now")
+
+    def test_a_late_assistant_record_without_text_discards_the_verdict(self):
+        late = self.late_assistant([{"type": "thinking", "thinking": "hm"}])
+        self.stale_by(lambda: self.append(late))
+
+    def test_attachments_that_may_start_a_new_turn_discard_the_verdict(self):
+        wake = ("<task-notification>\n<summary>Stop hook feedback</summary>\n</task-notification>\n<system-reminder>\n"
+                "Stop hook blocking error from command \"Stop\": [reflect-catchup] You ended your turn.\n</system-reminder>")
+        cases = {
+            "hook wake": self.attachment("queued_command", prompt=wake, commandMode="task-notification", origin={"kind": "task-notification", "producer": "session-task"}),
+            "hook context": self.attachment("hook_additional_context", content=["more"]),
+            "hook message": self.attachment("hook_system_message", content="msg"),
+            "reminder": self.attachment("silent_turn_reminder"),
+            "file": self.attachment("file", filename="a.txt"),
+            "edited file": self.attachment("edited_text_file", filename="a.txt"),
+            "task status": self.attachment("task_status", taskId="bz9k"),
+            "unknown": self.attachment("something_new_in_a_later_version"),
+            "no type": {"type": "attachment", "timestamp": "2026-01-01T11:00:00.000Z", "attachment": {}},
+            "no body": {"type": "attachment", "timestamp": "2026-01-01T11:00:00.000Z"},
+        }
+        for label, record in cases.items():
+            with self.subTest(label):
+                self.stale_by(lambda record=record: self.append(record))
+
+    def test_attachments_that_are_only_hook_bookkeeping_do_not_discard_the_verdict(self):
+        for kind in ("hook_success", "hook_cancelled", "prompt_snapshot", "deferred_tools_record"):
+            with self.subTest(kind):
+                self.fresh_by(lambda kind=kind: self.append(self.attachment(kind)))
+
+    def test_system_records_that_may_start_a_new_turn_discard_the_verdict(self):
+        cases = {
+            "prevented": self.late_system("stop_hook_summary", hookCount=1, hookErrors=[], preventedContinuation=True),
+            "hook error": self.late_system("stop_hook_summary", hookCount=1, hookErrors=["exit 2"], preventedContinuation=False),
+            "compact": self.late_system("compact_boundary"),
+            "unknown": self.late_system("something_new_in_a_later_version"),
+            "no subtype": {"type": "system", "timestamp": "2026-01-01T11:00:00.000Z"},
+        }
+        for label, record in cases.items():
+            with self.subTest(label):
+                self.stale_by(lambda record=record: self.append(record))
+
+    def test_a_plain_stop_hook_summary_and_turn_duration_do_not_discard_the_verdict(self):
+        summary = self.late_system("stop_hook_summary", hookCount=2, hookInfos=[], hookErrors=[], preventedContinuation=False, hasOutput=False)
+        self.fresh_by(lambda: self.append(summary, self.late_system("turn_duration", durationMs=5)))
 
     def test_a_transcript_that_ends_inside_a_line_is_not_identified_and_makes_no_model_call(self):
         payload = self.stopped()

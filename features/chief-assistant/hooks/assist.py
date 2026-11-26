@@ -75,6 +75,9 @@ MAX_WAKES = 3
 PLAN_LIMIT = 12_000  # Characters of one plan sent to the model; a plan is a short working document.
 PLAN_BUDGET = 4 * PLAN_LIMIT  # All plans together: four full-size plans, so one active plan plus a few it read for reference.
 PLAN_DIR = "docs/superpowers/plans/"
+# Records a stop leaves behind that cannot start a new turn (seen in Claude Code 2.1.330 transcripts); all else is growth.
+BOOKKEEPING_ATTACHMENTS = frozenset({"hook_success", "hook_cancelled", "prompt_snapshot", "deferred_tools_record"})
+BOOKKEEPING_SYSTEM = frozenset({"stop_hook_summary", "turn_duration"})
 PLAN_TOOLS_EDIT = ("Edit", "Write", "MultiEdit")
 MENTION_DEPTH = 8  # How deep into a tool input (agent prompts, nested fields) plan names are searched.
 # A plan named in a string of a tool input, in any spelling: absolute or relative, either slash direction (the text
@@ -83,7 +86,12 @@ MENTION_DEPTH = 8  # How deep into a tool input (agent prompts, nested fields) p
 PLAN_PATH = re.compile(r"""(?:[A-Za-z]:)?[^\s"'`<>|*?(),;=]*?docs/superpowers/plans/(?:[^\s"'`<>|*?()]+?/)*[^\s"'`<>|*?/()]+?\.md(?![\w-]|\.\w)""")
 QUOTED_PLAN = re.compile(r"""(["'])((?:(?!\1).)*?docs/superpowers/plans/(?:(?!\1).)*?\.md)\1""")
 REDIRECT_INTO_PLAN = re.compile(r"""\d?>>?\s*(?:"[^"]*|'[^']*|[^\s"']*)docs/superpowers/plans/""")
-WRITE_WORDS = re.compile(r"(?i)\b(?:set-content|add-content|out-file|tee|patch|patchlib|write_text|write|truncate)\b|\bsed\s+-[a-z]*i")
+# A shell command that names a plan is an edit unless its segment starts with one of these pure readers.
+PURE_READERS = frozenset({"cat", "type", "get-content", "gc", "head", "tail", "less", "more", "select-string", "sls",
+                          "grep", "egrep", "fgrep", "rg", "wc"})
+GIT_READS = frozenset({"show", "diff", "log"})
+SED_IN_PLACE = re.compile(r"\s(?:-[A-Za-z]*i|--in-place)")
+SEGMENT_PREFIX = re.compile(r"(?:[A-Za-z_]\w*=\S*|sudo|time|command|exec|nohup|call|&)\s+", re.IGNORECASE)
 # Only these record types matter; every other line of a (possibly huge) transcript is skipped before parsing.
 RECORD = re.compile(r'"type"\s*:\s*"(?:user|assistant|attachment)"')
 LOCK_NAME = "state.lock"
@@ -143,13 +151,59 @@ def strings_of(value: object, depth: int = 0):
             yield from strings_of(item, depth + 1)
 
 
+def shell_segments(command: str) -> list[str]:
+    """The simple commands of a shell line: split at `&&`, `||`, `;`, `|` and newlines that stand outside quotes."""
+    segments: list[str] = []
+    current: list[str] = []
+    quote = ""
+    index = 0
+    while index < len(command):
+        char = command[index]
+        if quote:
+            if char == quote:
+                quote = ""
+        elif char in "\"'":
+            quote = char
+        elif char in ";|\n" or command.startswith("&&", index):
+            segments.append("".join(current))
+            current = []
+            index += 2 if command.startswith(("&&", "||"), index) else 1
+            continue
+        current.append(char)
+        index += 1
+    segments.append("".join(current))
+    return [s.strip() for s in segments if s.strip()]
+
+
+def is_pure_read(segment: str) -> bool:
+    """True when a simple command only reads: its first word is a recognised reader (`sed` only without -i, `git` only
+    show, diff or log). Anything else that names a plan (cp, mv, a script given the path, a redirect) is an edit."""
+    rest = segment.strip()
+    while True:
+        prefix = SEGMENT_PREFIX.match(rest)
+        if not prefix:
+            break
+        rest = rest[prefix.end():]
+    words = rest.split()
+    if not words:
+        return False
+    first = words[0].strip("\"'").replace("\\", "/").rsplit("/", 1)[-1].lower()
+    if first.endswith(".exe"):
+        first = first[:-4]
+    if first == "sed":
+        return not SED_IN_PLACE.search(" " + rest)
+    if first == "git":
+        return len(words) > 1 and words[1] in GIT_READS
+    return first in PURE_READERS
+
+
 def plan_mentions(name: str, args: object, cwd: str, cache: dict) -> list[tuple[Path, bool]]:
     """Every existing plan file a tool call of the main session refers to, as (resolved path, edited). Any string of
     the input can name a plan (a shell command, an agent's prompt, a nested field), not only `file_path`. The
     `file_path` of the file tools is an exact path (it may hold spaces); every other string is searched for
     `docs/superpowers/plans/<name>.md`, quoted or not. A plan is edited when an edit tool names it in `file_path`,
-    or a shell command that names it also writes (a redirect into a plan, or a writing command word outside the
-    plan names, so a plan called `write-up.md` is not a write); any other mention is a read."""
+    or a shell command names it in a segment that redirects into it or is not a recognised pure read (cp, mv, a
+    script given the path, ...); a plan named only by a pure reader, or in any other input, is read."""
     if not isinstance(args, dict):
         return []
     found: list[tuple[Path, bool]] = []
@@ -163,16 +217,18 @@ def plan_mentions(name: str, args: object, cwd: str, cache: dict) -> list[tuple[
         normal = text.replace("\\", "/")
         if PLAN_DIR not in normal:
             continue
-        quoted = [m.group(2).strip() for m in QUOTED_PLAN.finditer(normal)]
-        bare = [m.group(0) for m in PLAN_PATH.finditer(normal)]
-        paths = {span: canonical(span, cwd, cache) for span in quoted + bare}
-        writes = False
-        if text is command:
-            rest = normal  # a quoted span that is no file (`bash -c "sed -i ... plan"`) may hold the write word
-            for span in bare + [s for s in quoted if paths[s] is not None]:
-                rest = rest.replace(span, " ")
-            writes = bool(REDIRECT_INTO_PLAN.search(normal) or WRITE_WORDS.search(rest))
-        found.extend((path, writes) for path in paths.values() if path is not None)
+        # a shell command is judged per simple command; any other string is one unit that only reads
+        units = shell_segments(normal) if text is command else [normal]
+        for unit in units:
+            if PLAN_DIR not in unit:
+                continue
+            quoted = [m.group(2).strip() for m in QUOTED_PLAN.finditer(unit)]
+            bare = [m.group(0) for m in PLAN_PATH.finditer(unit)]
+            writes = text is command and bool(REDIRECT_INTO_PLAN.search(unit) or not is_pure_read(unit))
+            for span in quoted + bare:
+                path = canonical(span, cwd, cache)
+                if path is not None:
+                    found.append((path, writes))
     return found
 
 
@@ -188,6 +244,53 @@ def touch(plans: dict, path: Path) -> None:
     """Records a plan use; the dict order is the recency order (the latest use last)."""
     plans.pop(path, None)
     plans[path] = True
+
+
+HUMAN_ORIGINS = frozenset({"human", "channel"})  # record origin kinds of the user's own words (typed; from Telegram)
+
+
+def is_hook_wake(text: str) -> bool:
+    """Whether a user-role text, in a record that names no origin, is a bare wake of this hook or of reflection: it
+    starts with the marker. Never a marker found further in: a user message that merely quotes one is the user's own.
+    The wrapped shape Claude Code 2.1.330 records a real wake in (a task-notification, then a system-reminder holding
+    the hook's stderr) is no user text for `reflect.is_users` either, whatever the origin says."""
+    return text.lstrip().startswith((OWN_MARKER, reflect.WAKE_MARKER))
+
+
+def record_origin(record: dict) -> object:
+    """The `origin` of a user record, or of a queued_command attachment (it sits in the attachment); None when absent."""
+    origin = record.get("origin")
+    attachment = record.get("attachment")
+    return origin if origin is not None else attachment.get("origin") if isinstance(attachment, dict) else None
+
+
+def from_user(record: dict, raw: str, text: str) -> bool:
+    """Whether the user-role text of a record is the user's own words, judged by the record's origin: `human` and
+    `channel` (Telegram) are the user's, any other origin (task-notification, plugin, a subagent hand-back, ...) is
+    not, whatever the text says. A `channel` text is still checked for the hub's own messages. A record without an
+    origin (an older transcript) falls back to the text: not a bare hook wake, and a user text (the recorded wrapper is an event there)."""
+    origin = record_origin(record)
+    if origin is None:
+        return not is_hook_wake(raw) and reflect.is_users(text)
+    kind = origin.get("kind") if isinstance(origin, dict) else None
+    return kind == "human" or (kind in HUMAN_ORIGINS and reflect.is_users(text))
+
+
+def human_lines(lines: list[str]) -> list[str]:
+    """The transcript lines without the records that are not the user's own words (see `from_user`): those whose origin
+    says so, and, when a record has no origin, those whose text is a hook wake. The model is shown the user's latest
+    messages from what is left."""
+    kept = []
+    for line in lines:
+        record = parsed(line)
+        origin = record_origin(record) if record else None
+        if origin is not None:
+            if not (isinstance(origin, dict) and origin.get("kind") in HUMAN_ORIGINS):
+                continue
+        elif any(kind == "user" and is_hook_wake(data) for kind, _, data in reflect.line_events([line])):
+            continue
+        kept.append(line)
+    return kept
 
 
 def scan(transcript: Path, cwd: str, background_tasks: object = None, limit: int | None = None) -> dict:
@@ -235,10 +338,8 @@ def scan(transcript: Path, cwd: str, background_tasks: object = None, limit: int
                         if not data.get("is_error"):
                             reset_at = start  # the user answered the poll
                 elif kind == "user":
-                    if OWN_MARKER in data or reflect.WAKE_MARKER in data:
-                        continue  # the wakes of this hook and of reflection are not the user's messages (is_users drops notifications)
                     text = reflect.REMINDER.sub("", data).strip()
-                    if text and reflect.is_users(text):
+                    if text and from_user(record, data, text):
                         reset_at = start
                         polls.clear()
     ordered = list(reversed(edited)) + [p for p in reversed(read) if p not in edited]
@@ -269,11 +370,33 @@ def ends_cleanly(transcript: Path, size: int) -> bool:
         return f.read(1) == b"\n"
 
 
-def grew_beyond(transcript: Path, size: int) -> bool:
-    """Whether the transcript holds, after its first `size` bytes, anything but the stop's own bookkeeping: system
-    records, attachments that are not queued input, and one assistant record with text and no tool call (the final
-    message landing late). Anything else (a user record, a tool call, a second text, a record of another type, a line
-    that is not complete JSON) means the verdict may be stale, and a doubt counts as stale."""
+def late_record_is_bookkeeping(record: dict, final_text: str | None, prompt_id: str | None, seen_final: bool) -> bool:
+    """Whether one record that landed after the stop's size is only the stop's own bookkeeping. An allowlist: any record
+    kind, attachment type or system subtype not named here may start a new turn (a hook wake, a task notification, a
+    compaction, a file change) and so counts as growth. Claude Code 2.1.330 records: a stop writes `stop_hook_summary`
+    and `turn_duration` system records, `hook_success`/`hook_cancelled` attachments and the final assistant record;
+    `promptId` sits on user records only, so an assistant record may carry none (a mismatch is checked when it does)."""
+    kind = record.get("type")
+    if kind == "assistant":
+        text, call = record_text(record)
+        if call or seen_final or not final_text or text.strip() != final_text.strip():
+            return False
+        return record.get("promptId") in (None, prompt_id)
+    if kind == "attachment":
+        attachment = record.get("attachment")
+        return isinstance(attachment, dict) and attachment.get("type") in BOOKKEEPING_ATTACHMENTS
+    if kind == "system":
+        if record.get("subtype") not in BOOKKEEPING_SYSTEM:
+            return False
+        return not record.get("preventedContinuation") and not record.get("hookErrors")
+    return False
+
+
+def grew_beyond(transcript: Path, size: int, final_text: str | None = None, prompt_id: str | None = None) -> bool:
+    """Whether the transcript holds, after its first `size` bytes, anything but the stop's own bookkeeping (see
+    `late_record_is_bookkeeping`): the final message itself landing late (the payload's `last_assistant_message`, of the
+    payload's prompt) is allowed once. Anything else, a user record, a tool call, another text, an unknown record or
+    a line that is not complete JSON, means the verdict may be stale, and a doubt counts as stale."""
     with transcript.open("rb") as f:
         f.seek(size)
         data = f.read()
@@ -281,22 +404,12 @@ def grew_beyond(transcript: Path, size: int) -> bool:
         return False
     if not data.endswith(b"\n"):
         return True
-    texts = 0
+    seen_final = False
     for raw in data.splitlines():
         record = parsed(raw.decode("utf-8", errors="replace"))
-        if record is None:
+        if record is None or not late_record_is_bookkeeping(record, final_text, prompt_id, seen_final):
             return True
-        kind = record.get("type")
-        if kind == "assistant":
-            text, call = record_text(record)
-            texts += bool(text)
-            if call or texts > 1:
-                return True
-        elif kind == "attachment":
-            if (record.get("attachment") or {}).get("type") == "queued_command":
-                return True
-        elif kind != "system":
-            return True
+        seen_final = seen_final or record.get("type") == "assistant"
     return False
 
 
@@ -323,13 +436,23 @@ def plans_text(plans: list[Path]) -> str:
     used = 0
     omitted: list[Path] = []
     for index, path in enumerate(plans):
-        text = path.read_text(encoding="utf-8", errors="replace")
-        size = min(len(text), PLAN_LIMIT)  # the clip note is not plan text and does not count
-        if used + size > PLAN_BUDGET:
+        try:
+            size = path.stat().st_size  # a plan may be huge: its size is asked of the file system, never read whole
+        except OSError:
+            continue
+        charge = min(size, PLAN_LIMIT)  # bytes bound the characters from above; the cut note is not plan text
+        if used + charge > PLAN_BUDGET:
             omitted = plans[index:]
             break
-        used += size
-        shown.append(f"--- {path}\n{reflect.clip(text, PLAN_LIMIT)}")
+        try:
+            with open(path, encoding="utf-8", errors="replace") as handle:
+                excerpt = handle.read(PLAN_LIMIT + 1)  # one character past the limit tells that the plan was cut
+        except OSError:
+            continue
+        used += charge
+        if len(excerpt) > PLAN_LIMIT:
+            excerpt = excerpt[:PLAN_LIMIT] + f"\n... [plan cut at {PLAN_LIMIT} chars; the file is {size} bytes; open it with Read]"
+        shown.append(f"--- {path}\n{excerpt}")
     if omitted:
         shown.append("PLANS NOT SHOWN (the size budget is spent; open one with Read if it matters): " + ", ".join(str(p) for p in omitted))
     return "\n\n".join(shown)
@@ -339,8 +462,9 @@ def final_message(payload: dict, events: list[dict]) -> str:
     return payload.get("last_assistant_message") or next((e["text"] for e in reversed(events) if e["kind"] == "assistant"), "")
 
 
-def model_text(payload: dict, transcript: Path, found: dict, events: list[dict], wakes: int) -> str:
-    users = [e for e in events if e["kind"] in reflect.USER_KINDS and OWN_MARKER not in e["text"] and reflect.WAKE_MARKER not in e["text"]]
+def model_text(payload: dict, transcript: Path, found: dict, events: list[dict], wakes: int, humans: list[dict]) -> str:
+    """`humans` are the events of the lines that are not marked as someone else's (see `human_lines`)."""
+    users = [e for e in humans if e["kind"] in reflect.USER_KINDS]
     latest = "\n".join(reflect.line_of(e, reflect.CALL_LIMIT, reflect.RESULT_LIMIT, reflect.TEXT_LIMIT) for e in users[-reflect.USER_MESSAGES:])
     return "\n\n".join([
         f"RULES\n{reflect.rules(payload, transcript)}",
@@ -461,8 +585,9 @@ def assess(payload: dict, emit=None) -> str | None:
     if wakes >= MAX_WAKES:
         settle("wake-limit", f"{wakes} wakes in a row without a message of the user")
         return None
-    events = reflect.events_of(reflect.tail_lines(transcript))
-    text = model_text(payload, transcript, found, events, wakes)
+    lines = reflect.tail_lines(transcript)
+    events = reflect.events_of(lines)
+    text = model_text(payload, transcript, found, events, wakes, reflect.events_of(human_lines(lines)))
     dirs = list(dict.fromkeys(p.parent for p in found["plans"]))
     answer, cost, error = reflect.ask(MODEL, VERDICTS, text, cwd, dirs, started, prompt_file=PROMPT_FILE, schema_text=SCHEMA)
     seconds = round(time.monotonic() - started, 2)
@@ -473,7 +598,7 @@ def assess(payload: dict, emit=None) -> str | None:
         log({**entry, "decision": "ok", "verdict": "ok", "cost": cost, "seconds": seconds, "reason": answer.get("evidence", "")})
         return None
     with state_lock():
-        if grew_beyond(transcript, size):
+        if grew_beyond(transcript, size, payload.get("last_assistant_message"), payload.get("prompt_id")):
             outcome, before, wake = "superseded", wakes, None
         else:
             before = read_count(key, found)

@@ -58,6 +58,14 @@ def stop_task(use_id, task_id):
             result(use_id, {"message": "Successfully stopped task", "task_id": task_id})]
 
 
+def failed_stop(use_id, task_id, text="<tool_use_error>Could not stop the task</tool_use_error>"):
+    # A TaskStop that returned an error: the tool_result block carries is_error and the error text.
+    return [assistant((use_id, "TaskStop", {"task_id": task_id})),
+            {"type": "user", "isSidechain": True, "agentId": AGENT, "toolUseResult": f"Error: {text}",
+             "message": {"role": "user", "content": [
+                 {"type": "tool_result", "tool_use_id": use_id, "content": text, "is_error": True}]}}]
+
+
 class SubagentTasksGuardTests(unittest.TestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
@@ -172,6 +180,31 @@ class SubagentTasksGuardTests(unittest.TestCase):
     def test_handback_is_allowed_after_taskstop(self):
         self.write(start_bash("toolu_1", "bash0001") + stop_task("toolu_2", "bash0001"))
         self.assert_allowed(self.handback())
+
+    def test_handback_stays_denied_when_the_taskstop_failed(self):
+        self.write(start_bash("toolu_1", "bash0001") + failed_stop("toolu_2", "bash0001"))
+        self.assert_denied(self.handback(), "bash0001")
+
+    def test_handback_stays_denied_when_the_taskstop_has_no_result_yet(self):
+        self.write(start_bash("toolu_1", "bash0001") + [assistant(("toolu_2", "TaskStop", {"task_id": "bash0001"}))])
+        self.assert_denied(self.handback(), "bash0001")
+
+    def test_a_failed_taskstop_saying_the_task_is_not_running_counts_as_stopped(self):
+        text = "<tool_use_error>Task bash0001 is not running (status: completed)</tool_use_error>"
+        self.write(start_bash("toolu_1", "bash0001") + failed_stop("toolu_2", "bash0001", text))
+        self.assert_allowed(self.handback())
+
+    def test_a_retry_after_a_failed_taskstop_that_succeeds_counts_as_stopped(self):
+        self.write(start_bash("toolu_1", "bash0001") + failed_stop("toolu_2", "bash0001") + stop_task("toolu_3", "bash0001"))
+        self.assert_allowed(self.handback())
+
+    def test_a_failed_taskstop_for_one_task_does_not_hide_another_stopped_task(self):
+        self.write(start_bash("toolu_1", "bash0001") + start_bash("toolu_2", "bash0002")
+                   + failed_stop("toolu_3", "bash0001") + stop_task("toolu_4", "bash0002"))
+        code, stdout, _ = self.handback()
+        reason = json.loads(stdout)["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("bash0001", reason)
+        self.assertNotIn("bash0002", reason)
 
     def test_handback_is_allowed_after_a_terminal_notification(self):
         self.write(start_bash("toolu_1", "bash0001") + [notification("bash0001", "completed")])
