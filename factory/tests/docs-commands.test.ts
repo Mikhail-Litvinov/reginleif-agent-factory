@@ -56,6 +56,29 @@ describe("docs: commands", () => {
 		});
 	}
 
+	// Windows PowerShell 5.1 emits the array ConvertFrom-Json parsed as ONE object down the pipeline, so a filter after it sees
+	// the array, not its items, and matches nothing. The array is assigned first (or wrapped in parentheses) and then piped.
+	for (const name of DOCS) {
+		it(`${name} never pipes ConvertFrom-Json straight into a pipeline cmdlet`, () => {
+			const bad = commandsOf(docText(name))
+				.filter(({ code }) => /ConvertFrom-Json\s*\|\s*(Where-Object|ForEach-Object|Select-Object|Sort-Object|Group-Object|Measure-Object|\?|%)/i.test(code))
+				.map(({ line, code }) => `${name}:${line}: ${code}`);
+			assert.deepEqual(bad, []);
+		});
+
+		// A check that compares a recorded value with the live one passes when both are empty, which proves nothing: the line
+		// refuses an empty or null recorded value first.
+		it(`${name} refuses an empty recorded value before it compares it`, () => {
+			const bad = commandsOf(docText(name))
+				.filter(({ code }) => {
+					const fields = [...code.matchAll(/(?:-ne|-eq)\s+(\$r\.\w+)/g)].map((match) => match[1] as string);
+					return fields.some((field) => !code.includes(`-not ${field}`));
+				})
+				.map(({ line, code }) => `${name}:${line}: ${code}`);
+			assert.deepEqual(bad, []);
+		});
+	}
+
 	// The volume copy writes a new file and refuses a name that exists: a second run into the same name must fail and leave
 	// the first file as it was, and the doc must not name a fixed file.
 	it("recovery.md: the volume copy writes a new file and refuses a name that exists", async () => {

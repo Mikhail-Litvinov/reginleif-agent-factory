@@ -6,7 +6,7 @@
 // two node tools that default to the real project, and `git pull` is replaced by copying the deploy files of this revision
 // over the legacy ones (the update the pull makes).
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { freePort, run, runChecked, stackEnv, waitHealthy } from "../deploy/lib.ts";
@@ -147,6 +147,18 @@ const play = async (fixture: Fixture, steps: readonly string[]): Promise<void> =
 };
 
 // The data and the database are the same as before the upgrade: the sentinel file, the system identifier, the volume.
+// The record the doc's step 4 wrote before the upgrade: a container id, the real volume's name and the system identifier,
+// none empty (the doc is run in Windows PowerShell 5.1, the owner's shell: `powershell`, see runPs in doc-lib.ts).
+const assertRecord = (fixture: Fixture, legacyId: string, system: string, volume: string): void => {
+	const files = readdirSync(fixture.backups).filter((name) => /^upgrade-.*\.json$/.test(name));
+	assert.equal(files.length, 1, "the doc wrote one upgrade record");
+	const record = JSON.parse(readFileSync(join(fixture.backups, files[0] as string), "utf8")) as { container?: string; volume?: string; system?: string };
+	assert.ok(record.volume, "the recorded volume name is not empty");
+	assert.equal(record.volume, volume, "the recorded volume is the real volume");
+	assert.equal(record.container, legacyId, "the recorded container is the one that ran before the upgrade");
+	assert.equal(record.system, system, "the recorded system identifier is the real one");
+};
+
 const assertSameData = async (fixture: Fixture, system: string, volume: string): Promise<void> => {
 	assert.equal(await exec(fixture, "cat", `${DATA}/${SENTINEL}`), SENTINEL, "the sentinel in the data directory");
 	assert.equal(await systemId(fixture), system, "the same database system");
@@ -187,6 +199,7 @@ describe("upgrade of a running legacy stack, by the commands of the doc", () => 
 			assert.ok(upgrade.length >= 20, `the upgrade has its steps (${upgrade.length})`);
 
 			await play(fixture, upgrade);
+			assertRecord(fixture, legacyId, system, volume);
 			assert.notEqual(await inspect(fixture, "{{.Id}}"), legacyId, "the container is a new one");
 			assert.match(await inspect(fixture, "{{json .Config.Healthcheck.Test}}"), /af-init-complete/, "the new revision's health check");
 			assert.equal(await inspect(fixture, "{{.State.Health.Status}}"), "healthy");

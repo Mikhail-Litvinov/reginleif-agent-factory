@@ -336,7 +336,7 @@ Upgrade, in this order:
 
    `$record = Join-Path $backups ('upgrade-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.json')`
 
-   `& $proveVolume 'agent-factory'; $id = docker inspect --format '{{.Id}}' agent-factory-postgres-1; $vol = (docker inspect --format '{{json .Mounts}}' agent-factory-postgres-1 | ConvertFrom-Json | Where-Object Destination -eq '/var/lib/postgresql/data').Name; $sysid = ((docker exec -u postgres agent-factory-postgres-1 /usr/lib/postgresql/16/bin/pg_controldata /var/lib/postgresql/data | Select-String 'Database system identifier').Line -replace '\D', ''); @{ container = $id; volume = $vol; system = $sysid } | ConvertTo-Json | Out-File -NoClobber -Encoding ascii $record`
+   `& $proveVolume 'agent-factory'; $id = docker inspect --format '{{.Id}}' agent-factory-postgres-1; $m = docker inspect --format '{{json .Mounts}}' agent-factory-postgres-1 | ConvertFrom-Json; $vol = ($m | Where-Object { $_.Destination -eq '/var/lib/postgresql/data' }).Name; $sysid = ((docker exec -u postgres agent-factory-postgres-1 /usr/lib/postgresql/16/bin/pg_controldata /var/lib/postgresql/data | Select-String 'Database system identifier').Line -replace '\D', ''); if (-not $id -or -not $vol -or -not $sysid) { throw "refusing: the record would miss a container id, a volume or a system identifier" }; @{ container = $id; volume = $vol; system = $sysid } | ConvertTo-Json | Out-File -NoClobber -Encoding ascii $record`
 
    `Get-Content $record`
 
@@ -375,15 +375,15 @@ Upgrade, in this order:
 
    `if ((docker inspect --format '{{.State.Health.Status}}' agent-factory-postgres-1) -ne 'healthy') { throw "refusing: the new container is not healthy" }`
 
-   `if ((docker inspect --format '{{.Id}}' agent-factory-postgres-1) -eq $r.container) { throw "refusing: this is still the old container" }`
+   `$id = docker inspect --format '{{.Id}}' agent-factory-postgres-1; if (-not $r.container -or -not $id -or $id -eq $r.container) { throw "refusing: this is still the old container, or an id is missing" }`
 
    `if ((docker inspect --format '{{json .Config.Entrypoint}}' agent-factory-postgres-1) -notmatch 'entrypoint\.sh') { throw "refusing: the container does not start through the wrapper" }`
 
    `if ((docker inspect --format '{{json .Config.Healthcheck.Test}}' agent-factory-postgres-1) -notmatch 'af-init-complete') { throw "refusing: the container has the old healthcheck" }`
 
-   `if ((docker inspect --format '{{json .Mounts}}' agent-factory-postgres-1 | ConvertFrom-Json | Where-Object Destination -eq '/var/lib/postgresql/data').Name -ne $r.volume) { throw "refusing: the container serves another volume" }`
+   `$m = docker inspect --format '{{json .Mounts}}' agent-factory-postgres-1 | ConvertFrom-Json; $vol = ($m | Where-Object { $_.Destination -eq '/var/lib/postgresql/data' }).Name; if (-not $r.volume -or -not $vol -or $vol -ne $r.volume) { throw "refusing: the container serves another volume, or a volume name is missing" }`
 
-   `if (((docker exec -u postgres agent-factory-postgres-1 /usr/lib/postgresql/16/bin/pg_controldata /var/lib/postgresql/data | Select-String 'Database system identifier').Line -replace '\D', '') -ne $r.system) { throw "refusing: the database is not the one recorded" }`
+   `$sysid = ((docker exec -u postgres agent-factory-postgres-1 /usr/lib/postgresql/16/bin/pg_controldata /var/lib/postgresql/data | Select-String 'Database system identifier').Line -replace '\D', ''); if (-not $r.system -or -not $sysid -or $sysid -ne $r.system) { throw "refusing: the database is not the one recorded, or an identifier is missing" }`
 
    `node factory/deploy/verify-init.ts --with-marker`
 
@@ -408,7 +408,7 @@ the repository; it is made again from the copy:
 
    `$r = Get-Content (Get-ChildItem $backups -Filter 'upgrade-*.json' | Sort-Object LastWriteTime | Select-Object -Last 1).FullName -Raw | ConvertFrom-Json`
 
-   `if (((docker exec -u postgres agent-factory-postgres-1 /usr/lib/postgresql/16/bin/pg_controldata /var/lib/postgresql/data | Select-String 'Database system identifier').Line -replace '\D', '') -ne $r.system) { throw "refusing: the database is not the one recorded" }`
+   `$sysid = ((docker exec -u postgres agent-factory-postgres-1 /usr/lib/postgresql/16/bin/pg_controldata /var/lib/postgresql/data | Select-String 'Database system identifier').Line -replace '\D', ''); if (-not $r.system -or -not $sysid -or $sysid -ne $r.system) { throw "refusing: the database is not the one recorded, or an identifier is missing" }`
 
    `node factory/deploy/verify-init.ts --with-marker`
 
