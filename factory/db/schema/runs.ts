@@ -1,0 +1,27 @@
+import { sql } from "drizzle-orm";
+import { bigint, check, customType, index, integer, jsonb, pgTable, text, timestamp, unique, uniqueIndex, uuid } from "drizzle-orm/pg-core";
+import { tasks } from "./tasks.ts";
+import { workers } from "./workers.ts";
+import { agents } from "./agents.ts";
+import { executionPolicies } from "./execution-policies.ts";
+
+const time = (name: string) => timestamp(name, { withTimezone: true });
+const created = () => time("created_at").notNull().defaultNow();
+const updated = () => time("updated_at").notNull().defaultNow();
+const version = () => bigint("row_version", { mode: "bigint" }).notNull().default(sql`1`);
+const xid8 = customType<{ data: string }>({ dataType: () => "xid8" });
+export const workspaces = pgTable("workspaces", {
+	id: uuid("id").primaryKey(), taskId: uuid("task_id").references(() => tasks.id, { onDelete: "restrict" }), workerId: uuid("worker_id").references(() => workers.id, { onDelete: "restrict" }), repository: text("repository"), baseCommit: text("base_commit"), branch: text("branch"), worktreePath: text("worktree_path"), state: text("state"), commits: jsonb("commits"), pullRequestUrl: text("pull_request_url"), createdAt: created(), cleanedAt: time("cleaned_at"), updatedAt: updated(), rowVersion: version(),
+}, t => [uniqueIndex("workspaces_in_use_path").on(t.worktreePath).where(sql`${t.state} = 'in_use'`), check("workspaces_state", sql`${t.state} IN ('prepared','in_use','done','cleaned','kept')`)]);
+export const taskRuns = pgTable("task_runs", {
+	id: uuid("id").primaryKey(), taskId: uuid("task_id").notNull().references(() => tasks.id, { onDelete: "restrict" }), attemptNumber: integer("attempt_number"), role: text("role"), agentId: uuid("agent_id").references(() => agents.id, { onDelete: "restrict" }), workerId: uuid("worker_id").references(() => workers.id, { onDelete: "restrict" }), temporalActivityId: text("temporal_activity_id"), executionId: uuid("execution_id").unique(), sessionId: text("session_id"), workspaceId: uuid("workspace_id").references(() => workspaces.id, { onDelete: "restrict" }), taskRevision: integer("task_revision"), policyId: uuid("policy_id").references(() => executionPolicies.id, { onDelete: "restrict" }), contractVersion: integer("contract_version"), status: text("status"), gpuWaitSince: time("gpu_wait_since"), startedAt: time("started_at"), heartbeatAt: time("heartbeat_at"), finishedAt: time("finished_at"), exitCode: integer("exit_code"), errorCode: text("error_code"), errorMessage: text("error_message"), resultSummary: text("result_summary"), usageMetrics: jsonb("usage_metrics"), createdAt: created(), updatedAt: updated(), rowVersion: version(),
+}, t => [unique("task_runs_task_attempt").on(t.taskId, t.attemptNumber), check("task_runs_role", sql`${t.role} IN ('planner','implementer','tester','reviewer')`), check("task_runs_status", sql`${t.status} IN ('created','starting','running','finished','failed','died','unclear','cancelling','cancelled')`)]);
+export const taskEvents = pgTable("task_events", {
+	id: uuid("id").primaryKey(), seq: bigint("seq", { mode: "bigint" }).generatedAlwaysAsIdentity().notNull().unique(), commitXid: xid8("commit_xid").notNull().default(sql`pg_current_xact_id()`), taskId: uuid("task_id").references(() => tasks.id, { onDelete: "restrict" }), runId: uuid("run_id").references(() => taskRuns.id, { onDelete: "restrict" }), eventType: text("event_type"), actorType: text("actor_type"), actorId: uuid("actor_id"), payload: jsonb("payload"), correlationId: text("correlation_id"), dedupeKey: text("dedupe_key"), createdAt: created(),
+}, t => [unique("task_events_task_dedupe").on(t.taskId,t.dedupeKey), index("task_events_cursor").on(t.commitXid,t.seq), check("task_events_actor_type", sql`${t.actorType} IN ('owner','worker','workflow','system')`)]);
+export const taskArtifacts = pgTable("task_artifacts", {
+	id: uuid("id").primaryKey(), taskId: uuid("task_id").references(() => tasks.id, { onDelete: "restrict" }), runId: uuid("run_id").references(() => taskRuns.id, { onDelete: "restrict" }), artifactType: text("artifact_type"), storageBackend: text("storage_backend"), storageKey: text("storage_key"), checksum: text("checksum"), size: bigint("size", { mode: "bigint" }), metadata: jsonb("metadata"), uploadState: text("upload_state"), clientUploadId: text("client_upload_id"), createdAt: created(), confirmedAt: time("confirmed_at"), removedAt: time("removed_at"), removedBy: uuid("removed_by"), updatedAt: updated(), rowVersion: version(),
+}, t => [unique("task_artifacts_storage_key").on(t.storageBackend,t.storageKey), unique("task_artifacts_client_upload").on(t.runId,t.clientUploadId), check("task_artifacts_type", sql`${t.artifactType} IN ('log','result','report','check_log','screenshot','file')`), check("task_artifacts_backend", sql`${t.storageBackend} IN ('fs')`), check("task_artifacts_state", sql`${t.uploadState} IN ('pending','confirmed','removed')`)]);
+export const runChecks = pgTable("run_checks", {
+	id: uuid("id").primaryKey(), runId: uuid("run_id").references(() => taskRuns.id, { onDelete: "restrict" }), name: text("name"), command: text("command"), status: text("status"), notRunReason: text("not_run_reason"), exitCode: integer("exit_code"), logArtifactId: uuid("log_artifact_id").references(() => taskArtifacts.id, { onDelete: "restrict" }), startedAt: time("started_at"), finishedAt: time("finished_at"),
+}, t => [check("run_checks_status", sql`${t.status} IN ('passed','failed','not_run')`)]);

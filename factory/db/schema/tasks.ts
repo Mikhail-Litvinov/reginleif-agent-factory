@@ -2,6 +2,7 @@ import { sql } from "drizzle-orm";
 import { bigint, boolean, check, integer, pgTable, text, timestamp, uniqueIndex, uuid, type AnyPgColumn } from "drizzle-orm/pg-core";
 import { projects } from "./projects.ts";
 import { agents } from "./agents.ts";
+import { taskRuns } from "./runs.ts";
 
 export const tasks = pgTable("tasks", {
 	id: uuid("id").primaryKey(), projectId: uuid("project_id").references(() => projects.id, { onDelete: "restrict" }),
@@ -10,7 +11,7 @@ export const tasks = pgTable("tasks", {
 	createdBy: uuid("created_by"), assignedAgentId: uuid("assigned_agent_id").references(() => agents.id, { onDelete: "restrict" }),
 	workflowId: text("workflow_id").unique(), workflowRunId: text("workflow_run_id"), blockKind: text("block_kind"), blockReason: text("block_reason"), blockHandler: text("block_handler"), resumeTo: text("resume_to"),
 	pauseRequested: boolean("pause_requested"), stopping: boolean("stopping"), endUnconfirmed: boolean("end_unconfirmed"), originType: text("origin_type"),
-	originTaskId: uuid("origin_task_id").references((): AnyPgColumn => tasks.id, { onDelete: "restrict" }), originRunId: uuid("origin_run_id"), originActor: text("origin_actor"), depth: integer("depth").notNull(),
+	originTaskId: uuid("origin_task_id").references((): AnyPgColumn => tasks.id, { onDelete: "restrict" }), originRunId: uuid("origin_run_id").references((): AnyPgColumn => taskRuns.id, { onDelete: "restrict" }), originActor: text("origin_actor"), depth: integer("depth").notNull(),
 	createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(), updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(), completedAt: timestamp("completed_at", { withTimezone: true }), deletedAt: timestamp("deleted_at", { withTimezone: true }), rowVersion: bigint("row_version", { mode: "bigint" }).notNull().default(sql`1`),
 }, (t) => [
 	uniqueIndex("tasks_standing_project").on(t.projectId).where(sql`${t.originType} = 'standing'`),
