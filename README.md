@@ -31,6 +31,7 @@ A feature is a set of rules, hooks, plugins and programs under one name. The fea
 | --- | --- | --- | --- |
 | `base` | always on | Linux, Windows, macOS | Base rules and hooks. |
 | `reflection` | on | Linux, Windows, macOS | Reflection after Claude Code turns. |
+| `chief-assistant` | on | Linux, Windows, macOS | Wakes the session when it stops with agreed plan work left: no question, blocker, poll or running background task explains the stop, and a plan it read or edited has open items. Needs `reflection`. |
 | `analysis-gate` | off | Linux, Windows, macOS | Requires a fresh `.tmp/analysis.md` (sections `## Unknowns` and `## Class`, valid 30 minutes) before agent launches and time estimates: Agent launches without it are blocked, and the reflection (if on) flags an estimate named without it. |
 | `subagent-tasks-guard` | on | Linux, Windows, macOS | Blocks a subagent from reporting or ending while a background task it started (Monitor, background Bash, background Agent) is still alive: the refusal names the tasks and asks to stop them with TaskStop. The main session is never guarded. |
 | `codex` | on | Linux, Windows, macOS | Delegating tasks through Codex. Which claude-swap accounts may use it is set in `~/.agent-rig/account-allowlist.json`: `{"codex": [1, 4], "volunteers": [1, 4]}` (the `volunteers` key is shared with that feature). A missing file or key means no restriction; on another account the launcher refuses `start` and `reply` and the session gets a hint not to use Codex. |

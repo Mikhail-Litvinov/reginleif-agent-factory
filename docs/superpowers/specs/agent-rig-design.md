@@ -74,7 +74,7 @@ Linux, `python` on Windows. `rig check` verifies that the interpreter starts.
 Hooks run straight from the clone. Claude Code looks for agents and skills in `~/.claude`, so `rig` copies them there,
 substituting paths and the interpreter in place of `C:/Users/...`.
 
-Hooks that read the session transcript (`compact_history.py`, the reflection hook, the subagent-tasks guard) do not
+Hooks that read the session transcript (`compact_history.py`, the reflection hook, the chief-assistant hook, the subagent-tasks guard) do not
 trust the `transcript_path` of their input: Claude Code names it after the session's current cwd, but a session resumed
 in another cwd keeps its file where it began. `base/hooks/transcript_file.py` resolves it: the named path when it is a
 file, else the existing `<config dir>/projects/*/<session_id>.jsonl` (the newest when several; the config dir is
@@ -166,6 +166,7 @@ Sections are headings in `CLAUDE.md` and `~/.codex/AGENTS.md`.
 |---|---|---|---|---|---|
 | base | always | all | `hooks/project-tmp.sh`, `hooks/project-tmp-settings.ps1` (Windows only), `hooks/compact_history.py`, `hooks/no_ampersand.py`, `hooks/system-temp-guard.py`, `tools/patchlib.py`, `tools/account-allowlist.py`, `agents/explore.md`, `agents/general-purpose.md` | SessionStart and PreToolUse | see below |
 | `reflection` | yes | all | `hooks/reflect.py`, `hooks/reflect_prompt.md` | `Stop` | — |
+| `chief-assistant` | yes | all | `hooks/assist.py`, `hooks/assist_prompt.md` (depends on `reflection`: shares its transcript parsing, rules loading and model call) | `Stop` (asyncRewake) | — |
 | `codex` | yes | all | `tools/codex-run.py`, `agents/codex.md`, plugin `codex@openai-codex` | `SessionStart`: `codex-run.py session-hint` | "Delegating to Codex" |
 | `telegram` | yes | all | plugin `telegram-hub` from the hub clone, the hub service, including `/bash` | plugin hooks | "Attention chime", the line about Telegram mode |
 | `rtk` | yes | all | the `rtk` program, `RTK.md` | `PreToolUse`: `rtk hook claude` | — |

@@ -406,8 +406,11 @@ def prune_turns() -> None:
             f.unlink(missing_ok=True)
 
 
-def ask(model: str, verdicts: list[str], text: str, cwd: str, dirs: list[Path], started: float) -> tuple[dict | None, float, str]:
-    """One reviewer, with retries for a dropped network. Returns (answer, cost, error)."""
+def ask(model: str, verdicts: list[str], text: str, cwd: str, dirs: list[Path], started: float,
+        prompt_file: Path | None = None, schema_text: str | None = None) -> tuple[dict | None, float, str]:
+    """One reviewer, with retries for a dropped network. Returns (answer, cost, error).
+    The chief-assistant hook shares this call and passes its own prompt file and answer schema;
+    reflection passes neither and keeps its own."""
     claude = shutil.which("claude")
     if not claude:
         return None, 0.0, "claude not on PATH"
@@ -416,8 +419,8 @@ def ask(model: str, verdicts: list[str], text: str, cwd: str, dirs: list[Path], 
         cmd += ["--add-dir", str(d)]
     cmd += [
         "--no-session-persistence", "--disable-slash-commands", "--strict-mcp-config",
-        "--setting-sources", "", "--system-prompt-file", str(PROMPT_FILE),
-        "--json-schema", schema(verdicts), "--output-format", "json",
+        "--setting-sources", "", "--system-prompt-file", str(prompt_file or PROMPT_FILE),
+        "--json-schema", schema_text if schema_text is not None else schema(verdicts), "--output-format", "json",
     ]
     env = dict(os.environ, **{CHILD_ENV: "1", "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"})
     cost, error = 0.0, ""

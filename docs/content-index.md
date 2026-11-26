@@ -106,5 +106,6 @@
 | Hook | `PreToolUse` | subagent-tasks-guard | — | all | `subagent-tasks-guard` on | `SubagentHandback` | `{{PYTHON}}` | `{{CLONE}}/features/subagent-tasks-guard/hooks/subagent_tasks_guard.py` | 30 | `Checking background tasks of the subagent` | — |
 | Hook | `SubagentStop` | subagent-tasks-guard | — | all | `subagent-tasks-guard` on | — | `{{PYTHON}}` | `{{CLONE}}/features/subagent-tasks-guard/hooks/subagent_tasks_guard.py` | 30 | `Checking background tasks of the subagent` | — |
 | Hook | `Stop` | reflection | — | all | `reflection` on | — | `{{PYTHON}}` | `-X utf8 {{CLONE}}/features/reflection/hooks/reflect.py` | 330 | `Reflecting on the turn` | `true` |
+| Hook | `Stop` | chief-assistant | — | all | `chief-assistant` on | — | `{{PYTHON}}` | `-X utf8 {{CLONE}}/features/chief-assistant/hooks/assist.py` | 330 | `Checking for idle stops` | `true` |
 
 Hook commands run from the clone. In a hook `command`, `{{PYTHON}}`, `{{BASH}}` and `rtk` become absolute paths at apply time (Git Bash on Windows). Elsewhere `{{PYTHON}}` is `python3` on Linux and `python` on Windows. Rule and hook paths use `{{CLONE}}` when rig needs an absolute path.
