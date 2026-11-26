@@ -374,6 +374,10 @@
     {
       "path": "rules/shared-tests-and-runs.md",
       "target": "shared"
+    },
+    {
+      "path": "rules/shared-finishing-a-stage.md",
+      "target": "shared"
     }
   ],
   "hooks": [
