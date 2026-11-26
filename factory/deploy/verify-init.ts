@@ -70,39 +70,45 @@ export const verifyInit = async (options: VerifyOptions = {}): Promise<CheckResu
 
 	// All catalog checks in one session; the answer is one line per check. A failing session (the role cannot log in, the
 	// database is gone) fails every one of them with the server's words, never a pass.
-	const verdicts = new Map<number, string>();
-	let sqlProblem = "";
-	const batch = await tryPsql(container, CHECKING_ROLE, batchSql(sqlChecks), { database: DATABASE, tcp: true });
-	if (batch.code !== 0) {
-		sqlProblem = `could not run the catalog checks as ${CHECKING_ROLE}: ${(batch.stderr.trim() || batch.stdout.trim() || `exit ${batch.code}`).split(/\r?\n/)[0]}`;
-	} else {
+	const runBatch = async (): Promise<{ verdicts: Map<number, string>; sqlProblem: string }> => {
+		const verdicts = new Map<number, string>();
+		const batch = await tryPsql(container, CHECKING_ROLE, batchSql(sqlChecks), { database: DATABASE, tcp: true });
+		if (batch.code !== 0) {
+			return { verdicts, sqlProblem: `could not run the catalog checks as ${CHECKING_ROLE}: ${(batch.stderr.trim() || batch.stdout.trim() || `exit ${batch.code}`).split(/\r?\n/)[0]}` };
+		}
 		for (const line of batch.stdout.split(/\r?\n/)) {
 			const match = /^(\d+)\|(.*)$/.exec(line.trim());
 			if (match) verdicts.set(Number(match[1]), match[2] as string);
 		}
-	}
+		return { verdicts, sqlProblem: "" };
+	};
+	const batchResult = runBatch();
 
-	const results: CheckResult[] = [];
-	for (const check of checks) {
+	// The catalog batch, the logins, the rule check and the shell checks are independent reads (one docker exec each), so
+	// they run together; the results keep the order of CHECKS.
+	const resultOf = async (check: Check): Promise<CheckResult> => {
 		if (check.kind === "sql") {
+			const { verdicts, sqlProblem } = await batchResult;
 			const index = sqlChecks.indexOf(check);
 			const verdict = verdicts.get(index);
-			results.push(sqlProblem ? failure(check, sqlProblem) : verdict === "true" ? success(check) : failure(check, verdict === undefined ? "no answer" : "the postcondition does not hold"));
-		} else if (check.kind === "hba") {
-			const problems = await checkActiveHba(container);
-			results.push(problems.length === 0 ? success(check) : failure(check, problems.join("; ")));
-		} else if (check.kind === "login" && check.wrongPassword) {
-			const problem = await probeWrongPassword(container, check.role);
-			results.push(problem === null ? success(check) : failure(check, problem));
-		} else if (check.kind === "login") {
-			const attempt = await tryPsql(container, check.role, "select 1;", { database: DATABASE, tcp: true });
-			results.push(attempt.code === 0 && attempt.stdout.trim() === "1" ? success(check) : failure(check, (attempt.stderr.trim() || `exit ${attempt.code}`).split(/\r?\n/)[0] as string));
-		} else {
-			const attempt = await run("docker", ["exec", "-u", "postgres", container, "sh", "-c", check.script]);
-			results.push(attempt.code === 0 ? success(check) : failure(check, (attempt.stdout.trim() || attempt.stderr.trim() || `exit ${attempt.code}`).split(/\r?\n/)[0] as string));
+			return sqlProblem ? failure(check, sqlProblem) : verdict === "true" ? success(check) : failure(check, verdict === undefined ? "no answer" : "the postcondition does not hold");
 		}
-	}
-	return results;
+		if (check.kind === "hba") {
+			const problems = await checkActiveHba(container);
+			return problems.length === 0 ? success(check) : failure(check, problems.join("; "));
+		}
+		if (check.kind === "login" && check.wrongPassword) {
+			const problem = await probeWrongPassword(container, check.role);
+			return problem === null ? success(check) : failure(check, problem);
+		}
+		if (check.kind === "login") {
+			const attempt = await tryPsql(container, check.role, "select 1;", { database: DATABASE, tcp: true });
+			return attempt.code === 0 && attempt.stdout.trim() === "1" ? success(check) : failure(check, (attempt.stderr.trim() || `exit ${attempt.code}`).split(/\r?\n/)[0] as string);
+		}
+		const attempt = await run("docker", ["exec", "-u", "postgres", container, "sh", "-c", check.script]);
+		return attempt.code === 0 ? success(check) : failure(check, (attempt.stdout.trim() || attempt.stderr.trim() || `exit ${attempt.code}`).split(/\r?\n/)[0] as string);
+	};
+	return Promise.all(checks.map(resultOf));
 };
 
 export const formatResults = (results: readonly CheckResult[]): string[] =>

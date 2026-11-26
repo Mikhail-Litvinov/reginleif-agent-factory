@@ -6,7 +6,7 @@ import { chmodSync } from "node:fs";
 import { readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
-import { SID_ADMINISTRATORS, SID_SYSTEM, aclSids, pathsAccessProblems, restrictDirectory } from "../deploy/acl.ts";
+import { SID_ADMINISTRATORS, SID_SYSTEM, aclSids, aclSidsOf, pathsAccessProblems, restrictDirectory } from "../deploy/acl.ts";
 import { backup } from "../deploy/backup/backup.ts";
 import { OwnedDir } from "../deploy/owned.ts";
 import { sharedStack, type TestStack } from "./helpers.ts";
@@ -44,6 +44,19 @@ describe("acl.ts", () => {
 			assert.equal(aclSids(dir).includes(SID_USERS), false);
 			assert.equal(aclSids(dir).includes(SID_SYSTEM) && aclSids(dir).includes(SID_ADMINISTRATORS), true);
 		}
+	});
+
+	it("reads many paths in one go, each answer belonging to its own path, and a path that cannot be read fails the whole read", async (t) => {
+		if (process.platform !== "win32") return t.skip("the SID read exists on Windows only");
+		const open = (await scratch.child("batch-open")).path;
+		const closed = (await scratch.child("batch-closed")).path;
+		restrictDirectory(closed, "test directory");
+		widen(open);
+		const [openSids, closedSids] = aclSidsOf([open, closed]) as [string[], string[]];
+		assert.equal(openSids.includes(SID_USERS), true, "the widened path keeps its own entry");
+		assert.equal(closedSids.includes(SID_USERS), false, "the restricted path does not get the entry of the other");
+		assert.deepEqual(aclSidsOf([closed, open])[1], openSids, "the order of the answer is the order of the paths");
+		assert.throws(() => aclSidsOf([closed, join(scratch.path, "no-such-path")]), /could not read the ACL/);
 	});
 });
 

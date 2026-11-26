@@ -10,28 +10,47 @@ import { chmodSync, statSync } from "node:fs";
 export const SID_SYSTEM = "S-1-5-18";
 export const SID_ADMINISTRATORS = "S-1-5-32-544";
 
+// The user of this process cannot change while it runs, so the SID is asked once (a failed ask is not remembered).
+let cachedUserSid: string | undefined;
 export const currentUserSid = (): string => {
+	if (cachedUserSid) return cachedUserSid;
 	const result = spawnSync("whoami", ["/user", "/fo", "csv", "/nh"], { encoding: "utf8" });
 	const sid = /"(S-1-\d+(?:-\d+)+)"/.exec(result.stdout ?? "")?.[1];
 	if (result.status !== 0 || !sid) throw new Error(`could not read the current user's SID: ${result.stderr || result.stdout}`);
+	cachedUserSid = sid;
 	return sid;
 };
 
-// The SIDs that have an access entry on a path, read back from the system (icacls /sid prints SIDs, not names).
-export const aclSids = (path: string): string[] => {
-	// Get-Acl asked for SecurityIdentifier objects: the SID is never translated to a (localized) name.
+// The SIDs that have an access entry on each of the paths, read back from the system in ONE PowerShell start (a start
+// costs about as much as the whole read; the order of the answer is the order of `paths`). Any path that cannot be read
+// fails the whole call: $ErrorActionPreference = Stop makes the first failure end the script with a non-zero exit, so a
+// path that was not read never reads as "no entries".
+export const aclSidsOf = (paths: readonly string[]): string[][] => {
+	if (paths.length === 0) return [];
+	// Get-Acl asked for SecurityIdentifier objects: the SID is never translated to a (localized) name. Each answer line is
+	// `<index of the path>|<sid>`.
 	const script =
-		"$a = Get-Acl -LiteralPath $env:AF_ACL_PATH; " +
-		"$a.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) | ForEach-Object { $_.IdentityReference.Value }";
-	// The path goes through the environment: with -Command, extra arguments are joined into the command text, so a path
-	// with a space reached Get-Acl cut at the first space and the read-back came back empty.
+		"$ErrorActionPreference = 'Stop'; $paths = ConvertFrom-Json $env:AF_ACL_PATHS; " +
+		"for ($i = 0; $i -lt $paths.Count; $i++) { " +
+		"$prefix = $i.ToString() + '|'; " +
+		"(Get-Acl -LiteralPath $paths[$i]).GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) | ForEach-Object { $prefix + $_.IdentityReference.Value } }";
+	// The paths go through the environment as JSON: with -Command, extra arguments are joined into the command text, so a
+	// path with a space reached Get-Acl cut at the first space and the read-back came back empty.
 	const result = spawnSync("powershell", ["-NoProfile", "-NonInteractive", "-Command", script], {
 		encoding: "utf8",
-		env: { ...process.env, AF_ACL_PATH: path },
+		env: { ...process.env, AF_ACL_PATHS: JSON.stringify(paths) },
 	});
-	if (result.status !== 0) throw new Error(`could not read the ACL of ${path}: ${result.stderr || result.stdout}`);
-	return result.stdout.split(/\r?\n/).map((l) => l.trim()).filter((l) => /^S-1-\d+(?:-\d+)*$/.test(l));
+	if (result.status !== 0) throw new Error(`could not read the ACL of ${paths.join(", ")}: ${result.stderr || result.stdout}`);
+	const sids = paths.map(() => [] as string[]);
+	for (const line of result.stdout.split(/\r?\n/)) {
+		const match = /^(\d+)\|(S-1-\d+(?:-\d+)*)$/.exec(line.trim());
+		if (match) sids[Number(match[1])]?.push(match[2] as string);
+	}
+	return sids;
 };
+
+// The SIDs that have an access entry on a path, read back from the system.
+export const aclSids = (path: string): string[] => aclSidsOf([path])[0] as string[];
 
 // The access of exactly these paths, read back (the effective ACL, inherited entries included, on Windows). An empty list
 // means the paths are open to the allowed holders only. Read-only: it changes nothing.
@@ -40,8 +59,9 @@ export const pathsAccessProblems = (paths: string[]): string[] => {
 	if (process.platform === "win32") {
 		const user = currentUserSid();
 		const allowed = new Set([user, SID_SYSTEM, SID_ADMINISTRATORS]);
-		for (const path of paths) {
-			const sids = aclSids(path);
+		const read = aclSidsOf(paths);
+		for (const [index, path] of paths.entries()) {
+			const sids = read[index] as string[];
 			for (const sid of new Set(sids)) {
 				if (!allowed.has(sid)) problems.push(`${path}: access entry for ${sid}, which is not the current user, SYSTEM or Administrators`);
 			}
