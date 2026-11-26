@@ -1,0 +1,51 @@
+{
+  "name": "chief-assistant",
+  "description": "Wakes the session when it stops with agreed plan work left.",
+  "translations": {
+    "ru": {
+      "description": "Будит сессию, когда она остановилась, не доделав согласованную работу по плану."
+    }
+  },
+  "enabledByDefault": true,
+  "platforms": [
+    "linux",
+    "windows",
+    "darwin"
+  ],
+  "dependencies": [
+    "reflection",
+    "subagent-tasks-guard"
+  ],
+  "rules": [],
+  "hooks": [
+    {
+      "event": "Stop",
+      "matcher": "",
+      "command": "{{PYTHON}}",
+      "args": [
+        "-X",
+        "utf8",
+        "{{CLONE}}/features/chief-assistant/hooks/assist.py"
+      ],
+      "timeout": 330,
+      "statusMessage": "Checking for idle stops",
+      "translations": {
+        "ru": {
+          "statusMessage": "Проверка простоя"
+        }
+      },
+      "asyncRewake": true
+    }
+  ],
+  "settings": [],
+  "plugins": [],
+  "files": [
+    "hooks/assist.py",
+    "hooks/assist_prompt.md"
+  ],
+  "assets": [],
+  "agents": [],
+  "skills": [],
+  "hubCommands": [],
+  "programs": []
+}

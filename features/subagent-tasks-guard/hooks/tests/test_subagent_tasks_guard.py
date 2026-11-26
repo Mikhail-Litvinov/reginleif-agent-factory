@@ -2,6 +2,7 @@
 
 Transcripts are synthetic JSONL built from the shapes of real subagent transcripts (invented ids).
 """
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -56,6 +57,14 @@ def start_agent(use_id, task_id, description="child agent"):
 def stop_task(use_id, task_id):
     return [assistant((use_id, "TaskStop", {"task_id": task_id})),
             result(use_id, {"message": "Successfully stopped task", "task_id": task_id})]
+
+
+def failed_stop(use_id, task_id, text="<tool_use_error>Could not stop the task</tool_use_error>"):
+    # A TaskStop that returned an error: the tool_result block carries is_error and the error text.
+    return [assistant((use_id, "TaskStop", {"task_id": task_id})),
+            {"type": "user", "isSidechain": True, "agentId": AGENT, "toolUseResult": f"Error: {text}",
+             "message": {"role": "user", "content": [
+                 {"type": "tool_result", "tool_use_id": use_id, "content": text, "is_error": True}]}}]
 
 
 class SubagentTasksGuardTests(unittest.TestCase):
@@ -173,6 +182,80 @@ class SubagentTasksGuardTests(unittest.TestCase):
         self.write(start_bash("toolu_1", "bash0001") + stop_task("toolu_2", "bash0001"))
         self.assert_allowed(self.handback())
 
+    def test_handback_stays_denied_when_the_taskstop_failed(self):
+        self.write(start_bash("toolu_1", "bash0001") + failed_stop("toolu_2", "bash0001"))
+        self.assert_denied(self.handback(), "bash0001")
+
+    def test_handback_stays_denied_when_the_taskstop_has_no_result_yet(self):
+        self.write(start_bash("toolu_1", "bash0001") + [assistant(("toolu_2", "TaskStop", {"task_id": "bash0001"}))])
+        self.assert_denied(self.handback(), "bash0001")
+
+    def test_a_failed_taskstop_saying_the_task_is_not_running_counts_as_stopped(self):
+        text = "<tool_use_error>Task bash0001 is not running (status: completed)</tool_use_error>"
+        self.write(start_bash("toolu_1", "bash0001") + failed_stop("toolu_2", "bash0001", text))
+        self.assert_allowed(self.handback())
+
+    def test_a_failed_taskstop_saying_no_task_was_found_counts_as_stopped(self):
+        # The real wording for an id Claude Code no longer knows (sampled from main transcripts).
+        text = ("<tool_use_error>No task found with ID: bash0001. Background agents running or waiting: "
+                "none</tool_use_error>")
+        self.write(start_bash("toolu_1", "bash0001") + failed_stop("toolu_2", "bash0001", text))
+        self.assert_allowed(self.handback())
+
+    def test_a_not_running_error_about_another_task_keeps_this_task_live(self):
+        text = "<tool_use_error>Task bash0002 is not running (status: completed)</tool_use_error>"
+        self.write(start_bash("toolu_1", "bash0001") + failed_stop("toolu_2", "bash0001", text))
+        self.assert_denied(self.handback(), "bash0001")
+
+    def test_a_no_task_found_error_about_another_id_keeps_this_task_live(self):
+        text = "<tool_use_error>No task found with ID: bash0002. Background agents running or waiting: none</tool_use_error>"
+        self.write(start_bash("toolu_1", "bash0001") + failed_stop("toolu_2", "bash0001", text))
+        self.assert_denied(self.handback(), "bash0001")
+
+    def test_an_error_that_only_mentions_not_running_in_prose_keeps_the_task_live(self):
+        for text in ("<tool_use_error>Could not stop bash0001: the worker is not running a signal handler</tool_use_error>",
+                     "<tool_use_error>Task bash0001 is not running (status: completed) but its child still is</tool_use_error>",
+                     "<tool_use_error>Cannot stop: Task bash0001 is not running (status: completed)</tool_use_error>",
+                     "<tool_use_error>Task bash0001 is not running</tool_use_error>"):
+            with self.subTest(text=text):
+                self.write(start_bash("toolu_1", "bash0001") + failed_stop("toolu_2", "bash0001", text))
+                self.assert_denied(self.handback(), "bash0001")
+
+    def test_every_terminal_status_in_a_not_running_error_counts_as_stopped(self):
+        for status in ("completed", "failed", "killed", "stopped"):
+            with self.subTest(status=status):
+                text = f"<tool_use_error>Task bash0001 is not running (status: {status})</tool_use_error>"
+                self.write(start_bash("toolu_1", "bash0001") + failed_stop("toolu_2", "bash0001", text))
+                self.assert_allowed(self.handback())
+
+    def test_a_not_running_error_with_a_non_terminal_status_keeps_the_task_live(self):
+        # "not running" with a status that is not terminal (still pending, or a status nobody has seen) proves nothing.
+        for status in ("pending", "running", "starting", "unknown", "completed_soon"):
+            with self.subTest(status=status):
+                text = f"<tool_use_error>Task bash0001 is not running (status: {status})</tool_use_error>"
+                self.write(start_bash("toolu_1", "bash0001") + failed_stop("toolu_2", "bash0001", text))
+                self.assert_denied(self.handback(), "bash0001")
+
+    def test_a_no_task_found_error_with_trailing_diagnostics_keeps_the_task_live(self):
+        # Only the known suffix (the list of other tasks) may follow the id; the id alone, or another sentence, may not.
+        for tail in ("", ".", " The worker could not be reached", ". The worker could not be reached", ". Retry later"):
+            with self.subTest(tail=tail):
+                text = f"<tool_use_error>No task found with ID: bash0001{tail}</tool_use_error>"
+                self.write(start_bash("toolu_1", "bash0001") + failed_stop("toolu_2", "bash0001", text))
+                self.assert_denied(self.handback(), "bash0001")
+
+    def test_a_retry_after_a_failed_taskstop_that_succeeds_counts_as_stopped(self):
+        self.write(start_bash("toolu_1", "bash0001") + failed_stop("toolu_2", "bash0001") + stop_task("toolu_3", "bash0001"))
+        self.assert_allowed(self.handback())
+
+    def test_a_failed_taskstop_for_one_task_does_not_hide_another_stopped_task(self):
+        self.write(start_bash("toolu_1", "bash0001") + start_bash("toolu_2", "bash0002")
+                   + failed_stop("toolu_3", "bash0001") + stop_task("toolu_4", "bash0002"))
+        code, stdout, _ = self.handback()
+        reason = json.loads(stdout)["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("bash0001", reason)
+        self.assertNotIn("bash0002", reason)
+
     def test_handback_is_allowed_after_a_terminal_notification(self):
         self.write(start_bash("toolu_1", "bash0001") + [notification("bash0001", "completed")])
         self.assert_allowed(self.handback())
@@ -262,6 +345,77 @@ class SubagentTasksGuardTests(unittest.TestCase):
         stop = self.base("SubagentStop", transcript_path=str(named), agent_transcript_path=str(own_named),
                          stop_hook_active=False, background_tasks=[self.running("bash0001")])
         self.assert_blocked(self.run_hook(stop, env), "bash0001")
+
+
+class TasksStateTests(unittest.TestCase):
+    """`to_state` / `from_state`: a reader of a growing transcript saves what it knows as JSON and goes on later."""
+
+    @classmethod
+    def setUpClass(cls):
+        spec = importlib.util.spec_from_file_location("subagent_tasks", SCRIPT.with_name("subagent_tasks.py"))
+        cls.core = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.core)
+
+    def records(self):
+        return [
+            *start_bash("toolu_1", "bash0001", "sleep 200"),
+            *start_monitor("toolu_2", "mon00001"),
+            *start_agent("toolu_3", "agent001"),
+            *start_bash("toolu_4", "bash0002"),
+            *stop_task("toolu_5", "bash0001"),
+            notification("mon00001", "completed"),
+            *failed_stop("toolu_6", "agent001"),
+            notification("bash0002"),  # a Monitor-style event: no status, not terminal
+        ]
+
+    def feed(self, tasks, records):
+        for record in records:
+            tasks.feed(record)
+        return tasks
+
+    def shown(self, tasks):
+        return (tasks.owned, tasks.stopped, tasks.finished, self.core.live_by_transcript(tasks))
+
+    def resumed(self, tasks):
+        """The tasks after a save to JSON text and a load, which is what a cache file does to them."""
+        return self.core.Tasks.from_state(json.loads(json.dumps(tasks.to_state())))
+
+    def test_a_scan_split_anywhere_gives_what_one_pass_gives(self):
+        records = self.records()
+        whole = self.shown(self.feed(self.core.Tasks(), records))
+        for cut in range(len(records) + 1):
+            with self.subTest(cut=cut):
+                first = self.feed(self.core.Tasks(), records[:cut])
+                second = self.feed(self.resumed(first), records[cut:])
+                self.assertEqual(self.shown(second), whole)
+        self.assertEqual([task for task, _ in whole[3]], ["agent001", "bash0002"])
+
+    def test_a_stop_call_still_waiting_for_its_result_survives_the_save(self):
+        call, answer = stop_task("toolu_9", "bash0001")
+        first = self.feed(self.core.Tasks(), [*start_bash("toolu_1", "bash0001"), call])
+        self.assertEqual(self.core.live_by_transcript(first)[0][0], "bash0001")
+        second = self.feed(self.resumed(first), [answer])
+        self.assertEqual(self.core.live_by_transcript(second), [])
+
+    def test_a_launch_still_waiting_for_its_result_survives_the_save(self):
+        call, answer = start_bash("toolu_1", "bash0001")
+        second = self.feed(self.resumed(self.feed(self.core.Tasks(), [call])), [answer])
+        self.assertEqual(list(second.owned), ["bash0001"])
+        self.assertEqual(second.owned["bash0001"]["label"], "sleep 200")
+
+    def test_the_state_is_plain_json(self):
+        state = self.feed(self.core.Tasks(), self.records()).to_state()
+        self.assertEqual(json.loads(json.dumps(state)), state)
+
+    def test_state_of_another_shape_is_refused(self):
+        good = self.feed(self.core.Tasks(), self.records()).to_state()
+        cases = {"not an object": [], "a string": "x", "none": None}
+        for key, wrong in (("owned", []), ("uses", "x"), ("stops", None), ("stopped", {}), ("finished", "x")):
+            cases[f"{key} of another type"] = {**good, key: wrong}
+            cases[f"{key} missing"] = {k: v for k, v in good.items() if k != key}
+        for name, state in cases.items():
+            with self.subTest(name), self.assertRaises(ValueError):
+                self.core.Tasks.from_state(state)
 
 
 if __name__ == "__main__":

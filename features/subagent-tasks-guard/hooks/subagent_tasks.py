@@ -6,7 +6,9 @@ record has `isSidechain` and `agentId`):
   its timeout is moved to the background and carries it too);
 - a Monitor result record carries `toolUseResult.taskId`;
 - a background Agent result record carries `toolUseResult.isAsync: true` and `toolUseResult.agentId`;
-- a TaskStop call is a `tool_use` named `TaskStop` with `input.task_id`;
+- a TaskStop call is a `tool_use` named `TaskStop` with `input.task_id`; it counts as a stop only when its
+  `tool_result` is not an error (an error counts only when it is exactly Claude Code's message for this task id being
+  finished or unknown, see `_stop_succeeded`);
 - a finished task arrives as `type: "attachment"` with `attachment.commandMode == "task-notification"` and XML in
   `attachment.prompt`; only a notification with `<status>` is terminal (a Monitor event notification has none).
 Stdlib only.
@@ -28,6 +30,11 @@ BACKGROUND_TEXT = re.compile(r"Command running in background with ID:\s*([A-Za-z
 NOTIFICATION = re.compile(r"<task-notification>(.*?)</task-notification>", re.DOTALL)
 TASK_ID = re.compile(r"<task-id>\s*([^<\s]+)\s*</task-id>")
 TASK_STATUS = re.compile(r"<status>\s*[^<\s]")
+# The two TaskStop errors that mean "this task is not running" (see _stop_succeeded); matched against the whole text.
+# Only a terminal status proves the task is gone (sampled: "completed"; the others are the harness's other end states),
+# and "No task found" only with the one suffix Claude Code adds (the list of other tasks), not other trailing text.
+NOT_RUNNING = re.compile(r"<tool_use_error>Task (?P<id>[A-Za-z0-9_-]+) is not running \(status: (?:completed|failed|killed|stopped)\)</tool_use_error>")
+NOT_FOUND = re.compile(r"<tool_use_error>No task found with ID: (?P<id>[A-Za-z0-9_-]+)\. Background agents running or waiting: [^<]*</tool_use_error>")
 
 
 def _label(use):
@@ -57,6 +64,24 @@ def _result_text(block):
     return ""
 
 
+def _stop_succeeded(block, target):
+    # A TaskStop result counts as a stop when it is not an error, or when its error is exactly one of the two messages
+    # Claude Code returns for a task that is already finished or no longer known (the goal, a task that is not
+    # running, already holds). Any other error (tool failure, a message about another task, prose that merely says
+    # "not running") leaves the task live: fail-closed. Real wording, sampled from Claude Code main transcripts
+    # (tool_result of a TaskStop call with is_error true):
+    #   <tool_use_error>Task bh1lcit0a is not running (status: completed)</tool_use_error>
+    #   <tool_use_error>No task found with ID: begalc77z. Background agents running or waiting: ...</tool_use_error>
+    if block.get("is_error") is not True:
+        return True
+    text = _result_text(block).strip()
+    for pattern in (NOT_RUNNING, NOT_FOUND):
+        found = pattern.fullmatch(text)
+        if found and found.group("id") == target:
+            return True
+    return False
+
+
 def _task_id_of(tool, result, text):
     # The id of the background task a tool result started, or None.
     if tool in BASH_TOOLS:
@@ -79,9 +104,34 @@ class Tasks:
 
     def __init__(self):
         self.owned = {}  # task id -> {"kind": ..., "label": ...}
-        self.stopped = set()  # ids given to a TaskStop call
+        self.stopped = set()  # ids whose TaskStop call came back successful (or said the task was not running)
         self.finished = set()  # ids with a terminal task notification
         self._uses = {}  # tool_use id -> {"name": ..., "label": ...}
+        self._stops = {}  # tool_use id of a TaskStop call still waiting for its result -> the task id it targets
+
+    def to_state(self):
+        """The whole state as plain JSON data, so a reader of a growing transcript can continue where it stopped
+        (`from_state`); feeding the rest of the records to the restored object gives what one pass over all would."""
+        return {"owned": self.owned, "stopped": sorted(self.stopped), "finished": sorted(self.finished),
+                "uses": self._uses, "stops": self._stops}
+
+    @classmethod
+    def from_state(cls, state):
+        """The Tasks a `to_state` result describes. Raises ValueError for data of another shape."""
+        if not isinstance(state, dict):
+            raise ValueError("tasks state is not an object")
+        tasks = cls()
+        for name, target in (("owned", tasks.owned), ("uses", tasks._uses), ("stops", tasks._stops)):
+            value = state.get(name)
+            if not isinstance(value, dict):
+                raise ValueError(f"tasks state has no {name}")
+            target.update(value)
+        for name, target in (("stopped", tasks.stopped), ("finished", tasks.finished)):
+            value = state.get(name)
+            if not isinstance(value, list):
+                raise ValueError(f"tasks state has no {name}")
+            target.update(value)
+        return tasks
 
     def feed(self, record):
         if not isinstance(record, dict):
@@ -101,10 +151,12 @@ class Tasks:
                 continue
             name = block.get("name")
             if name == TASK_STOP_TOOL:
+                # Not a stop yet: it counts only when its tool_result says it worked (see _feed_results).
                 tool_input = block.get("input")
                 target = tool_input.get("task_id") if isinstance(tool_input, dict) else None
-                if isinstance(target, str) and target:
-                    self.stopped.add(target)
+                identifier = block.get("id")
+                if isinstance(target, str) and target and isinstance(identifier, str):
+                    self._stops[identifier] = target
             elif name in BASH_TOOLS or name in (MONITOR_TOOL, AGENT_TOOL):
                 identifier = block.get("id")
                 if isinstance(identifier, str):
@@ -115,6 +167,11 @@ class Tasks:
         result = result if isinstance(result, dict) else {}
         for block in _blocks(record):
             if block.get("type") != "tool_result":
+                continue
+            target = self._stops.pop(block.get("tool_use_id"), None)
+            if target is not None:
+                if _stop_succeeded(block, target):
+                    self.stopped.add(target)
                 continue
             use = self._uses.get(block.get("tool_use_id"))
             if use is None:
