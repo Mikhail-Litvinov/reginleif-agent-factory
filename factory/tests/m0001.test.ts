@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { copyFile, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { it } from "node:test";
 import { migrate } from "../db/migrate.ts";
 import { connectBench, databaseBench } from "./database-bench.ts";
@@ -11,10 +15,13 @@ const tables = [...mutable, ...immutable];
 
 it("applies 0001 and enforces its history, soft deletion and account rights", async () => {
 	const db = await bench;
-	const applied = await migrate({ url: db.migratorUrl });
+	const dir = await mkdtemp(join(tmpdir(), "af-m0001-"));
+	try {
+	await copyFile(fileURLToPath(new URL("../db/migrations/0001_core.sql", import.meta.url)), join(dir, "0001_core.sql"));
+	const applied = await migrate({ url: db.migratorUrl, migrationsDir: dir });
 	assert.equal(applied.length, 1);
 	assert.match(applied[0]!, /^0001_.*\.sql$/);
-	assert.deepEqual(await migrate({ url: db.migratorUrl }), []);
+	assert.deepEqual(await migrate({ url: db.migratorUrl, migrationsDir: dir }), []);
 	const admin = connectBench(db.migratorUrl);
 	try {
 		const rows = await admin<{ table_name: string }[]>`SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE' ORDER BY table_name`;
@@ -73,4 +80,5 @@ it("applies 0001 and enforces its history, soft deletion and account rights", as
 			} finally { await connection.end(); }
 		}
 	} finally { await admin.end(); }
+	} finally { await rm(dir, { recursive: true, force: true }); }
 });
