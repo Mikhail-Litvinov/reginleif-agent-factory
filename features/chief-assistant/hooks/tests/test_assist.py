@@ -1,6 +1,11 @@
-"""Tests for the chief assistant hook. No test makes a model call: the reviewer (reflect.ask) is faked.
+"""Tests for the chief assistant hook. No test makes a model call by default: the reviewer (reflect.ask) is faked.
 
     python -I -m unittest discover -v -s features/chief-assistant/hooks/tests -p test_assist.py
+
+AssistLiveEval is the exception: it asks the real model (a few cents, needs `claude` on PATH) and is skipped unless
+ASSIST_LIVE_EVAL=1:
+
+    ASSIST_LIVE_EVAL=1 python -I -m unittest discover -v -s features/chief-assistant/hooks/tests -p test_assist.py -k LiveEval
 """
 import contextlib
 import importlib.util
@@ -900,6 +905,71 @@ class ShellDirectoryTests(AssistCase):
         log.write(transcript)
         self.assertEqual(ASSIST.scan(transcript, str(self.project))["plans"], [sub, other])
 
+    def plans_of_calls(self, *calls):
+        """The plans a session found through these tool calls, in order: each call is (tool, input)."""
+        log = Transcript()
+        for tool, args in calls:
+            log.result(log.call(tool, args), "ok")
+        transcript = self.dir / "calls.jsonl"
+        log.write(transcript)
+        return ASSIST.scan(transcript, str(self.project))["plans"]
+
+    def test_a_directory_change_carries_to_the_next_shell_call(self):
+        # the shell keeps its directory between calls: `cd sub` in one call, a relative plan path in the next
+        sub = self.plan_in("sub")
+        cat = ("Bash", {"command": f"cat {self.REL}"})
+        for first in (("Bash", {"command": "cd sub"}), ("PowerShell", {"command": "Set-Location sub"}),
+                      ("Bash", {"command": "pushd sub"}), ("Bash", {"command": "cd sub && ls"})):
+            for second in (cat, ("PowerShell", {"command": f"Get-Content {self.REL}"})):
+                with self.subTest(first=first[1]["command"], second=second[0]):
+                    self.assertEqual(self.plans_of_calls(first, second), [sub])
+
+    def test_the_carried_directory_follows_every_later_change_in_order(self):
+        sub = self.plan_in("sub")
+        deeper = self.plan_in("sub/deeper")
+        found = self.plans_of_calls(("Bash", {"command": "cd sub"}), ("Bash", {"command": "cd deeper"}),
+                                    ("Bash", {"command": f"cat {self.REL}"}))
+        self.assertEqual(found, [deeper])
+        # back out again: the first folder is the one the later relative path means
+        found = self.plans_of_calls(("Bash", {"command": "cd sub/deeper"}), ("Bash", {"command": "cd .."}),
+                                    ("Bash", {"command": f"cat {self.REL}"}))
+        self.assertEqual(found, [sub])
+        self.assertEqual(self.plans_of_calls(("Bash", {"command": "cd sub"}), ("Bash", {"command": "cd .."}),
+                                             ("Bash", {"command": f"cat {self.REL}"})), [])
+
+    def test_the_payload_cwd_is_still_tried_after_a_carried_change(self):
+        self.plan_in("sub")
+        # the carry is a guess (the cd may have failed): the plan only the project has is found from the payload cwd
+        found = self.plans_of_calls(("Bash", {"command": "cd sub"}), ("Bash", {"command": "cat docs/superpowers/plans/feature.md"}))
+        self.assertEqual(found, [self.plan])
+        # a change whose target cannot be known leaves the payload cwd for the next call
+        for target in ("~", "$HOME", "-"):
+            with self.subTest(target=target):
+                found = self.plans_of_calls(("Bash", {"command": "cd sub"}), ("Bash", {"command": f"cd {target}"}),
+                                            ("Bash", {"command": "cat docs/superpowers/plans/feature.md"}))
+                self.assertEqual(found, [self.plan])
+        self.assertEqual(self.plans_of_calls(("Bash", {"command": "cd sub"}), ("Bash", {"command": "cd ~"}),
+                                             ("Bash", {"command": f"cat {self.REL}"})), [])
+
+    def test_only_a_foreground_shell_call_moves_the_next_one(self):
+        self.plan_in("sub")
+        for first in (("Bash", {"command": "cd sub", "run_in_background": True}),
+                      ("Monitor", {"command": "cd sub", "description": "watch"}),
+                      ("Agent", {"prompt": "cd sub", "description": "work"})):
+            with self.subTest(tool=first[0]):
+                self.assertEqual(self.plans_of_calls(first, ("Bash", {"command": f"cat {self.REL}"})), [])
+
+    def test_a_carried_directory_does_not_turn_a_read_into_an_edit(self):
+        sub = self.plan_in("sub")
+        log = Transcript()
+        log.result(log.call("Bash", {"command": "cd sub"}), "ok")
+        log.result(log.call("Bash", {"command": f"sed -i 's/a/b/' {self.REL}"}), "ok")
+        other = self.plan_in("sub", "other.md")
+        log.read_plan(other)
+        transcript = self.dir / "calls.jsonl"
+        log.write(transcript)
+        self.assertEqual(ASSIST.scan(transcript, str(self.project))["plans"], [sub, other])
+
     def test_git_dash_c_before_a_reader_is_still_a_pure_read(self):
         self.assertTrue(ASSIST.is_pure_read("git -C sub diff -- docs/superpowers/plans/sub.md"))
         self.assertFalse(ASSIST.is_pure_read("git -C sub checkout -- docs/superpowers/plans/sub.md"))
@@ -965,6 +1035,44 @@ class ModelInputTests(AssistCase):
         users = self.calls[0]["text"].split("USER'S LATEST MESSAGES\n", 1)[1].split("\n\n", 1)[0]
         self.assertIn("the real request of the user", users)
         self.assertNotIn(ASSIST.OWN_MARKER, users)
+
+
+class LargeTranscriptTests(AssistCase):
+    """The window of the transcript the model sees is chosen by the same origin-based judgement as the messages shown."""
+
+    def padded_session(self):
+        """The user's one real request, then more than one tail chunk of records that read like user text but carry no
+        origin of the user (as a hook or a plugin writes them), then the plan work."""
+        log = Transcript()
+        log.human("REAL-REQUEST: implement the plan")
+        filler = "Please also look at the other module and report back. " * 40  # about 2 KB, plain text of a user's tone
+        for _ in range(REFLECT.TAIL_CHUNK // len(filler) + 100):
+            log.user(filler)
+        log.read_plan(self.plan)
+        log.result(log.call("Edit", {"file_path": "src/unique_file.py"}), "ok")
+        return log
+
+    def test_the_users_real_request_is_not_pushed_out_by_a_large_tail_of_look_alike_records(self):
+        log = self.padded_session()
+        self.assess(log)
+        transcript = self.dir / "session.jsonl"
+        self.assertGreater(transcript.stat().st_size, REFLECT.TAIL_CHUNK)
+        users = self.calls[0]["text"].split("USER'S LATEST MESSAGES\n", 1)[1].split("\n\n", 1)[0]
+        self.assertIn("REAL-REQUEST", users)
+        self.assertNotIn("Please also look", users)
+
+    def test_the_window_stays_a_tail_when_the_users_messages_are_near_the_end(self):
+        log = Transcript()
+        for _ in range(REFLECT.TAIL_CHUNK // 2000 + 100):
+            log.user("x" * 2000)
+        for i in range(4):
+            log.human(f"recent message {i}")
+        log.read_plan(self.plan)
+        self.assess(log)
+        users = self.calls[0]["text"].split("USER'S LATEST MESSAGES\n", 1)[1].split("\n\n", 1)[0]
+        self.assertIn("recent message 3", users)
+        lines = REFLECT.tail_lines(self.dir / "session.jsonl", classify=ASSIST.classify)
+        self.assertLess(len(lines), len((self.dir / "session.jsonl").read_text(encoding="utf-8").splitlines()))
 
 
 class WakeTests(AssistCase):
@@ -1633,6 +1741,77 @@ class SharedAskTests(AssistCase):
 
 
 ORIGINAL_ASK = REFLECT.ask
+
+DONE_PLAN = "# Plan\n- [x] one: the reader\n- [x] two: wire the hook\n- [x] three: the docs\n"
+
+
+@unittest.skipUnless(os.environ.get("ASSIST_LIVE_EVAL") == "1", "set ASSIST_LIVE_EVAL=1 to run the real reviewer on invented stops")
+class AssistLiveEval(AssistCase):
+    """The prompt's behaviour, judged by the real model through the hook's own path (assist.assess -> reflect.ask):
+    a few cents per run, skipped by default. Eight invented stops; "work still running in the background" is not here
+    because the code decides it before the model is asked.
+
+        ASSIST_LIVE_EVAL=1 python -I -m unittest discover -v -s features/chief-assistant/hooks/tests -p test_assist.py -k LiveEval
+    """
+
+    def setUp(self):
+        super().setUp()
+        patcher = mock.patch.object(REFLECT, "ask", ORIGINAL_ASK)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def worked(self, request="Implement the plan", plan=None):
+        """A session that read the plan and edited code; the stop is added by the case."""
+        self.plan.write_text(PLAN if plan is None else plan, encoding="utf-8")
+        log = Transcript()
+        log.human(request)
+        log.read_plan(self.plan)
+        log.result(log.call("Edit", {"file_path": "src/reader.py"}), "ok")
+        log.result(log.call("Bash", {"command": "python -m unittest tests.test_reader"}), "Ran 6 tests in 0.2s\n\nOK")
+        return log
+
+    def cases(self):
+        """(label, expected verdict, the session before the final message, the final message)."""
+        step_one = "Step one is done: the reader parses the header and its six tests pass."
+        yield "idle: plan step open, status only", "idle", self.worked(), step_one
+        yield "idle: user said to keep going, next step open", "idle", self.worked(
+            "Keep going until the whole plan is finished, no need to ask me", "# Plan\n- [x] one: the reader\n- [x] two: wire the hook\n- [ ] three: the docs\n"
+        ), "Step two is finished: the hook is wired and the integration test is green."
+        yield "idle: summary of what changed, nothing asked", "idle", self.worked(), (
+            "I replaced the hand-written header loop with the shared parser and removed the duplicate helper. "
+            "The reader module is smaller now and its tests still pass.")
+        yield "ok: the final message asks the user a question", "ok", self.worked(), (
+            "The reader works. Before step two I need a decision: should the hook cache parsed headers in memory "
+            "(fast, lost on restart) or on disk (survives restarts, needs cleanup)? Both fit the plan.")
+        yield "ok: a named blocker that waits on the user", "ok", self.worked(), (
+            "Step two is blocked: the hook needs the staging API key, it is not in the environment, and only you have it. "
+            "Send it or tell me to use the mock server, and I will continue from there.")
+        yield "ok: the user told the assistant to rest", "ok", self.worked(
+            "Thanks, that is enough for today. Stop here, we continue tomorrow."
+        ), "Understood. Step one is saved; step two (wire the hook) is where we pick up tomorrow."
+        yield "ok: every plan item is done and reported with evidence", "ok", self.worked(plan=DONE_PLAN), (
+            "All three steps are done: the reader, the hook and the docs. Evidence: 42 tests passed, the type check is clean, "
+            "and the docs build without warnings.")
+        log = self.worked()
+        log.assistant("Step one is done.")
+        log.human("Different topic for a minute: what does the --retries flag of the CLI do?")
+        yield "ok: the user changed the subject, the plan is old context", "ok", log, (
+            "--retries sets how many times a failed request is repeated before the command gives up; the default is three, "
+            "and zero turns repeating off.")
+
+    def test_the_prompt_gives_the_expected_verdict_for_every_invented_stop(self):
+        rows, total = [], 0.0
+        for label, expected, log, final in self.cases():
+            with self.subTest(case=label):
+                self.calls, self.state = [], self.dir / f"state-{len(rows)}"
+                with mock.patch.object(ASSIST, "STATE_DIR", self.state), mock.patch.object(ASSIST, "LOG_FILE", self.state / "log.jsonl"):
+                    self.assess(log, final=final)
+                    entry = self.logged()[-1]
+                total += entry.get("cost") or 0.0
+                got = entry.get("verdict") or entry.get("decision")
+                rows.append(f"{got:>8} (want {expected:>4})  ${entry.get('cost') or 0:.4f}  {label}  [{entry.get('reason', '')[:90]}]")
+                self.assertEqual(got, expected, entry)
+        print("\n" + "\n".join(rows) + f"\ntotal cost ${total:.4f}")
 
 
 if __name__ == "__main__":

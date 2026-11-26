@@ -128,9 +128,11 @@ def seconds_between(start: str, end: str) -> float | None:
         return None
 
 
-def tail_lines(transcript: Path) -> list[str]:
+def tail_lines(transcript: Path, classify=None) -> list[str]:
     """The transcript's last lines, enough to hold USER_MESSAGES messages of the user: a long
-    session's transcript runs to hundreds of MB, and reading it whole would hold every turn's end."""
+    session's transcript runs to hundreds of MB, and reading it whole would hold every turn's end. `classify` is the
+    one `events_of` takes: the window must be counted with the same judgement of who the user is that builds the
+    events from it, or look-alike records could fill it and push the real messages out."""
     size = transcript.stat().st_size
     chunk = TAIL_CHUNK
     while True:
@@ -141,7 +143,7 @@ def tail_lines(transcript: Path) -> list[str]:
         lines = raw.decode("utf-8", errors="replace").splitlines()
         if start > 0:
             lines = lines[1:]
-        if start == 0 or sum(1 for e in events_of(lines) if e["kind"] == "user") >= USER_MESSAGES:
+        if start == 0 or sum(1 for e in events_of(lines, classify=classify) if e["kind"] == "user") >= USER_MESSAGES:
             return lines
         chunk *= 2
 

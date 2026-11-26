@@ -82,6 +82,7 @@ PLAN_DIR = "docs/superpowers/plans/"
 BOOKKEEPING_ATTACHMENTS = frozenset({"hook_success", "hook_cancelled", "prompt_snapshot", "deferred_tools_record"})
 BOOKKEEPING_SYSTEM = frozenset({"stop_hook_summary", "turn_duration"})
 PLAN_TOOLS_EDIT = ("Edit", "Write", "MultiEdit")
+SHELL_TOOLS = ("Bash", "PowerShell")  # the tools whose shell keeps its directory from one call to the next
 MENTION_DEPTH = 8  # How deep into a tool input (agent prompts, nested fields) plan names are searched.
 # A plan named in a string of a tool input, in any spelling: absolute or relative, either slash direction (the text
 # is searched after its backslashes became slashes), in subfolders of the plans folder. The name must end at `.md`:
@@ -268,13 +269,16 @@ def directory_of(segment: str, workdir: str | None) -> tuple[str | None, str | N
     return workdir, workdir
 
 
-def plan_mentions(name: str, args: object, cwd: str, cache: dict) -> list[tuple[Path, bool]]:
+def plan_mentions(name: str, args: object, cwd: str, cache: dict, shell: dict | None = None) -> list[tuple[Path, bool]]:
     """Every existing plan file a tool call of the main session refers to, as (resolved path, edited). Any string of
     the input can name a plan (a shell command, an agent's prompt, a nested field), not only `file_path`. The
     `file_path` of the file tools is an exact path (it may hold spaces); every other string is searched for
     `docs/superpowers/plans/<name>.md`, quoted or not. A plan is edited when an edit tool names it in `file_path`,
     or a shell command names it in a segment that redirects into it or is not a recognised pure read (cp, mv, a
-    script given the path, ...); a plan named only by a pure reader, or in any other input, is read."""
+    script given the path, ...); a plan named only by a pure reader, or in any other input, is read.
+    `shell` is the session's tracked shell directory, `{"dir": <path or None>}`: the Bash and PowerShell tools keep
+    their directory between calls, so a foreground call of either starts where the previous one ended and leaves
+    its own end directory there (a background call starts there too, but its end is not kept)."""
     if not isinstance(args, dict):
         return []
     found: list[tuple[Path, bool]] = []
@@ -284,16 +288,18 @@ def plan_mentions(name: str, args: object, cwd: str, cache: dict) -> list[tuple[
         if path is not None:
             found.append((path, name in PLAN_TOOLS_EDIT))
     command = args.get("command")
+    persistent = shell is not None and name in SHELL_TOOLS and isinstance(command, str)
     for text in strings_of({key: value for key, value in args.items() if key != "file_path"}):
         normal = text.replace("\\", "/")
-        if PLAN_DIR not in normal:
-            continue
+        is_command = text is command
+        if PLAN_DIR not in normal and not (persistent and is_command):
+            continue  # a command without a plan still moves the shell: the next call may name the plan
         # a shell command is judged per simple command; any other string is one unit that only reads
-        units = shell_segments(normal) if text is command else [normal]
-        workdir: str | None = cwd
+        units = shell_segments(normal) if is_command else [normal]
+        workdir: str | None = shell["dir"] if persistent and is_command else cwd
         for unit in units:
             unit_dir = cwd
-            if text is command:
+            if is_command:
                 # a relative plan path means the directory the command runs in at that point, not always the payload's
                 unit_dir, workdir = directory_of(unit, workdir)
             if PLAN_DIR not in unit:
@@ -310,6 +316,8 @@ def plan_mentions(name: str, args: object, cwd: str, cache: dict) -> list[tuple[
                     if path is not None and path not in named:
                         named.add(path)
                         found.append((path, writes))
+        if persistent and is_command and not args.get("run_in_background"):
+            shell["dir"] = workdir
     return found
 
 
@@ -368,6 +376,7 @@ def scan(transcript: Path, cwd: str, background_tasks: object = None, limit: int
     edited: dict[Path, bool] = {}
     read: dict[Path, bool] = {}
     cache: dict = {}
+    shell: dict = {"dir": cwd}  # where the Bash / PowerShell shell stands after the calls so far (None: not known)
     reset_at = -1
     polls: set[str] = set()
     tasks = subagent_tasks.Tasks()
@@ -391,7 +400,7 @@ def scan(transcript: Path, cwd: str, background_tasks: object = None, limit: int
                     if name == reflect.POLL_TOOL:
                         polls.add(ident)
                     else:
-                        for path, writes in plan_mentions(name, args, cwd, cache):
+                        for path, writes in plan_mentions(name, args, cwd, cache, shell):
                             touch(edited if writes else read, path)
                 elif kind == "tool_result":
                     ident = data.get("tool_use_id", "")
@@ -646,7 +655,7 @@ def assess(payload: dict, emit=None) -> str | None:
     if wakes >= MAX_WAKES:
         settle("wake-limit", f"{wakes} wakes in a row without a message of the user")
         return None
-    lines = reflect.tail_lines(transcript)
+    lines = reflect.tail_lines(transcript, classify=classify)  # the window is counted by the same origin judgement
     # A poll answer is shown as a plain tool result (answers=False): nothing in its record says a human gave it.
     events = reflect.events_of(lines, classify=classify, answers=False)
     text = model_text(payload, transcript, found, events, wakes)
