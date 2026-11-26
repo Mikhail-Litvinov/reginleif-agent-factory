@@ -53,7 +53,8 @@ export interface HbaCheck extends CheckBase {
 export interface RefusalCheck extends CheckBase {
 	readonly kind: "refused";
 	readonly role: string;
-	readonly database: string;
+	// Every database of the cluster that accepts connections: a loaded rule may let the role into one of them only.
+	readonly databases: readonly string[];
 }
 export type Check = SqlCheck | ShellCheck | LoginCheck | HbaCheck | RefusalCheck;
 
@@ -265,9 +266,10 @@ export const INTENDED_HBA_RULES: readonly IntendedHbaRule[] = [
 	{ type: "host", database: ["all"], user_name: [BOOTSTRAP_ROLE], address: "all", auth_method: "reject" },
 	{ type: "host", database: ["agent_factory"], user_name: APPLICATION_ROLES, address: "samenet", auth_method: "scram-sha-256" },
 ];
-// One JSON line: the file the server reads and its rules.
+// One JSON line: the file the server reads, whether that file was modified after the server last loaded its configuration
+// (`stale`: pg_hba_file_rules then shows rules the server does not run), and its rules.
 export const HBA_RULES_SQL =
-	"select jsonb_build_object('file', current_setting('hba_file'), 'rules', coalesce((select jsonb_agg(to_jsonb(r) order by r.line_number) from (select line_number, type, database, user_name, address, auth_method, error from pg_hba_file_rules) r), '[]'::jsonb))::text;";
+	"select jsonb_build_object('file', current_setting('hba_file'), 'stale', (pg_stat_file(current_setting('hba_file'))).modification > pg_conf_load_time(), 'rules', coalesce((select jsonb_agg(to_jsonb(r) order by r.line_number) from (select line_number, type, database, user_name, address, auth_method, error from pg_hba_file_rules) r), '[]'::jsonb))::text;";
 
 const describeRule = (rule: { type: string; database: readonly string[] | null; user_name: readonly string[] | null; address: string | null; auth_method: string | null }): string =>
 	[rule.type, (rule.database ?? []).join(",") || "(none)", (rule.user_name ?? []).join(",") || "(none)", rule.address, rule.auth_method ?? "(none)"].filter((part) => part !== null).join(" ");
@@ -370,10 +372,11 @@ export const CHECKS: readonly Check[] = [
 	},
 	{
 		kind: "refused",
-		name: `authentication: a login as ${BOOTSTRAP_ROLE} over TCP is refused by the rules even with the right password`,
+		name: `authentication: a login as ${BOOTSTRAP_ROLE} over TCP is refused by the rules in every database even with the right password`,
 		covers: [],
 		role: BOOTSTRAP_ROLE,
-		database: "postgres",
+		// All databases of the cluster that accept connections (template0 does not): initdb makes postgres and template1, init/10-roles.sh agent_factory.
+		databases: ["postgres", "agent_factory", "template1"],
 	},
 	...APPLICATION_ROLES.map((role): LoginCheck => ({
 		kind: "login",

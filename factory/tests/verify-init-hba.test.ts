@@ -247,17 +247,28 @@ describe("a scratch server whose rules the tests set", () => {
 		assert.match(problems.join("\n"), /reject/);
 	});
 
-	it("the file on disk is intended but the server still runs an older rule set: the rule comparison cannot see it, the logins do", async () => {
+	it("the file on disk is intended but the server still runs an older rule set: the rule comparison reports the file as newer than the load, and the logins see it too", async () => {
 		await load([LOCAL, LEGACY_BOOTSTRAP, APPLICATION]);
 		await writeFile(INTENDED);
-		assert.deepEqual(await checkActiveHba(stack.container, { port: PORT }), [], "pg_hba_file_rules shows the file on disk");
+		assert.match((await checkActiveHba(stack.container, { port: PORT })).join("\n"), /modified after the server last loaded it/);
 		assert.match((await refusedBootstrap()) ?? "", /accepted a login as af_bootstrap/);
+	});
+
+	it("a loaded rule that lets af_bootstrap into agent_factory only (before the reject): the probe of postgres passes, the probe of agent_factory reports it, and so does the check", async () => {
+		await load([LOCAL, "host agent_factory af_bootstrap samenet scram-sha-256", BOOTSTRAP_REJECT, APPLICATION]);
+		assert.equal(await probeRefusedByRules(stack.container, BOOTSTRAP_ROLE, { database: "postgres", port: PORT }), null);
+		assert.match((await probeRefusedByRules(stack.container, BOOTSTRAP_ROLE, { database: "agent_factory", port: PORT })) ?? "", /accepted a login as af_bootstrap/);
+		assert.match((await checkActiveHba(stack.container, { port: PORT })).join("\n"), /af_bootstrap/);
+	});
+
+	it("the refusal check probes every database of the cluster", () => {
+		const check = CHECKS.find((c) => c.kind === "refused" && c.role === BOOTSTRAP_ROLE);
+		assert.deepEqual(check?.kind === "refused" ? [...check.databases].sort() : null, ["agent_factory", "postgres", "template1"]);
 	});
 
 	it("a loaded rule that lets one role in with any password, the file on disk being intended: the probe of that role reports it, the others pass", async () => {
 		await load([LOCAL, BOOTSTRAP_REJECT, "host agent_factory af_reader samenet trust", APPLICATION]);
 		await writeFile(INTENDED);
-		assert.deepEqual(await checkActiveHba(stack.container, { port: PORT }), []);
 		assert.match((await wrongPassword("af_reader")) ?? "", /accepted/);
 		for (const role of APPLICATION_ROLES.filter((r) => r !== "af_reader")) assert.equal(await wrongPassword(role), null, role);
 	});

@@ -14,7 +14,7 @@ backup name (the UTC time as `yyyyMMddTHHmmssZ`, a dash, 8 hex digits).
 
 `$env:AF_SECRETS_DIR = $secrets` is needed by every `docker compose` command below.
 
-`$proveVolume = { param($p) $n = $p + '_pgdata'; $j = docker volume inspect --format '{{json .Labels}}' $n 2>$null; if ($LASTEXITCODE -eq 0) { $l = $j | ConvertFrom-Json; if ($null -eq $l -or $l.'com.docker.compose.project' -ne $p -or $l.'com.docker.compose.volume' -ne 'pgdata') { throw "refusing: volume $n is not made by compose project $p" } }; $global:LASTEXITCODE = 0 }`
+`$proveVolume = { param($p) $n = $p + '_pgdata'; $all = docker volume ls -q --filter "name=$n"; if ($LASTEXITCODE -ne 0) { throw "refusing: docker could not list volumes, $n is unchecked" }; if (@($all) -contains $n) { $j = docker volume inspect --format '{{json .Labels}}' $n; if ($LASTEXITCODE -ne 0) { throw "refusing: docker could not inspect volume $n" }; $l = $j | ConvertFrom-Json; if ($null -eq $l -or $l.'com.docker.compose.project' -ne $p -or $l.'com.docker.compose.volume' -ne 'pgdata') { throw "refusing: volume $n is not made by compose project $p" } }; $global:LASTEXITCODE = 0 }`
 
 The proof that a data volume is the stack's own (the same line is in `deployment.md`, which explains it). A volume of
 that name that compose of that project did not make stops the line with `refusing`. Every command below that brings a

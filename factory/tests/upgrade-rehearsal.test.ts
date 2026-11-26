@@ -125,6 +125,13 @@ const upgradeSteps = (fixture: Fixture): string[] => {
 	const at = steps.findIndex((step) => step === "git pull --ff-only");
 	assert.ok(at >= 0, "the doc updates the repository with git pull");
 	steps[at] = `Copy-Item -Recurse -Force ${psq(`${REPO_ROOT}/factory/deploy/*`)} 'factory/deploy'`;
+	// The doc has the reader copy the `<UTC stamp>-<8 hex>` part of the name the backup command printed into $manifest; the
+	// rehearsal does the same reading, from that command's own output, and nothing else (never the newest file of the directory).
+	const backup = steps.findIndex((step) => /\bbackup\.ts\b/.test(step));
+	const named = steps.findIndex((step) => step.startsWith("$manifest = ") && step.includes("<UTC stamp>-<8 hex>"));
+	assert.ok(backup >= 0 && named > backup, "the doc takes a backup, then names its manifest from the printed name");
+	steps[backup] = `$printed = (${steps[backup]}); $printed; $printedName = [regex]::Match(($printed -join "\`n"), 'backup written: .*[\\\\/]af-(\\S+)\\.manifest\\.json').Groups[1].Value; if (-not $printedName) { throw 'the backup command printed no manifest name' }`;
+	steps[named] = (steps[named] as string).replace("'af-<UTC stamp>-<8 hex>.manifest.json'", "('af-' + $printedName + '.manifest.json')");
 	return steps;
 };
 

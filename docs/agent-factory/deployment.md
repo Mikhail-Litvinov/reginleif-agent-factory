@@ -24,10 +24,12 @@ line, run them one after the other). How to read them:
   `$old = '<old deploy copy dir>'` (a directory that does not exist yet, outside the repository: "Upgrade of a running
   stack" copies the deploy files of the running revision into it)
 
-  `$proveVolume = { param($p) $n = $p + '_pgdata'; $j = docker volume inspect --format '{{json .Labels}}' $n 2>$null; if ($LASTEXITCODE -eq 0) { $l = $j | ConvertFrom-Json; if ($null -eq $l -or $l.'com.docker.compose.project' -ne $p -or $l.'com.docker.compose.volume' -ne 'pgdata') { throw "refusing: volume $n is not made by compose project $p" } }; $global:LASTEXITCODE = 0 }`
+  `$proveVolume = { param($p) $n = $p + '_pgdata'; $all = docker volume ls -q --filter "name=$n"; if ($LASTEXITCODE -ne 0) { throw "refusing: docker could not list volumes, $n is unchecked" }; if (@($all) -contains $n) { $j = docker volume inspect --format '{{json .Labels}}' $n; if ($LASTEXITCODE -ne 0) { throw "refusing: docker could not inspect volume $n" }; $l = $j | ConvertFrom-Json; if ($null -eq $l -or $l.'com.docker.compose.project' -ne $p -or $l.'com.docker.compose.volume' -ne 'pgdata') { throw "refusing: volume $n is not made by compose project $p" } }; $global:LASTEXITCODE = 0 }`
 
-  The proof that a data volume is the stack's own (the same line is in `recovery.md`). A volume that is absent passes (the
-  command after it makes it). A volume of that name that compose of that project did not make (another project's, one
+  The proof that a data volume is the stack's own (the same line is in `recovery.md`). A volume is absent only when
+  Docker answered the listing successfully and the name is not in it (the command after it makes it); any other
+  failure of Docker (a daemon that does not answer, a failed inspect) stops the line with `refusing`, never counts as
+  absent. A volume of that name that compose of that project did not make (another project's, one
   made by hand, one without compose labels) stops the line with `refusing`, before anything mounts, copies or removes it:
   `up -d` would adopt such a volume as the database, and a removal would delete someone else's data. Every command below
   that brings the stack up, mounts the data volume or removes it starts with `& $proveVolume 'agent-factory'` (the
@@ -269,7 +271,9 @@ Authentication is proved on the running server, not on
 a file: the rules the server really uses are read as `af_bootstrap` from `pg_hba_file_rules` (whatever file the server's
 `hba_file` names; the failure message names it) and every rule must be
 `scram-sha-256` or `reject`, because an active `trust` rule would let any password in and a successful login would then
-prove nothing. Each application role then logs in over TCP with the password of its secret file, and one more login as
+prove nothing. The file must not be newer than the server's last load of its configuration (otherwise the rules shown
+are not the ones the server runs, and the check fails: reload or restart the server), and a login as `af_bootstrap`
+over TCP must be refused by the rules in every database of the cluster (`postgres`, `agent_factory`, `template1`). Each application role then logs in over TCP with the password of its secret file, and one more login as
 `af_api` with a password that is in no secret file must be refused. Each check prints `ok` or `FAIL <name>: <reason>`, and the script exits 0 only when all of
 them pass (1 when any fails, 2 on a wrong argument). The list of checks is `factory/deploy/init-postconditions.ts`; a
 test (`factory/tests/verify-init.test.ts`) fails when a statement of the init scripts has no check, so the two cannot
@@ -317,12 +321,12 @@ Upgrade, in this order:
 
    `git pull --ff-only`
 
-3. Take a backup and check it restores (see "Backup" and "Restore check"). The newest manifest of the directory is the
-   one just made:
+3. Take a backup and check it restores (see "Backup" and "Restore check"). The backup command prints `backup written: <manifest path>`;
+   the check takes exactly that manifest, never "the newest one" of the directory, which may belong to another backup:
 
    `node factory/deploy/backup/backup.ts --target $backups`
 
-   `$manifest = (Get-ChildItem $backups -Filter 'af-*.manifest.json' | Sort-Object LastWriteTime | Select-Object -Last 1).FullName`
+   `$manifest = Join-Path $backups 'af-<UTC stamp>-<8 hex>.manifest.json'` (the `<UTC stamp>-<8 hex>` part of the name the command above printed)
 
    `node factory/deploy/backup/restore-check.ts --manifest $manifest`
 

@@ -49,13 +49,18 @@ export interface ServerOptions {
 export const checkActiveHba = async (container: string, options: ServerOptions = {}): Promise<string[]> => {
 	const read = await tryPsql(container, BOOTSTRAP_ROLE, HBA_RULES_SQL, { database: "postgres", port: options.port });
 	if (read.code !== 0) return [`could not read the active rules: ${firstLine(read.stderr || read.stdout, `exit ${read.code}`)}`];
-	let parsed: { file: string; rules: HbaRule[] };
+	let parsed: { file: string; stale: boolean | null; rules: HbaRule[] };
 	try {
-		parsed = JSON.parse(read.stdout.trim()) as { file: string; rules: HbaRule[] };
+		parsed = JSON.parse(read.stdout.trim()) as { file: string; stale: boolean | null; rules: HbaRule[] };
 	} catch {
 		return [`could not read the active rules: unexpected answer ${firstLine(read.stdout, "(empty)")}`];
 	}
-	return hbaRuleProblems(parsed.rules).map((problem) => `${problem} (active file ${parsed.file})`);
+	// pg_hba_file_rules is the file on disk. It is the loaded set only when the file is not newer than the last load; the
+	// logins prove the loaded set from inside the container (loopback) only, so a rule for another source (the Docker
+	// subnet) is judged by the file, which must therefore be the loaded one. Anything but a plain false fails.
+	const problems = hbaRuleProblems(parsed.rules);
+	if (parsed.stale !== false) problems.push("the file was modified after the server last loaded it (or its age is unknown): the rules shown are not proven to be the ones the server runs; reload or restart the server");
+	return problems.map((problem) => `${problem} (active file ${parsed.file})`);
 };
 
 // One login over TCP with a password that is in no secret file. null when the server refuses it, as it must; the problem
@@ -113,8 +118,12 @@ export const verifyInit = async (options: VerifyOptions = {}): Promise<CheckResu
 			return problems.length === 0 ? success(check) : failure(check, problems.join("; "));
 		}
 		if (check.kind === "refused") {
-			const problem = await probeRefusedByRules(container, check.role, { database: check.database });
-			return problem === null ? success(check) : failure(check, problem);
+			const answers = await Promise.all(check.databases.map(async (database) => {
+				const problem = await probeRefusedByRules(container, check.role, { database });
+				return problem === null ? null : `database ${database}: ${problem}`;
+			}));
+			const problems = answers.filter((problem): problem is string => problem !== null);
+			return problems.length === 0 ? success(check) : failure(check, problems.join("; "));
 		}
 		if (check.kind === "login" && check.wrongPassword) {
 			const problem = await probeWrongPassword(container, check.role);

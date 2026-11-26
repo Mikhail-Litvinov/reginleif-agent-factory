@@ -107,6 +107,15 @@ describe("volume identity: the doc proves the data volume before it acts on it",
 		}
 	});
 
+	it("the proof stops when docker itself cannot answer: only a successful answer without the volume counts as absent", async () => {
+		const definition = proofDefinition(docText("deployment.md"));
+		assert.ok(definition, "deployment.md defines $proveVolume");
+		// A daemon address nothing listens on (port 1 on loopback): every docker call fails, as with a stopped or unreachable daemon.
+		const unreachable = await runPs(["& $proveVolume 'af-no-daemon-probe'"], { prelude: [definition], env: { DOCKER_HOST: "tcp://127.0.0.1:1" } });
+		assert.notEqual(unreachable.code, 0, "a failed docker call is not 'the volume is absent'");
+		assert.match(unreachable.stderr, /refusing/);
+	});
+
 	for (const name of DOCS) {
 		it(`${name}: every command that acts on the data volume refuses a same-name volume of another origin and leaves it whole`, async () => {
 			const definition = proofDefinition(docText(name));
