@@ -34,18 +34,35 @@ OK = {"verdict": "ok", "next": "", "item": "", "evidence": "the final message as
 class Transcript:
     """A transcript under construction: every entry gets the next second."""
 
-    def __init__(self):
+    def __init__(self, parent=None, prefix="u"):
         self.entries = []
         self.count = 0
         self.ids = 0
+        self.parent = parent  # the uuid the next main-chain record chains to
+        self.prefix = prefix
+        self.serial = 0
 
     def stamp(self):
         self.count += 1
         return f"2026-01-01T10:{self.count // 60:02d}:{self.count % 60:02d}.000Z"
 
+    def link(self, entry):
+        """A main-chain record gets its uuid and the previous record as parentUuid, as in the real transcript."""
+        self.serial += 1
+        entry["uuid"] = f"{self.prefix}{self.serial}"
+        entry["parentUuid"] = self.parent
+        self.parent = entry["uuid"]
+        return entry
+
     def add(self, kind, content, **extra):
         entry = {"type": kind, "timestamp": self.stamp(), "message": {"role": kind, "content": content}, **extra}
-        self.entries.append(entry)
+        self.entries.append(self.link(entry))
+        return entry
+
+    def system(self, subtype):
+        """A system record (the stop-hook summary, the turn duration): it chains to the record before it."""
+        entry = {"type": "system", "subtype": subtype, "timestamp": self.stamp()}
+        self.entries.append(self.link(entry))
         return entry
 
     def user(self, text):
@@ -116,8 +133,8 @@ class Transcript:
         """The same notification as an attachment record (commandMode task-notification, XML in prompt). An empty
         status is a Monitor event notification, which is not terminal."""
         text = f"<task-notification>\n<task-id>{task_id}</task-id>\n" + (f"<status>{status}</status>\n" if status else "") + "</task-notification>"
-        self.entries.append({"type": "attachment", "timestamp": self.stamp(),
-                             "attachment": {"type": "queued_command", "commandMode": "task-notification", "prompt": text}})
+        self.entries.append(self.link({"type": "attachment", "timestamp": self.stamp(),
+                                       "attachment": {"type": "queued_command", "commandMode": "task-notification", "prompt": text}}))
 
     def write(self, path):
         path.write_text("".join(json.dumps(e) + "\n" for e in self.entries), encoding="utf-8")
@@ -127,7 +144,7 @@ class AssistCase(unittest.TestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
-        self.dir = Path(directory.name)
+        self.dir = Path(directory.name).resolve()  # plans are reported by their resolved path
         self.project = self.dir / "project"
         self.plan = self.project / "docs" / "superpowers" / "plans" / "feature.md"
         self.plan.parent.mkdir(parents=True)
@@ -161,9 +178,9 @@ class AssistCase(unittest.TestCase):
             self.during_ask()
         return (dict(self.answer) if self.answer else None), 0.01, ("" if self.answer else "network down")
 
-    def session(self):
+    def session(self, prefix="u"):
         """A session that read its plan, worked, and stopped; the caller adds to it before the final message."""
-        log = Transcript()
+        log = Transcript(prefix=prefix)
         log.user("Implement the plan")
         log.read_plan(self.plan)
         log.result(log.call("Edit", {"file_path": "src/a.py"}), "ok")
@@ -186,11 +203,22 @@ class AssistCase(unittest.TestCase):
                 handle.write(json.dumps(entry) + "\n")
 
     def after_stop(self, build):
-        """The records `build(log)` adds to a fresh Transcript, as plain entries to append."""
-        log = Transcript()
+        """The records `build(log)` adds, as plain entries to append: they chain to the last record the file holds now."""
+        parent = None
+        for line in (self.dir / "session.jsonl").read_text(encoding="utf-8").splitlines():
+            record = json.loads(line)
+            if record.get("uuid"):
+                parent = record["uuid"]
+        log = Transcript(parent=parent, prefix="late")
         log.count = 500
         build(log)
         return log.entries
+
+    def payload_for(self, log, final, name="session.jsonl", **extra):
+        """Writes the transcript as it is (the final message is not added to it) and returns the Stop payload."""
+        transcript = self.dir / name
+        log.write(transcript)
+        return {"transcript_path": str(transcript), "session_id": "s1", "cwd": str(self.project), "last_assistant_message": final, **extra}
 
     def logged(self):
         return [json.loads(line) for line in (self.state / "log.jsonl").read_text(encoding="utf-8").splitlines()]
@@ -470,16 +498,87 @@ class PlanDetectionTests(AssistCase):
         self.assess(log)
         self.assertIn("two: wire the hook", self.calls[0]["text"])
 
-    def test_the_active_plan_read_early_is_still_in_the_model_input_after_many_other_plans(self):
+    def fillers(self, count):
+        """Plans that each fill the per-plan limit, so a few of them spend the whole budget."""
+        paths = []
+        for i in range(count):
+            path = self.plan.with_name(f"filler{i}.md")
+            path.write_text(f"# Filler {i}\n- [ ] FILLER-{i}\n" + "x" * ASSIST.PLAN_LIMIT, encoding="utf-8")
+            paths.append(path)
+        return paths
+
+    def test_the_active_edited_plan_stays_in_the_model_input_after_later_plans_that_fill_the_budget(self):
+        fillers = self.fillers(6)
         log = Transcript()
         log.user("Implement the plan")
-        log.read_plan(self.plan)
-        for path in self.others(6):
+        log.read_plan(self.plan, "Edit")
+        for path in fillers:
             log.read_plan(path)
         self.assess(log)
         text = self.calls[0]["text"]
         self.assertIn("two: wire the hook", text)
-        self.assertNotIn("PLANS NOT SHOWN", text)
+        line = [row for row in text.splitlines() if row.startswith("PLANS NOT SHOWN")]
+        self.assertEqual(len(line), 1)
+        self.assertNotIn(str(self.plan), line[0])
+        # the budget holds the active plan and the three latest fillers; the three earliest are named by their full path
+        for path in fillers[3:]:
+            self.assertIn(f"FILLER-{path.stem[-1]}", text)
+            self.assertNotIn(str(path), line[0])
+        for path in fillers[:3]:
+            self.assertIn(str(path), line[0])
+
+    def test_a_plan_named_in_a_shell_command_counts_as_read(self):
+        commands = (("Bash", f"cat {self.plan}"), ("PowerShell", f"Get-Content '{self.plan}'"),
+                    ("Bash", "sed -n 1,40p docs/superpowers/plans/feature.md"), ("Bash", f"head -5 {self.plan.as_posix()} | wc -l"))
+        for name, command in commands:
+            with self.subTest(command=command):
+                log = Transcript()
+                log.result(log.call(name, {"command": command}), "ok")
+                self.assertEqual(self.plans_of(log), [self.plan])
+
+    def test_every_spelling_of_a_plan_path_is_the_same_plan(self):
+        spellings = (str(self.plan), self.plan.as_posix(), str(self.plan).replace("/", "\\"), "docs/superpowers/plans/feature.md",
+                     "./docs/superpowers/plans/feature.md", "docs\\superpowers\\plans\\feature.md")
+        for text in spellings:
+            with self.subTest(spelling=text):
+                log = Transcript()
+                log.result(log.call("Bash", {"command": f"cat {text}"}), "ok")
+                self.assertEqual(self.plans_of(log), [self.plan])
+        log = Transcript()
+        log.result(log.call("Bash", {"command": "cat docs/superpowers/plans/feature.md"}), "ok")
+        log.read_plan(self.plan)
+        log.result(log.call("Bash", {"command": f"cat {self.plan.as_posix()}"}), "ok")
+        self.assertEqual(self.plans_of(log), [self.plan])
+
+    def test_a_plan_changed_by_a_shell_command_counts_as_edited(self):
+        first, second, third = self.others(3)
+        log = Transcript()
+        log.read_plan(first)
+        log.result(log.call("Bash", {"command": f"python patch_plan.py && sed -i 's/[ ]/[x]/' {second}"}), "ok")
+        log.result(log.call("PowerShell", {"command": f"Set-Content -Path {third} -Value done"}), "ok")
+        log.read_plan(first)
+        self.assertEqual(self.plans_of(log), [third, second, first])
+
+    def test_a_plan_named_deep_in_another_tools_input_counts(self):
+        log = Transcript()
+        log.result(log.call("Agent", {"description": "review", "prompt": f"Review the plan {self.plan} and report", "extra": {"list": [f"see {self.plan}"]}}), "ok")
+        self.assertEqual(self.plans_of(log), [self.plan])
+
+    def test_a_plan_path_with_spaces_in_file_path_counts(self):
+        spaced = self.dir / "my project" / "docs" / "superpowers" / "plans" / "the plan.md"
+        spaced.parent.mkdir(parents=True)
+        spaced.write_text("# Plan\n- [ ] one\n", encoding="utf-8")
+        log = Transcript()
+        log.read_plan(spaced, "Edit")
+        self.assertEqual(self.plans_of(log), [spaced])
+
+    def test_files_that_only_look_like_plans_do_not_count(self):
+        for text in ("cat docs/superpowers/plans/feature.md.bak", "cat docs/superpowers/plans/", "cat docs/superpowers/specs/feature.md",
+                     "cat docs/superpowers/plans/feature.mdx"):
+            with self.subTest(command=text):
+                log = Transcript()
+                log.result(log.call("Bash", {"command": text}), "ok")
+                self.assertEqual(self.plans_of(log), [])
 
     def test_the_total_plan_size_is_bounded_and_the_omitted_plans_are_named(self):
         big = []
@@ -497,12 +596,12 @@ class PlanDetectionTests(AssistCase):
         # the last edited plans come first and fill the budget; the rest are named, not dropped silently
         for i in range(6 - shown, 6):
             self.assertIn(f"BIG-STEP-{i}", text)
-        omitted = [f"big{i}.md" for i in range(6 - shown)]
+        omitted = [str(big[i]) for i in range(6 - shown)]
         line = [row for row in text.splitlines() if row.startswith("PLANS NOT SHOWN")]
         self.assertEqual(len(line), 1)
         for name in omitted:
             self.assertIn(name, line[0])
-        self.assertNotIn("big5.md", line[0])
+        self.assertNotIn(str(big[5]), line[0])
 
     def test_the_budget_is_derived_from_the_per_plan_limit(self):
         self.assertEqual(ASSIST.PLAN_BUDGET, 4 * ASSIST.PLAN_LIMIT)
@@ -737,6 +836,49 @@ class LoopGuardTests(AssistCase):
         self.assess(log)
         self.assertEqual(self.logged()[-1]["wakes"], 0)
 
+    def test_the_count_lives_in_the_locked_state_so_a_transcript_that_lags_cannot_exceed_the_limit(self):
+        log = self.session()
+        texts = [self.assess(log, final=f"Stopped at {i}.") for i in range(4)]
+        self.assertTrue(all(texts[:3]))
+        self.assertNotIn("write the user plainly", texts[1])
+        self.assertIn("write the user plainly", texts[2])
+        self.assertIsNone(texts[3])
+        self.assertEqual(self.logged()[-1]["decision"], "wake-limit")
+        self.assertEqual(len(self.calls), 3)  # the limit is known before the model is asked
+
+    def test_a_message_of_the_user_resets_the_count_kept_in_the_state(self):
+        log = self.session()
+        for i in range(3):
+            self.assess(log, final=f"Stopped at {i}.")
+        log.user("Why did you stop?")
+        text = self.assess(log, final="Because of the plan.")
+        self.assertIsNotNone(text)
+        self.assertNotIn("write the user plainly", text)
+        self.assertEqual(self.logged()[-1]["wakes"], 0)
+        again = self.assess(log, final="Second stop after the message.")
+        self.assertIsNotNone(again)
+        self.assertEqual(self.logged()[-1]["wakes"], 1)
+
+    def test_two_checks_for_two_different_stops_at_count_two_issue_one_third_wake(self):
+        payloads = []
+        for name, prefix, pad in (("one.jsonl", "a", "p"), ("two.jsonl", "b", "padding " * 30)):
+            log = self.session(prefix)
+            self.woken(log, 2)
+            log.assistant(pad)
+            log.assistant("Stopped.")
+            payloads.append(self.payload_for(log, "Stopped.", name=name))
+        barrier = threading.Barrier(2)
+        self.during_ask = lambda: barrier.wait(timeout=30)
+        results = []
+        threads = [threading.Thread(target=lambda p=p: results.append(ASSIST.assess(dict(p)))) for p in payloads]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=60)
+        self.assertEqual(len(results), 2)
+        self.assertEqual(sum(1 for r in results if r), 1)
+        self.assertEqual(sorted(entry["decision"] for entry in self.logged()), ["idle", "wake-limit"])
+
     def test_a_legit_stop_after_a_wake_ends_the_chain_quietly(self):
         self.answer = dict(OK)
         log = self.session()
@@ -843,6 +985,46 @@ class SupersededVerdictTests(AssistCase):
         payload = {"transcript_path": str(self.dir / "session.jsonl"), "session_id": "s1", "cwd": str(self.project), "last_assistant_message": final}
         self.during_ask = lambda: self.append(*self.after_stop(lambda extra: extra.assistant(final)))
         self.assertIsNotNone(ASSIST.assess(payload))
+
+    def test_a_user_message_that_lands_before_the_scan_starts_discards_the_verdict(self):
+        """The stop point is fixed before anything is read; a record appended after that is never part of the baseline."""
+        real = ASSIST.scan
+
+        def scan(*args, **kwargs):
+            self.append(*self.after_stop(lambda log: log.user("Wait, change of plans")))
+            return real(*args, **kwargs)
+
+        with mock.patch.object(ASSIST, "scan", scan):
+            self.assertIsNone(self.assess(self.session()))
+        self.assertEqual(self.logged()[-1]["decision"], "superseded")
+        self.assertEqual(ASSIST.load_state(), {})
+
+    def test_a_new_turn_with_the_same_final_text_is_not_the_final_message_of_the_stop(self):
+        final = "Step one is done."
+        self.during_ask = lambda: self.append(*self.after_stop(lambda log: log.assistant(final)))
+        self.assertIsNone(self.assess(self.session(), final=final))
+        self.assertEqual(self.logged()[-1]["decision"], "superseded")
+        self.assertEqual(ASSIST.load_state(), {})
+
+    def test_a_late_record_with_the_final_text_must_continue_the_chain_of_the_stop(self):
+        final = "Step one is done."
+        payload = self.payload_for(self.session(), final)
+        stray = Transcript(parent="nowhere", prefix="stray")
+        stray.assistant(final)
+        self.during_ask = lambda: self.append(*stray.entries)
+        self.assertIsNone(ASSIST.assess(payload))
+        self.assertEqual(self.logged()[-1]["decision"], "superseded")
+
+    def test_the_late_final_message_is_accepted_once_with_its_thinking_record_and_no_more(self):
+        final = "Step one is done."
+        payload = self.payload_for(self.session(), final)
+        self.during_ask = lambda: self.append(*self.after_stop(lambda log: (log.add("assistant", [{"type": "thinking", "thinking": "hm"}]), log.assistant(final))))
+        self.assertIsNotNone(ASSIST.assess(payload))
+        ASSIST.save_state({})
+        payload = self.payload_for(self.session(), final)
+        self.during_ask = lambda: self.append(*self.after_stop(lambda log: (log.assistant(final), log.assistant(final))))
+        self.assertIsNone(ASSIST.assess(payload))
+        self.assertEqual(self.logged()[-1]["decision"], "superseded")
 
     def test_a_superseded_stop_leaves_the_next_stop_free_to_wake(self):
         self.during_ask = lambda: self.append(*self.after_stop(lambda log: log.user("Wait")))
