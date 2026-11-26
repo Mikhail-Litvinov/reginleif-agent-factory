@@ -171,10 +171,10 @@ BEGIN
    IF OLD.status IS DISTINCT FROM NEW.status AND NOT EXISTS (SELECT 1 FROM task_transitions WHERE from_status = OLD.status AND to_status = NEW.status) THEN
      RAISE EXCEPTION 'illegal task transition';
    END IF;
-   IF OLD.status = 'BLOCKED' AND NEW.status IS DISTINCT FROM 'BLOCKED' AND NEW.status IS DISTINCT FROM CASE OLD.block_kind
+   IF OLD.status = 'BLOCKED' AND NEW.status IS DISTINCT FROM 'BLOCKED' AND NEW.status IS DISTINCT FROM (CASE OLD.block_kind
        WHEN 'scope' THEN 'PLANNING' WHEN 'dependency' THEN 'READY' WHEN 'execution' THEN 'ASSIGNED'
        WHEN 'usage_limit' THEN 'ASSIGNED' WHEN 'agent_question' THEN 'ASSIGNED'
-       WHEN 'check_environment' THEN 'VERIFYING' WHEN 'rework_limit' THEN 'REWORK_REQUIRED' END THEN
+       WHEN 'check_environment' THEN 'VERIFYING' WHEN 'rework_limit' THEN 'REWORK_REQUIRED' END) THEN
      RAISE EXCEPTION 'invalid blocked target';
    END IF;
    IF OLD.status = 'BLOCKED' AND NEW.status = 'BLOCKED' AND
