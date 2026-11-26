@@ -2,24 +2,33 @@
 //
 // A run may delete only what it created. A path is a name, not the thing: between creation and cleanup another process
 // can remove the file and put its own under the same name, so "the path is in my list" does not mean "that file is
-// mine". Here every file and directory is recorded at creation together with its identity (device and file index,
-// read as bigint because an NTFS index does not fit a double), and cleanup re-reads the identity of what the path
-// names now and deletes only on a match. A name that now holds something else is left alone and reported.
+// mine". Here every file and directory is recorded at creation together with its identity (device, file index and
+// creation time, see identity.ts), and cleanup re-reads the identity of what the path names now and deletes only on a
+// match. A name that now holds something else is left alone and reported. An identity that is unknown (file index 0)
+// is refused when recording, because it could never prove anything.
 //
-// Two rules keep the checks honest. Creation is exclusive ("wx", mkdtemp, link), so a created name never was somebody
+// Three rules keep the checks honest. Creation is exclusive ("wx", mkdtemp, link), so a created name never was somebody
 // else's file, and the identity is taken from the open handle or the new name, never from a later look at the path.
 // Directories are removed without recursion, so a directory holding something this run did not create refuses to go
-// (ENOTEMPTY) instead of taking that with it.
+// (ENOTEMPTY) instead of taking that with it. And a directory is checked again immediately before each of its entries
+// is removed and before it is removed itself: a directory that is no longer the one this run made (renamed away and
+// replaced) is not entered, and the cleanup of it stops there and reports it (fail closed).
 //
-// One window remains and cannot be closed from user space: between the identity check and the unlink the name can
-// still be swapped. It is a few microseconds wide, it needs another process that deletes this exact file and creates
-// another under the same name in that gap, and an unlink only ever removes the one name, never a tree.
+// One window remains and cannot be closed from user space with path-based calls: between the last identity check and
+// the unlink (or rmdir) the name or its parent can still be swapped. It is a few microseconds wide, and it needs another
+// process that acts at exactly that moment with the owner's rights, which is outside the threat model of these tools
+// (T8 in docs/agent-factory/security.md: the tools defend against mistakes, crashes, stale state and concurrency
+// between our own runs, not against an active adversary racing them). An unlink only ever removes the one name, an
+// rmdir only an empty directory, never a tree.
 import { link, lstat, mkdir, mkdtemp, open, readdir, rmdir, unlink, type FileHandle } from "node:fs/promises";
 import { join } from "node:path";
+import { idOfStats, isKnownId, sameId, type FileId } from "./identity.ts";
 
-export interface FileId {
-	dev: bigint;
-	ino: bigint;
+export type { FileId };
+
+/** `beforeStep` runs just before each identity re-check that guards a removal; tests use it to swap a directory at that moment. */
+export interface RemoveOptions {
+	beforeStep?: () => Promise<void>;
 }
 
 export type Removal = "removed" | "left" | "absent";
@@ -29,23 +38,28 @@ export interface RemoveAllResult {
 	/** Names that now hold a file this run did not create; not touched. */
 	left: string[];
 	problems: string[];
+	/** True when the guard refused a removal and the rest was left. */
+	stopped: boolean;
 }
 
 const codeOf = (error: unknown): string | undefined => (error as NodeJS.ErrnoException | undefined)?.code;
 
 const describe = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
-const sameId = (a: FileId, b: FileId): boolean => a.dev === b.dev && a.ino === b.ino;
-
 /** The identity of what `path` names right now (a link itself, never what it points to), or undefined when nothing is there. */
 const identityAt = async (path: string): Promise<FileId | undefined> => {
 	try {
-		const stats = await lstat(path, { bigint: true });
-		return { dev: stats.dev, ino: stats.ino };
+		return idOfStats(await lstat(path, { bigint: true }));
 	} catch (error) {
 		if (codeOf(error) === "ENOENT") return undefined;
 		throw error;
 	}
+};
+
+/** Refuses an identity that proves nothing, so it never gets onto a list. */
+const requireKnown = (path: string, id: FileId | undefined): FileId => {
+	if (!isKnownId(id)) throw new Error(`${path}: unknown identity (the filesystem gave no file index); it cannot be recorded`);
+	return id;
 };
 
 export class OwnedFiles {
@@ -58,8 +72,7 @@ export class OwnedFiles {
 	async create(path: string): Promise<FileHandle> {
 		const handle = await open(path, "wx");
 		try {
-			const stats = await handle.stat({ bigint: true });
-			this.entries.set(path, { dev: stats.dev, ino: stats.ino });
+			this.entries.set(path, requireKnown(path, idOfStats(await handle.stat({ bigint: true }))));
 		} catch (error) {
 			await handle.close();
 			throw error;
@@ -75,7 +88,7 @@ export class OwnedFiles {
 		if (this.entries.has(path)) return;
 		const found = id ?? (await identityAt(path));
 		if (found === undefined) throw new Error(`${path} vanished before it could be recorded`);
-		this.entries.set(path, found);
+		this.entries.set(path, requireKnown(path, found));
 	}
 
 	/**
@@ -112,10 +125,17 @@ export class OwnedFiles {
 		return "removed";
 	}
 
-	/** Removes everything recorded, newest first; one failure does not stop the rest. */
-	async removeAll(): Promise<RemoveAllResult> {
-		const result: RemoveAllResult = { removed: [], left: [], problems: [] };
+	/**
+	 * Removes everything recorded, newest first; one failure does not stop the rest. `proceed` is asked before each
+	 * file; when it says no, nothing more is removed and `stopped` is set.
+	 */
+	async removeAll(proceed?: () => Promise<boolean>): Promise<RemoveAllResult> {
+		const result: RemoveAllResult = { removed: [], left: [], problems: [], stopped: false };
 		for (const path of [...this.entries.keys()].reverse()) {
+			if (proceed !== undefined && !(await proceed())) {
+				result.stopped = true;
+				break;
+			}
 			try {
 				const outcome = await this.remove(path);
 				if (outcome === "removed") result.removed.push(path);
@@ -150,7 +170,7 @@ export class OwnedDir {
 		const path = await mkdtemp(join(parent, prefix));
 		const id = await identityAt(path);
 		if (id === undefined) throw new Error(`${path} vanished right after it was created`);
-		return new OwnedDir(path, id);
+		return new OwnedDir(path, requireKnown(path, id));
 	}
 
 	/** Makes the subdirectory `name` (exclusively: an existing one is refused) and records its identity. */
@@ -159,7 +179,7 @@ export class OwnedDir {
 		await mkdir(path);
 		const id = await identityAt(path);
 		if (id === undefined) throw new Error(`${path} vanished right after it was created`);
-		const made = new OwnedDir(path, id);
+		const made = new OwnedDir(path, requireKnown(path, id));
 		this.children.push(made);
 		return made;
 	}
@@ -180,14 +200,14 @@ export class OwnedDir {
 				if (codeOf(error) === "ENOENT") continue;
 				throw error;
 			}
-			const id = { dev: stats.dev, ino: stats.ino };
+			const id = idOfStats(stats);
 			if (!stats.isDirectory()) {
 				await this.files.adopt(path, id);
 				continue;
 			}
 			let sub = this.children.find((candidate) => candidate.path === path);
 			if (sub === undefined) {
-				sub = new OwnedDir(path, id);
+				sub = new OwnedDir(path, requireKnown(path, id));
 				this.children.push(sub);
 			}
 			await sub.adoptChildren();
@@ -199,14 +219,24 @@ export class OwnedDir {
 	 * without recursion. Returns what could not be done; a directory that still holds something this run did not
 	 * create stays, with that thing, and is reported. A path that now names a different directory is not touched.
 	 */
-	async remove(): Promise<string[]> {
+	async remove(options: RemoveOptions = {}): Promise<string[]> {
 		const now = await identityAt(this.path);
 		if (now === undefined) return [];
 		if (!sameId(now, this.id)) return [];
 		const problems: string[] = [];
-		for (const sub of this.children.splice(0).reverse()) problems.push(...(await sub.remove()));
-		const result = await this.files.removeAll();
+		// Asked immediately before each removal below: is this still the directory this run made? (Residual window: T8.)
+		const stillMine = async (): Promise<boolean> => {
+			await options.beforeStep?.();
+			return sameId(await identityAt(this.path), this.id);
+		};
+		const replaced = `${this.path} was replaced during cleanup, so no more was removed from it`;
+		for (const sub of this.children.splice(0).reverse()) {
+			if (!(await stillMine())) return [...problems, replaced];
+			problems.push(...(await sub.remove(options)));
+		}
+		const result = await this.files.removeAll(stillMine);
 		problems.push(...result.problems);
+		if (result.stopped || !(await stillMine())) return [...problems, replaced];
 		try {
 			await rmdir(this.path);
 		} catch (error) {

@@ -63,8 +63,9 @@ af_init_roles() {
 }
 
 # psql as the bootstrap role with its own passfile (mode 0600, removed on return). The entrypoint wrapper
-# (../entrypoint.sh) exports no password variable, only the path of its passfile, which 99-finish.sh removes at the end;
-# this one is separate so the role statements do not depend on that file. A passfile path is a path, not a secret.
+# (../entrypoint.sh) exports no real password variable, only the path of its libpq service file, which 99-finish.sh
+# removes at the end; this passfile is separate so the role statements do not depend on that file (libpq prefers the
+# service file's password where both exist; both hold the same one). A passfile path is a path, not a secret.
 # The passfile lives in the wrapper's tmpfs directory AF_INIT_DIR, which the wrapper's EXIT trap removes on every way out
 # (a signal or a failing step between the write and the removal below included); it is never made anywhere else.
 af_psql_bootstrap() {

@@ -15,7 +15,7 @@ services:
     restart: unless-stopped
     stop_grace_period: 30s
     # The wrapper (deploy/postgres/entrypoint.sh) hands the image's entrypoint the bootstrap password without any
-    # variable or argument, and serves a data directory only after a recorded complete initialisation (it refuses one
+    # variable or argument (and never a trust rule), writes the healthcheck's passfile, and serves a data directory only after a recorded complete initialisation (it refuses one
     # that holds PG_VERSION but no marker): see it and docs/agent-factory/deployment.md "No password in any environment"
     # and "A start that refuses".
     entrypoint: ["bash", "/etc/agent-factory/entrypoint.sh"]
@@ -23,13 +23,12 @@ services:
     environment:
       POSTGRES_USER: af_bootstrap
       POSTGRES_DB: postgres
-      # No POSTGRES_PASSWORD and no POSTGRES_PASSWORD_FILE: the image entrypoint exports the password to every child
-      # process, the initdb call and the psql calls of the init server alike. The password reaches initdb through
-      # --pwfile (a path to the secret file). The image refuses to initialise without a password variable unless this
-      # option is "trust"; here it only satisfies that check. It also makes the entrypoint append a "trust for all
-      # hosts" rule to the data directory's pg_hba.conf, which the server does not read (hba_file above) and which
-      # init/99-finish.sh rewrites to scram-sha-256 anyway.
-      POSTGRES_HOST_AUTH_METHOD: trust
+      # No POSTGRES_PASSWORD, no POSTGRES_PASSWORD_FILE and no POSTGRES_HOST_AUTH_METHOD: a trust rule is never asked
+      # for, so none can ever be written to the volume (a SIGKILL at any instant included). The image's check that a
+      # password is given is met inside the wrapper process (deploy/postgres/entrypoint.sh), with a constant that is
+      # not the secret, so nothing in the container's configuration holds a password. The password reaches initdb
+      # through --pwfile (a path to the secret file), and the image's own psql calls authenticate through a libpq
+      # service file that the wrapper writes into tmpfs.
       # Checksums on pages, and scram-sha-256 for local and network connections alike (the default is trust for local).
       POSTGRES_INITDB_ARGS: --data-checksums --auth-local=scram-sha-256 --auth-host=scram-sha-256 --pwfile=/run/secrets/af_bootstrap
     ports:
@@ -57,18 +56,15 @@ services:
       #     deploy/postgres/entrypoint.sh and init/99-finish.sh);
       #  3. a real login as af_backup to the application database and a trivial query, which proves that the roles exist
       #     and their passwords are the ones in the secret files.
-      # The password reaches psql through a passfile of mode 0600 in tmpfs, made from the secret file with `cat` inside the
-      # command (so none sits in a command line or an environment) and removed by a trap on every way out. `$$` is
-      # compose's escape for a literal `$`.
+      # The password reaches psql through ONE fixed passfile of mode 0600 in tmpfs, which the wrapper rewrites from the
+      # secret file at every start of the container. The check makes no file of its own: docker kills a check that runs
+      # past its timeout with SIGKILL, so a per-check file (and the trap that would remove it) would be left behind.
       test:
         - CMD-SHELL
         - >-
           pg_isready -h 127.0.0.1 -U af_backup -d agent_factory -q
           && test -e /var/lib/postgresql/data/.af-init-complete
-          && { f=$$(umask 077; mktemp /dev/shm/pgpass.XXXXXX)
-          && trap 'rm -f "$$f"' EXIT
-          && printf '*:*:*:af_backup:%s\n' "$$(cat /run/secrets/af_backup)" > "$$f"
-          && PGPASSFILE="$$f" PGCONNECT_TIMEOUT=3 psql -w -h 127.0.0.1 -U af_backup -d agent_factory -Atc 'select 1' >/dev/null; }
+          && PGPASSFILE=/dev/shm/af-healthcheck.pgpass PGCONNECT_TIMEOUT=3 psql -w -h 127.0.0.1 -U af_backup -d agent_factory -Atc 'select 1' >/dev/null
       interval: 10s
       timeout: 5s
       retries: 5

@@ -3,8 +3,11 @@
 // package (code, tests, tools) removes something in a way that skips that rule:
 //   - docker: only removeOwned (by the run label) and removeRecordedVolumes (by a recorded, re-verified name) in
 //     deploy/lib.ts may remove containers, networks, volumes or images; nothing else in the package may.
-//   - files: a recursive delete is forbidden everywhere; a bare unlink only in deploy/owned.ts (identity re-read first) and
-//     deploy/setup-secrets.ts (identity of the file it created re-read first).
+//   - files: every file-system delete (rm, rmSync, rmdir, rmdirSync, unlink, unlinkSync, through fs, fs.promises, fsp, a
+//     destructured or renamed import, a string key, any spelling over several lines) is forbidden, recursive or not, except
+//     in deploy/owned.ts (identity re-read before each) and the unlink of deploy/setup-secrets.ts (identity of the file it
+//     created re-read first). A shell `rm -r` is forbidden except the entrypoint's own private mktemp directory. Tests
+//     clean up through OwnedDir (deploy/owned.ts), never by a delete of their own.
 // The check reads the whole text of each file, not line by line, so a removal split over several lines, a line continuation,
 // a multiline template string or an argument list spread over lines is seen. Its patterns are built from parts so that this
 // file does not match itself (it is excluded as well).
@@ -35,8 +38,30 @@ const DOCKER_TEXT = [
 ];
 const DOCKER = new RegExp([...DOCKER_WORDS, ...DOCKER_TEXT].join("|"), "gi");
 const SHELL_RECURSIVE = new RegExp(String.raw`\brm${SP}(?:-[a-zA-Z]*[rR][a-zA-Z]*\b|--recursive\b)`, "g");
-const FS_CALL = /\b(?:rm|rmSync|rmdir|rmdirSync)\s*\(/g;
-const UNLINK = /\b(?:unlink|unlinkSync)\s*\(/g;
+// Every file-system call that removes something, whatever its options: the recursive flag is not what makes it unsafe, an
+// unchecked name is.
+const FS_REMOVERS = ["rm", "rmSync", "rmdir", "rmdirSync", "unlink", "unlinkSync"];
+// Which of them a file may use: deploy/owned.ts all (identity re-read before each), deploy/setup-secrets.ts only its unlink
+// of the empty file it created (identity re-read first); every other file none.
+const fsAllowed = (file: string): string[] => (file === OWNED ? FS_REMOVERS : file === SETUP_SECRETS ? ["unlink", "unlinkSync"] : []);
+
+// The patterns that find a use of the given remover names, in any spelling that has to name one:
+//  - a call, bare or as a member (`rm(`, `fs.rm(`, `fs.promises.rm(`, `fsp.rm(`, a name split from its "(" by whitespace);
+//  - a member access without a call (`fs.rm`, `fs?.promises?.rm`), or one by a string key (`fs["rm"]`);
+//  - a binding: a name imported from node:fs or node:fs/promises (renamed with `as` included, re-export included), or
+//    destructured from anything (`const { rm: remove } = fs.promises`). The binding itself is the finding, so a rename
+//    cannot hide the later calls of the alias.
+const fsRemovalPatterns = (names: string[]): RegExp[] => {
+	if (names.length === 0) return [];
+	const any = names.join("|");
+	return [
+		new RegExp(String.raw`(?<![\w$])(?:${any})\s*\(`, "g"),
+		new RegExp(String.raw`\.\s*(?:${any})\b`, "g"),
+		new RegExp(String.raw`\[\s*["'\`](?:${any})["'\`]\s*\]`, "g"),
+		new RegExp(String.raw`\b(?:import|export)\s+(?:type\s+)?(?:[\w$]+\s*,\s*)?\{[^}]*\b(?:${any})\b[^}]*\}\s*from\s*["'](?:node:)?fs(?:/promises)?["']`, "g"),
+		new RegExp(String.raw`\b(?:const|let|var)\s*\{[\s\S]*?\b(?:${any})\b[\s\S]*?\}\s*=`, "g"),
+	];
+};
 
 const sources = (): string[] =>
 	readdirSync(PACKAGE_ROOT, { recursive: true, encoding: "utf8" })
@@ -59,17 +84,6 @@ const withoutLibRemovers = (text: string): string => {
 	return out;
 };
 
-// The argument text of the call whose "(" is at `open`: up to the matching ")" (to the end of the text when it never closes,
-// which makes an unbalanced file loud rather than silent).
-const callText = (text: string, open: number): string => {
-	let depth = 0;
-	for (let i = open; i < text.length; i++) {
-		if (text[i] === "(") depth++;
-		else if (text[i] === ")" && --depth === 0) return text.slice(open, i + 1);
-	}
-	return text.slice(open);
-};
-
 // The removal sites of a text, as "file:line: text". `file` is the path relative to the package root.
 export const removalSites = (file: string, text: string): string[] => {
 	let body = file === LIB ? withoutLibRemovers(text) : text;
@@ -80,13 +94,10 @@ export const removalSites = (file: string, text: string): string[] => {
 		if (!found.has(line)) found.set(line, `${file}:${line}: ${(body.split("\n")[line - 1] ?? "").trim()}`);
 	};
 	for (const match of body.matchAll(DOCKER)) note(match.index);
-	if (file !== OWNED) {
-		for (const match of body.matchAll(SHELL_RECURSIVE)) note(match.index);
-		for (const match of body.matchAll(FS_CALL)) {
-			if (/\brecursive\b/.test(callText(body, match.index + match[0].length - 1))) note(match.index);
-		}
+	if (file !== OWNED) for (const match of body.matchAll(SHELL_RECURSIVE)) note(match.index);
+	for (const pattern of fsRemovalPatterns(FS_REMOVERS.filter((name) => !fsAllowed(file).includes(name)))) {
+		for (const match of body.matchAll(pattern)) note(match.index);
 	}
-	if (file !== OWNED && file !== SETUP_SECRETS) for (const match of body.matchAll(UNLINK)) note(match.index);
 	return [...found.entries()].sort((a, b) => a[0] - b[0]).map(([, site]) => site);
 };
 
@@ -140,15 +151,69 @@ describe("removal guard", () => {
 			"await mkdir(dir, { recursive: true });",
 			"readdirSync(root, { recursive: true, encoding: 'utf8' })",
 			"trap 'rm -f \"$f\"' EXIT",
-			"await rm(path);",
+			"await rename(path, `${path}.moved`);",
+			"const names = await readdir(dir); // a comment about remove and rmdir ordering",
 		]) assert.deepEqual(removalSites("tests/x.ts", fine), [], fine);
 	});
 
-	it("a bare unlink is allowed only where the identity of the file is checked first", () => {
+	it("the guard catches a delete that is not recursive, in every spelling", () => {
+		const forms = [
+			"await rm(path);",
+			"await rm(path, { force: true });",
+			"rmSync(path);",
+			"await rmdir(path);",
+			"rmdirSync(path);",
+			"await unlink(path);",
+			"unlinkSync(file);",
+			"await fs.rm(path);",
+			"await fs.promises.rm(path);",
+			"await fsp.rm(path);",
+			"await fs.promises.unlink(path);",
+			"fs.rmSync(path)",
+			"fs.unlinkSync(path)",
+			"await fs.promises\n\t.rm(path);",
+			"await rm\n\t(\n\t\tpath,\n\t);",
+			'await fs["rm"](path);',
+			"await fs?.promises?.rm?.(path);",
+			'const f = require("node:fs").rmSync;',
+			'await (await import("node:fs/promises")).rm(path);',
+			"const remove = fs.promises.rm;",
+			"await promisify(fs.unlink)(path);",
+		];
+		for (const form of forms) assert.equal(removalSites("tests/x.ts", form).length >= 1, true, JSON.stringify(form));
+	});
+
+	it("the guard catches a delete under another name: renamed on import, destructured, aliased", () => {
+		const forms = [
+			'import { rm as remove } from "node:fs/promises";\nawait remove(path);',
+			'import { rmSync as gone } from "node:fs";',
+			'import { readFile, unlink as drop } from "node:fs/promises";',
+			'import {\n\trm as cleanup,\n\treadFile,\n} from "node:fs/promises";',
+			'import { rm } from "fs/promises";',
+			'import type { rm } from "node:fs/promises";',
+			'const { rm: remove } = fs.promises;\nawait remove(p);',
+			'const { rmSync } = require("node:fs");',
+			'const { promises: { rm } } = fs;',
+			'const { rm: remove } = await import("node:fs/promises");',
+			'let { unlinkSync: kill } = fs;',
+		];
+		for (const form of forms) assert.equal(removalSites("tests/x.ts", form).length >= 1, true, JSON.stringify(form));
+		// Naming nothing destructive is fine, whatever the alias.
+		for (const fine of [
+			'import { readFile as read, rename } from "node:fs/promises";',
+			'const { readFile: read } = fs.promises;',
+			'import { rmdirSyncLike } from "./other.ts";',
+		]) assert.deepEqual(removalSites("tests/x.ts", fine), [], fine);
+	});
+
+	it("the exemptions are by file and by name: owned.ts everything, setup-secrets.ts only its unlink", () => {
+		assert.deepEqual(removalSites("deploy/owned.ts", 'import { rmdir, unlink } from "node:fs/promises";\nawait unlink(path);\nawait rmdir(path);'), []);
+		assert.deepEqual(removalSites("deploy/setup-secrets.ts", 'import { unlinkSync } from "node:fs";\nunlinkSync(file);'), []);
+		assert.equal(removalSites("deploy/setup-secrets.ts", "rmSync(dir);").length, 1);
+		assert.equal(removalSites("deploy/setup-secrets.ts", "rmdirSync(dir);").length, 1);
+		assert.equal(removalSites("deploy/setup-secrets.ts", 'import { rm as gone } from "node:fs/promises";').length, 1);
 		assert.equal(removalSites("tests/x.ts", "await unlink(path);").length, 1);
 		assert.equal(removalSites("deploy/x.ts", "unlinkSync(file);").length, 1);
-		assert.deepEqual(removalSites("deploy/owned.ts", "await unlink(path);"), []);
-		assert.deepEqual(removalSites("deploy/setup-secrets.ts", "unlinkSync(file);"), []);
 	});
 
 	it("deploy/lib.ts may remove only inside removeOwned and removeRecordedVolumes", () => {

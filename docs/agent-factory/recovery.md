@@ -130,7 +130,15 @@ new-project procedure and the switch-over were not run on the real stack with ta
 
   `docker wait agent-factory-postgres-1`
 
-  `docker run --rm -v agent-factory_pgdata:/d:ro -v "${copy}:/o" alpine tar -C /d -czf /o/pgdata.tgz .`
+  The copy goes to a new file whose name is made now (time and a random part), and the command refuses to write when
+  that name exists: the shell inside the container opens the file with no-overwrite (`set -C`), so an earlier copy is
+  never replaced. Note the name it prints:
+
+  `$name = 'pgdata-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.tgz'`
+
+  `docker run --rm -e NAME=$name -v agent-factory_pgdata:/d:ro -v "${copy}:/o" alpine sh -c 'set -C; tar -C /d -czf - . > /o/$NAME'`
+
+  `$name`
 
   and then go to the restore above. (The copy command names no password.) The image `alpine` is pulled when absent.
 

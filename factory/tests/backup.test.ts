@@ -1,6 +1,6 @@
 // Backup and restore check: the good path and every way a backup can be broken.
 import assert from "node:assert/strict";
-import { copyFile, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
@@ -161,7 +161,7 @@ describe("backup and restore check", () => {
 				nameFor: () => name,
 				hooks: {
 					afterDumpPublished: async () => {
-						await rm(dump); // the run's own published dump goes away ...
+						await rename(dump, `${dump}.moved`); // the run's own published dump goes away (moved aside: tests never delete) ...
 						await writeFile(dump, "another run's dump, same name"); // ... and another file takes the name
 						await writeFile(sums, "forces this run to fail"); // this run fails at its checksum file
 					},
@@ -171,7 +171,7 @@ describe("backup and restore check", () => {
 		);
 		assert.equal(await readFile(dump, "utf8"), "another run's dump, same name");
 		assert.equal(await readFile(sums, "utf8"), "forces this run to fail");
-		assert.deepEqual((await readdir(target)).sort(), [`${name}.dump`, `${name}.dump.sha256`]);
+		assert.deepEqual((await readdir(target)).sort(), [`${name}.dump`, `${name}.dump.moved`, `${name}.dump.sha256`]);
 	});
 
 	it("a failed run keeps its staging directory when something it did not create is in it, and says so", async () => {
@@ -289,7 +289,7 @@ describe("backup and restore check", () => {
 
 	it("restore check fails when the manifest is missing", async () => {
 		const copy = await copyBackup("nomanifest");
-		await rm(copy.manifestPath);
+		await rename(copy.manifestPath, `${copy.manifestPath}.moved`);
 		await assert.rejects(check(copy.manifestPath), /manifest missing/);
 	});
 

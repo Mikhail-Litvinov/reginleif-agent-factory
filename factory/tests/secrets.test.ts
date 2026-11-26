@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, lstatSync, renameSync, statSync, writeFileSync, type BigIntStats } from "node:fs";
-import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { ownedComposeArgs, run } from "../deploy/lib.ts";
@@ -43,7 +43,8 @@ describe("secrets", () => {
 		const dir = join(work, "partial");
 		createSecrets(dir);
 		await writeFile(join(dir, "af_api"), "kept-value");
-		await rm(join(dir, "af_reader"));
+		// Moved aside, not deleted: the scratch directory's own cleanup removes everything inside it.
+		await rename(join(dir, "af_reader"), join(dir, "af_reader.moved"));
 		const result = createSecrets(dir);
 		assert.deepEqual(result.created, ["af_reader"]);
 		assert.equal(await readFile(join(dir, "af_api"), "utf8"), "kept-value");
@@ -126,6 +127,19 @@ describe("secrets", () => {
 		createSecrets(dir);
 		assert.deepEqual(verifySecretsAccess(dir), []);
 		for (const path of [dir, ...SECRET_NAMES.map((n) => join(dir, n))]) assert.equal(aclSids(path).includes(USERS_SID), false, path);
+	});
+
+	// A directory that was there before and holds somebody's unrelated files is not ours to re-protect: its access is
+	// verified and, when too wide, the command refuses and changes nothing (an ACL change would also reach what the owner keeps there).
+	it("an existing directory with unrelated files and a Users grant is refused and its ACL is not changed", onWindows, async () => {
+		const dir = await mkdtemp(join(work, "acl-foreign-"));
+		await writeFile(join(dir, "notes.txt"), "not ours");
+		grantUsers(dir);
+		const before = [...aclSids(dir)].sort();
+		assert.ok(before.includes(USERS_SID));
+		assert.throws(() => createSecrets(dir), /refused/);
+		assert.deepEqual([...aclSids(dir)].sort(), before, "the refusal must not change the access");
+		assert.deepEqual(await readdir(dir), ["notes.txt"], "no secret may be written there");
 	});
 
 	// No secret byte is written to a place whose protection was not verified first: when the directory cannot be made

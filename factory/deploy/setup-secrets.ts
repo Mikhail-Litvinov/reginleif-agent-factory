@@ -11,15 +11,17 @@
 // Access: on Windows the directory is restricted by ACL to the current user, SYSTEM and Administrators (well-known SIDs,
 // so a localized system does not matter), and the ACL is READ BACK by SID for the directory and for every secret file;
 // the result must hold only those three, with no other entry. Elsewhere the check is the mode: nothing for group or
-// others. A directory that already holds secrets is never restricted silently: when its access is wider than that, the
-// command refuses and says which entry is the problem, and the owner decides. A directory that exists but is still empty
+// others. A directory that already holds anything (our secrets or unrelated files) is never restricted silently: when its
+// access is wider than that, the command refuses and says which entry is the problem, and the owner decides. A directory
+// that exists but is still empty
 // (for example one just made by mkdtemp) has nothing to protect yet, so its access is set explicitly (inheritance off,
 // every entry other than the three removed) and READ BACK before the first secret is written; when that verification
 // fails, nothing is written.
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { chmodSync, closeSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, statSync, unlinkSync, writeSync, type BigIntStats } from "node:fs";
+import { chmodSync, closeSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, statSync, unlinkSync, writeSync, type BigIntStats } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { idOfStats, sameId } from "./identity.ts";
 
 // One secret per account; the first is the bootstrap superuser of the server (init and recovery only).
 export const SECRET_NAMES = ["af_bootstrap", "af_migrator", "af_api", "af_control", "af_backup", "af_reader"] as const;
@@ -119,13 +121,13 @@ type Lock = (directory: string) => void;
 
 const refuse = (target: string, problems: string[]): Error =>
 	new Error(
-		`refused: the secrets directory ${target} already holds secrets and its access is wider than allowed; it was not changed.\n` +
+		`refused: the secrets directory ${target} already exists and holds files, and its access is wider than allowed; it was not changed.\n` +
 			problems.map((p) => `  - ${p}`).join("\n") +
 			"\nRemove those entries yourself (for example icacls <path> /remove:g *<sid>) and run the command again.",
 	);
 
-// Removes `file` only while it is still the file with the recorded identity: device, inode and creation time all equal,
-// and the inode known (0 means the filesystem or the query gave none, so two zeros prove nothing). A path that now holds
+// Removes `file` only while it is still the file with the recorded identity (identity.ts: device, inode and creation
+// time all equal, and the inode known, since 0 means the filesystem gave none and two zeros prove nothing). A path that now holds
 // something else, or nothing, or whose identity is not proven, is left as it is: a leftover empty file is harmless and
 // is seen by the next run, a removed foreign file is not. Residual window: between this check and the unlink (same as
 // owned.ts). `stat` is replaceable for the test that proves the rule on identities a real filesystem will not give.
@@ -137,7 +139,7 @@ export const removeIfSame = (file: string, made: BigIntStats, stat: (path: strin
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
 		throw error;
 	}
-	if (made.ino === 0n || now.dev !== made.dev || now.ino !== made.ino || now.birthtimeNs !== made.birthtimeNs) return;
+	if (!sameId(idOfStats(now), idOfStats(made))) return;
 	try {
 		unlinkSync(file);
 	} catch (error) {
@@ -151,7 +153,9 @@ export const removeIfSame = (file: string, made: BigIntStats, stat: (path: strin
 // locking step, for the test that proves nothing is written when the verification fails.
 export const createSecrets = (directory: string, options: { lock?: Lock; verifyFile?: (file: string) => string[] } = {}): SecretsResult => {
 	const target = resolve(directory);
-	const reused = existsSync(target) && secretFiles(target).length > 0;
+	// Only a directory this run creates, or one that is truly empty, has its access changed. A directory that exists and
+	// holds anything (our secrets, or files of somebody else) is verified and refused when too open, never modified.
+	const reused = existsSync(target) && (secretFiles(target).length > 0 || readdirSync(target).length > 0);
 	if (reused) {
 		const problems = verifySecretsAccess(target);
 		if (problems.length > 0) throw refuse(target, problems);

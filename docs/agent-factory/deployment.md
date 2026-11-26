@@ -27,6 +27,14 @@ Every command in this document was executed as written on a scratch project (its
 secrets directory, a free loopback port in place of 55432), except `restore.ts` against the real stack and the real
 switch-over, which were checked against the code only.
 
+## Threat model of these tools
+
+A process of the same Windows user is undefended in version one (`security.md` T8). The tools defend against mistakes,
+crashes, kills, stale state, wrong targets and concurrency between our own runs, not against an active adversary that
+holds the owner's rights and races our operations: such a process can read the secrets directory, swap a file between
+a check and its use, or replace a directory under a running command. Where a code comment names a residual race, it
+points to T8.
+
 ## What runs
 
 One container from `pgvector/pgvector:0.8.7-pg16-bookworm` (pinned by digest in `factory/deploy/compose.yml`), PostgreSQL
@@ -140,25 +148,30 @@ is not used as it is. The container starts through a wrapper (`factory/deploy/po
 `bash /etc/agent-factory/entrypoint.sh`, since a Windows bind mount has no exec bit):
 
 - `initdb` gets the password as a file, `--pwfile=/run/secrets/af_bootstrap`, set in `POSTGRES_INITDB_ARGS`.
-- The tools of init (`psql`) read a passfile (`pgpass.*`, mode 0600, owned by the postgres user) in one private
-  directory in tmpfs, `/dev/shm/af-init.*`, which the wrapper makes; it exports only the passfile's path as `PGPASSFILE`
-  (a path is not a secret) and the directory as `AF_INIT_DIR`. Every passfile of init is made in that directory and
-  nowhere else. During the first start the wrapper stays the parent of the image's entrypoint (and forwards signals to
-  it), so its exit trap removes the directory, and with it every passfile, on every way out: success, a failing init
-  script, a signal, a crash. Only a SIGKILL of the wrapper skips the trap; the files are in tmpfs, which the stop of the
-  container discards.
-- `POSTGRES_HOST_AUTH_METHOD=trust` is set only to satisfy the image's check that some password rule exists. The server
-  does not read the `pg_hba.conf` of the data directory at all but the mounted `/etc/agent-factory/pg_hba.conf`
-  (`-c hba_file=...`), so no trust rule is ever active for the network.
-- `init/99-finish.sh` is the last init script: it removes the passfile, rewrites the trust rule of the data directory to
-  `scram-sha-256`, fails the init when any trust rule is left, and only then creates the marker `.af-init-complete`
-  (see "A start that refuses"). When the initialisation does not complete, the wrapper's trap closes the trust rule
-  itself, so no failure path leaves a trust rule in the volume.
+- The image's own `psql` calls on its temporary init server authenticate through a libpq service file. The wrapper
+  writes it into one private directory in tmpfs, `/dev/shm/af-init.*` (mode 0600, owned by the postgres user), and
+  exports only its path as `PGSERVICEFILE` with `PGSERVICE` (a path is not a secret) and the directory as
+  `AF_INIT_DIR`. The file holds the real password, which the shell copies from the secret file with `cat`: no variable
+  and no argument of any process holds it. The passfile that `init/10-roles.sh` makes for its own `psql` is made in the
+  same directory and nowhere else. During the first start the wrapper stays the parent of the image's entrypoint (and
+  forwards signals to it), so its exit trap removes the directory, and with it every file in it, on every way out:
+  success, a failing init script, a signal, a crash. Only a SIGKILL of the wrapper skips the trap; the files are in
+  tmpfs, which the stop of the container discards.
+- No `POSTGRES_HOST_AUTH_METHOD` and no `POSTGRES_PASSWORD` is ever set in the container's configuration, so the image
+  appends only its `scram-sha-256` rule to the data directory's `pg_hba.conf` and no trust rule is ever written, at any
+  instant, a kill included. The image's check that a password is given is met by a constant inside the wrapper process
+  that is not the secret and opens no role. The server reads the mounted `/etc/agent-factory/pg_hba.conf`
+  (`-c hba_file=...`), not the one of the data directory.
+- `init/99-finish.sh` is the last init script: it removes the service file early, only guards against a trust rule (it
+  fails the init when one is found and rewrites nothing), and only then creates the marker `.af-init-complete` (see
+  "A start that refuses").
 
 The healthcheck proves a usable database, in three steps that must all hold: a TCP `pg_isready -h 127.0.0.1` (the init
 server of the image has no TCP listener, so a TCP answer means the final server is up), the marker `.af-init-complete`
-in the data directory, and a real login as `af_backup` with `select 1`. The login reads the password from the secret
-file into a passfile in tmpfs (mode 0600, removed by a trap), so no password is in a command line or an environment.
+in the data directory, and a real login as `af_backup` with `select 1`. The login reads the password from one fixed
+passfile, `/dev/shm/af-healthcheck.pgpass` (tmpfs, mode 0600), which the wrapper rewrites from the secret file at every
+start of the container. The check makes no file of its own, because docker kills a check that runs past its timeout and
+a per-check file would be left behind. No password is in a command line or an environment.
 Checked by tests:
 `factory/tests/first-start.test.ts` samples the environment and the command line of every process in the container
 continuously through the whole first start, as root and as the postgres user, and looks for the passwords and for a
@@ -176,8 +189,7 @@ plain restart would then serve it as if it were complete. So the last step of a 
 
 A data directory with `PG_VERSION` and without the marker is refused: the container stops with a non-zero exit code and
 prints `refusing to start` and a pointer to this section on its error output, and it never reports `healthy`. The
-refusal also closes the trust rule that the image may have left in the directory's `pg_hba.conf`, so a refused volume
-does not stay open. Read the reason:
+refusal changes nothing in the data directory. Read the reason:
 
 `docker logs agent-factory-postgres-1`
 
@@ -191,34 +203,36 @@ and start again from Install step 3. Never do this on a volume with real data: t
 A database made before the marker existed (a legacy database) is refused too, although it is complete. The wrapper does
 not mark it by itself, because it cannot tell a complete database from a half-made one without logging in to a server
 that is not running. The owner marks it once, after checking it, ideally before the stack is updated, while the previous
-version still runs and answers. The check is read-only and has three parts, all must hold:
+version still runs and answers (the check needs a running server; the new wrapper refuses to start an unmarked one).
+The check is a script, read-only, run from the repository root:
 
-- the five application roles and the bootstrap role exist: open a session as `af_backup` (it asks for the password,
-  which is in the `af_backup` secret file; nothing goes into a command line)
+`node factory/deploy/verify-init.ts`
 
-  `docker exec -it agent-factory-postgres-1 psql -h 127.0.0.1 -U af_backup -d agent_factory`
+For another project name, run the same command with `--project` and the name added at the end. It verifies, as `af_backup` in one session, every postcondition of
+`init/10-roles.sh` and `init/99-finish.sh`: the six roles and their attributes (only `af_bootstrap` is a superuser),
+the read-only and timeout settings of `af_reader`, the connect and schema rights of `PUBLIC` and of the application
+roles, the owner of `agent_factory`, the `vector` extension, the default privileges of `af_backup`, a real login of
+each application role with the password of its secret file, no leftover service file and no trust rule in the data
+directory's `pg_hba.conf`. Each check prints `ok` or `FAIL <name>: <reason>`, and the script exits 0 only when all of
+them pass (1 when any fails, 2 on a wrong argument). The list of checks is `factory/deploy/init-postconditions.ts`; a
+test (`factory/tests/verify-init.test.ts`) fails when a statement of the init scripts has no check, so the two cannot
+drift apart. Passwords are not in the catalogs, so they are proved by the real logins, not read.
 
-  and run `select count(*) from pg_roles where rolname like 'af\_%';`, which must print 6, then `\q`. The login
-  itself also proves that the database `agent_factory` exists;
-- the trust rule is closed: this command must print 0 (the variable holds the pattern, so that PowerShell does not
-  read it):
+If any check fails, do not create the marker: the database is half-made or was changed, and the recovery is a restore
+from a known-good backup (`recovery.md`), not a marking.
 
-  `$rule = '^(local|host).*trust'`
-
-  `docker exec -u postgres agent-factory-postgres-1 grep -Ec $rule /var/lib/postgresql/data/pg_hba.conf`
-
-- the first start was not cut off: the roles count and the login above are the proof, because the roles are created
-  by the init script before the step that makes the marker.
-
-When all hold, create the marker. The variable holds the container name, so the command is the same for another
+When all checks pass, create the marker. The variable holds the container name, so the command is the same for another
 project name:
 
 `$container = 'agent-factory-postgres-1'`
 
 `docker exec -u postgres $container touch /var/lib/postgresql/data/.af-init-complete`
 
-Then start (or wait for the next automatic attempt) and wait for `healthy` as in Install step 3. If a check fails,
-do not create the marker: the database is half-made, and the recovery is a restore from a backup (`recovery.md`).
+Then confirm it, which adds the check that the marker exists:
+
+`node factory/deploy/verify-init.ts --with-marker`
+
+Start (or wait for the next automatic attempt) and wait for `healthy` as in Install step 3.
 
 ## Backup
 
@@ -281,7 +295,9 @@ resource of a test run (container, volume, network) carries the label `af.run=<f
 removes anything, `removeOwned` in `factory/deploy/lib.ts`, selects by that label only: a project, container or volume
 is never removed for being named like a test's or being found next to it. `factory/tests/removal-guard.test.ts` fails
 when any other file under `factory/` holds a removal command. `factory/tests/first-start.test.ts` covers the first
-start (no password in any process, trust rule closed, wrapper started as documented). A file
+start (no password in any process, no trust rule ever written, wrapper started as documented), and
+`factory/tests/verify-init.test.ts` covers `verify-init.ts` against a real database with a table of deliberate
+breakages. A file
 shares one started server across its tests where they do not change it; `streams.test.ts` needs no docker and uses an
 injected clock, so nothing waits in real time. `npm --prefix factory run typecheck` checks the types. From the root,
 `bun test tests/factory-isolation.test.ts` checks that the factory package does not reach into the product code.
