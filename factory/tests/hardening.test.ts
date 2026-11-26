@@ -93,9 +93,13 @@ describe("hardening", () => {
 		assert.equal(/PGPASSWORD|PASSWORD/i.test(health), false);
 	});
 
-	describe("network reach", () => {
-		const image = async (): Promise<string> =>
-			(await runChecked("docker", ["inspect", "--format", "{{.Config.Image}}", stack.container])).trim();
+	// The three checks share nothing but read access to the started stack (each client container and network is its own), so
+	// they run side by side; each client container takes seconds to start, which is what the time here is.
+	describe("network reach", { concurrency: 3 }, () => {
+		// The image of the server container never changes during the file: asked once, not before every client.
+		let imageName: Promise<string> | undefined;
+		const image = (): Promise<string> =>
+			(imageName ??= runChecked("docker", ["inspect", "--format", "{{.Config.Image}}", stack.container]).then((text) => text.trim()));
 
 		// Runs a short-lived client container on `network`; it reads the password from the read-only secrets mount into a
 		// passfile (never an environment variable). It carries the stack's run label, so the checked removal of that label
@@ -126,17 +130,19 @@ describe("hardening", () => {
 
 		it("a container on the project's own network connects, a superuser from it is refused", async () => {
 			const own = `${stack.project}_default`;
-			const ok = await client(own, "postgres", "af_api");
+			const [ok, root] = await Promise.all([client(own, "postgres", "af_api"), client(own, "postgres", "af_bootstrap")]);
 			assert.equal(ok.code, 0, ok.text);
 			assert.match(ok.text, /42/);
-			const root = await client(own, "postgres", "af_bootstrap");
 			assert.notEqual(root.code, 0);
 		});
 
 		it("a container on another docker network cannot reach the server", async () => {
 			const other = `af-test-net-${randomBytes(4).toString("hex")}`;
-			await runChecked("docker", ["network", "create", "--label", `af.run=${stack.runId}`, other]);
-			const ip = (await runChecked("docker", ["inspect", "--format", `{{(index .NetworkSettings.Networks "${stack.project}_default").IPAddress}}`, stack.container])).trim();
+			const [, ipText] = await Promise.all([
+				runChecked("docker", ["network", "create", "--label", `af.run=${stack.runId}`, other]),
+				runChecked("docker", ["inspect", "--format", `{{(index .NetworkSettings.Networks "${stack.project}_default").IPAddress}}`, stack.container]),
+			]);
+			const ip = ipText.trim();
 			assert.match(ip, /^\d+\.\d+\.\d+\.\d+$/);
 			const refused = await client(other, ip, "af_api");
 			assert.notEqual(refused.code, 0, refused.text);

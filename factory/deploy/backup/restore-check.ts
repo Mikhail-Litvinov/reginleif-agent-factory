@@ -183,17 +183,22 @@ export const restoreDump = async (container: string, dumpPath: string, expected:
 // The database-level rights that a dump does not carry (it holds neither CREATE DATABASE nor the database's own ACL),
 // exactly as init gives them (postgres/init/10-roles.sh); the schema and default-privilege lines are repeated because
 // they are idempotent and keep the result the same whatever the dump held.
+//
+// The two statement groups touch different databases (the connect right lives in `postgres`, the schema rights in the
+// application database) and do not depend on each other, so they run side by side.
 export const applyDatabaseGrants = async (container: string): Promise<void> => {
-	await psql(container, "af_bootstrap", [
-		`REVOKE ALL ON DATABASE ${DATABASE} FROM PUBLIC;`,
-		`GRANT CONNECT ON DATABASE ${DATABASE} TO af_api, af_control, af_backup, af_reader;`,
-	].join("\n"), { database: "postgres" });
-	await psql(container, "af_bootstrap", [
-		"REVOKE CREATE ON SCHEMA public FROM PUBLIC;",
-		"GRANT USAGE ON SCHEMA public TO af_api, af_control, af_backup, af_reader;",
-		"ALTER DEFAULT PRIVILEGES FOR ROLE af_migrator IN SCHEMA public GRANT SELECT ON TABLES TO af_backup;",
-		"ALTER DEFAULT PRIVILEGES FOR ROLE af_migrator IN SCHEMA public GRANT SELECT ON SEQUENCES TO af_backup;",
-	].join("\n"));
+	await Promise.all([
+		psql(container, "af_bootstrap", [
+			`REVOKE ALL ON DATABASE ${DATABASE} FROM PUBLIC;`,
+			`GRANT CONNECT ON DATABASE ${DATABASE} TO af_api, af_control, af_backup, af_reader;`,
+		].join("\n"), { database: "postgres" }),
+		psql(container, "af_bootstrap", [
+			"REVOKE CREATE ON SCHEMA public FROM PUBLIC;",
+			"GRANT USAGE ON SCHEMA public TO af_api, af_control, af_backup, af_reader;",
+			"ALTER DEFAULT PRIVILEGES FOR ROLE af_migrator IN SCHEMA public GRANT SELECT ON TABLES TO af_backup;",
+			"ALTER DEFAULT PRIVILEGES FOR ROLE af_migrator IN SCHEMA public GRANT SELECT ON SEQUENCES TO af_backup;",
+		].join("\n")),
+	]);
 };
 
 const keyOf = (fk: ForeignKey): string => `${fk.table}|${fk.name}|${fk.definition}`;
@@ -220,12 +225,18 @@ export const compareCatalog = (manifest: Manifest, counts: Record<string, number
 export const compareRestored = async (container: string, manifest: Manifest): Promise<string[]> => {
 	const problems: string[] = [];
 	const major = (versionNum: number): number => Math.floor(versionNum / 10_000);
-	const restoredNum = Number(await psql(container, "af_bootstrap", "SELECT current_setting('server_version_num');"));
+	// Three independent reads of the restored database: asked side by side, not one after another.
+	const [versionText, countsText, keysText] = await Promise.all([
+		psql(container, "af_bootstrap", "SELECT current_setting('server_version_num');"),
+		psql(container, "af_bootstrap", ROW_COUNTS_SQL),
+		psql(container, "af_bootstrap", FOREIGN_KEYS_SQL),
+	]);
+	const restoredNum = Number(versionText);
 	if (major(restoredNum) !== major(manifest.serverVersionNum)) {
 		problems.push(`server major version differs: backup ${manifest.serverVersion}, scratch ${restoredNum}`);
 	}
-	const counts = JSON.parse(await psql(container, "af_bootstrap", ROW_COUNTS_SQL)) as Record<string, number>;
-	const keys = JSON.parse(await psql(container, "af_bootstrap", FOREIGN_KEYS_SQL)) as ForeignKey[];
+	const counts = JSON.parse(countsText) as Record<string, number>;
+	const keys = JSON.parse(keysText) as ForeignKey[];
 	problems.push(...compareCatalog(manifest, counts, keys));
 	return problems;
 };

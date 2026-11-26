@@ -10,7 +10,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createSecrets } from "../deploy/setup-secrets.ts";
-import { freePort, newRunId, ownedResources, removeOwned, run, stackArgs, stackEnv, startStack, type RunResult } from "../deploy/lib.ts";
+import { findContainer, freePort, newRunId, ownedResources, removeOwned, run, stackArgs, stackEnv, startStack, waitHealthy, type RunResult } from "../deploy/lib.ts";
 
 // A stack of undo actions, run last-registered first; one failing action does not stop the rest.
 export class Cleanups {
@@ -93,6 +93,33 @@ export const createTestStack = async (): Promise<TestStack> => {
 		await cleanups.runAll().catch(() => {});
 		throw error;
 	}
+};
+
+// The stack that global-setup.ts started for the whole run, as it is passed to the test files.
+export const SHARED_STACK_ENV = "AF_SHARED_STACK";
+export interface SharedStackInfo {
+	readonly project: string;
+	readonly runId: string;
+	readonly secretsDir: string;
+	readonly port: number;
+}
+
+// The run-wide stack, for files that only read it or write data into their own tables (never restart, kill, recreate or
+// reconfigure it, and never run DDL a concurrent pg_dump could trip over). Waits until it is healthy; dispose() does
+// nothing, global-setup.ts's teardown removes it. Without global setup (a single file run by hand) it falls back to an
+// own stack that dispose() removes, so every file still runs alone.
+export const sharedStack = async (): Promise<TestStack> => {
+	const text = process.env[SHARED_STACK_ENV];
+	if (!text) return createTestStack();
+	const info = JSON.parse(text) as SharedStackInfo;
+	const container = await findContainer(info.project);
+	await waitHealthy(container);
+	return {
+		...info,
+		container,
+		dispose: async () => {},
+		secret: (name) => readFile(join(info.secretsDir, name), "utf8"),
+	};
 };
 
 export const compose = (stack: TestStack, ...args: string[]): Promise<RunResult> =>

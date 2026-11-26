@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
 import { PsqlSession, psql, run, tryPsql } from "../deploy/lib.ts";
-import { createTestStack, type TestStack } from "./helpers.ts";
+import { sharedStack, type TestStack } from "./helpers.ts";
 
 const APP_ROLES = ["af_migrator", "af_api", "af_control", "af_backup", "af_reader"] as const;
 
@@ -11,7 +11,8 @@ describe("database accounts", () => {
 	let c: string;
 
 	before(async () => {
-		stack = await createTestStack();
+		// The run-wide stack: this file only reads it and writes its own tables (granted, secret) and never changes it.
+		stack = await sharedStack();
 		c = stack.container;
 		// A table made the way phase 2 migrations will: by af_migrator, in public.
 		await psql(c, "af_migrator", "CREATE TABLE granted (id int PRIMARY KEY); CREATE TABLE secret (id int PRIMARY KEY);\n" +

@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { composeFilePath, run } from "../deploy/lib.ts";
 import { SECRET_NAMES, SID_ADMINISTRATORS, SID_SYSTEM, aclSids, createSecrets, verifySecretsAccess } from "../deploy/setup-secrets.ts";
-import { createTestStack, newProject, type TestStack } from "./helpers.ts";
+import { newProject, sharedStack, type TestStack } from "./helpers.ts";
 
 const SETUP_CLI = new URL("../deploy/setup-secrets.ts", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
 
@@ -127,7 +127,8 @@ describe("secrets", () => {
 	describe("in a running stack", () => {
 		let stack: TestStack;
 		before(async () => {
-			stack = await createTestStack();
+			// The run-wide stack: these checks only inspect it.
+			stack = await sharedStack();
 		});
 		after(async () => {
 			await stack?.dispose();

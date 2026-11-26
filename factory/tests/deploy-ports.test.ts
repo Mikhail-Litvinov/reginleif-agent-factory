@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { composeFilePath, run, runChecked } from "../deploy/lib.ts";
-import { createTestStack, type TestStack } from "./helpers.ts";
+import { sharedStack } from "./helpers.ts";
 
 interface PortSpec {
 	host_ip?: string;
@@ -31,14 +31,11 @@ const configOf = async (file: string): Promise<ComposeConfig> =>
 	JSON.parse(await runChecked("docker", ["compose", "-f", file, "config", "--format", "json"], { env: { AF_SECRETS_DIR: tmpdir() } })) as ComposeConfig;
 
 describe("published ports", () => {
-	let stack: TestStack;
 	let work: string;
 	before(async () => {
 		work = await mkdtemp(join(tmpdir(), "af-test-ports-"));
-		stack = await createTestStack();
 	});
 	after(async () => {
-		await stack?.dispose();
 		await rm(work, { recursive: true, force: true });
 	});
 
@@ -66,9 +63,15 @@ describe("published ports", () => {
 	});
 
 	it("the running server listens on 127.0.0.1 only, on the port that was asked for", async () => {
-		const result = await run("docker", ["port", stack.container]);
-		const lines = result.stdout.split(/\r?\n/).filter(Boolean);
-		assert.ok(lines.length > 0, result.stderr);
-		for (const line of lines) assert.match(line, new RegExp(`-> 127\\.0\\.0\\.1:${stack.port}$`), line);
+		// The run-wide stack, taken only here: the other tests of this file need no server and do not wait for it.
+		const stack = await sharedStack();
+		try {
+			const result = await run("docker", ["port", stack.container]);
+			const lines = result.stdout.split(/\r?\n/).filter(Boolean);
+			assert.ok(lines.length > 0, result.stderr);
+			for (const line of lines) assert.match(line, new RegExp(`-> 127\\.0\\.0\\.1:${stack.port}$`), line);
+		} finally {
+			await stack.dispose();
+		}
 	});
 });

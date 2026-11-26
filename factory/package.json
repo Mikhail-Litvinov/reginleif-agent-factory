@@ -8,7 +8,7 @@
 		"node": ">=24"
 	},
 	"scripts": {
-		"test": "node --test --test-concurrency=3 \"tests/**/*.test.ts\"",
+		"test": "node --test --test-concurrency=3 --test-global-setup=./tests/global-setup.ts \"tests/**/*.test.ts\"",
 		"typecheck": "tsc --noEmit",
 		"setup-secrets": "node deploy/setup-secrets.ts",
 		"backup": "node deploy/backup/backup.ts",
