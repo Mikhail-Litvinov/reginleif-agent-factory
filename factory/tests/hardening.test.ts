@@ -26,8 +26,12 @@ describe("hardening", () => {
 		stack = await createTestStack();
 	});
 	after(async () => {
-		await stack?.dispose();
-		await cleanups.runAll();
+		try {
+			await stack?.dispose();
+		} finally {
+			// independent of the stack's removal: a failure there must not leave the scratch directory
+			await cleanups.runAll();
+		}
 	});
 
 	const passwords = async (): Promise<Array<[string, string]>> =>

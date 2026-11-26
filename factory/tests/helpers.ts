@@ -5,23 +5,51 @@
 // Cleanup is registered BEFORE the resource it undoes is created (Cleanups.add, then create), so a failure at any step,
 // even halfway through creating a resource, still removes everything that may exist. Removal is idempotent: removing a
 // project that was never created is a no-op, so registering early is safe.
+//
+// Two more guards close the paths on which a plain after hook is not enough:
+//  - Every Cleanups that has work is also disposed by a root-level after hook of the test file (disposeAllLive), so a
+//    stack whose creator was still running when its own after hook ran (a timed-out before hook, which does not stop its
+//    body) is removed once the creator has finished: runAll waits for the creators registered with track().
+//  - A process that ends without running any hook (killed, crashed, process.exit) leaves its stack, which carries the
+//    owner label set below; the next run of this worktree removes it (tests/dead-owners.ts, called from global-setup.ts).
 import { randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { after } from "node:test";
 import type { OwnedDir } from "../deploy/owned.ts";
 import { createSecrets } from "../deploy/setup-secrets.ts";
+import { currentOwner } from "./dead-owners.ts";
 import { disposeScratch, makeScratch } from "./scratch.ts";
 import { findContainer, freePort, newRunId, ownedResources, removeOwned, run, stackArgs, stackEnv, startStack, waitHealthy, type RunResult } from "../deploy/lib.ts";
 
+// Every stack this process creates is labelled with this owner (compose.run.yml, read from the environment by compose).
+process.env.AF_OWNER = currentOwner();
+
 // A stack of undo actions, run last-registered first; one failing action does not stop the rest.
 export class Cleanups {
+	private static readonly live = new Set<Cleanups>();
 	private readonly actions: Array<() => Promise<unknown>> = [];
+	private readonly inFlight = new Set<Promise<unknown>>();
 
 	add(action: () => Promise<unknown>): void {
 		this.actions.push(action);
+		Cleanups.live.add(this);
+	}
+
+	/** Registers work that creates what the cleanups undo; runAll waits for it, so nothing appears after the removal. */
+	track<T>(work: Promise<T>): Promise<T> {
+		Cleanups.live.add(this);
+		const settled = work.then(
+			() => undefined,
+			() => undefined,
+		);
+		this.inFlight.add(settled);
+		void settled.then(() => this.inFlight.delete(settled));
+		return work;
 	}
 
 	async runAll(): Promise<void> {
+		await Promise.all([...this.inFlight]);
 		const errors: unknown[] = [];
 		for (const action of this.actions.splice(0).reverse()) {
 			try {
@@ -30,9 +58,26 @@ export class Cleanups {
 				errors.push(error);
 			}
 		}
+		Cleanups.live.delete(this);
 		if (errors.length > 0) throw new AggregateError(errors, "cleanup failed");
 	}
+
+	/** Runs every Cleanups of this process that still has work (all of them are tried; failures are reported together). */
+	static async disposeAllLive(): Promise<void> {
+		const errors: unknown[] = [];
+		for (const cleanups of [...Cleanups.live]) {
+			try {
+				await cleanups.runAll();
+			} catch (error) {
+				errors.push(error);
+			}
+		}
+		if (errors.length > 0) throw new AggregateError(errors, "cleanup of leftover stacks failed");
+	}
 }
+
+// Under the test runner only (not in a script that merely imports the helpers): the last word of every test file.
+if (process.env.NODE_TEST_CONTEXT) after(() => Cleanups.disposeAllLive());
 
 export interface TestStack {
 	readonly project: string;
@@ -73,7 +118,7 @@ export const leftovers = async (runId: string): Promise<string[]> => {
 // Creates the stack and waits until it is healthy. If anything fails on the way, what was created is removed.
 export const createTestStack = async (): Promise<TestStack> => {
 	const cleanups = new Cleanups();
-	try {
+	const build = async (): Promise<TestStack> => {
 		const secretsDir = await newSecretsDir(cleanups);
 		const port = await freePort();
 		const { project, runId } = trackedProject(cleanups);
@@ -88,8 +133,16 @@ export const createTestStack = async (): Promise<TestStack> => {
 		};
 		stack.container = await startStack({ project, secretsDir, port, runId });
 		return stack;
+	};
+	try {
+		return await cleanups.track(build());
 	} catch (error) {
-		await cleanups.runAll().catch(() => {});
+		// A failed removal is reported together with the failure that caused it, never swallowed (a swallowed one is a leak).
+		try {
+			await cleanups.runAll();
+		} catch (cleanupError) {
+			throw new AggregateError([error, cleanupError], "creating the test stack failed, and so did removing what it had created");
+		}
 		throw error;
 	}
 };

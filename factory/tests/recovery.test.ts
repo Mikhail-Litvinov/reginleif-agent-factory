@@ -75,8 +75,12 @@ describe("recovery into a new project", () => {
 		({ runId: newRun } = trackedProject(cleanups));
 	});
 	after(async () => {
-		await old?.dispose();
-		await cleanups.runAll();
+		try {
+			await old?.dispose();
+		} finally {
+			// independent of the old stack's removal: a failure there must not skip the new project's removal
+			await cleanups.runAll();
+		}
 	});
 
 	it("the old stack behaves as the probes expect (so the comparison below is meaningful)", () => {

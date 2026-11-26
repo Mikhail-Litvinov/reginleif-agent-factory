@@ -8,6 +8,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { createServer } from "node:net";
+import { OwnedDir } from "./owned.ts";
 
 export const DATABASE = "agent_factory";
 export const COMPOSE_FILE = new URL("./compose.yml", import.meta.url);
@@ -257,11 +258,19 @@ export interface StackOptions {
 	readonly runId: string;
 }
 
-export const stackEnv = (options: StackOptions): Record<string, string> => ({
-	AF_SECRETS_DIR: options.secretsDir,
-	AF_PG_PORT: String(options.port),
-	AF_RUN_ID: options.runId,
-});
+export const stackEnv = (options: StackOptions): Record<string, string> => {
+	const env: Record<string, string> = {
+		AF_SECRETS_DIR: options.secretsDir,
+		AF_PG_PORT: String(options.port),
+		AF_RUN_ID: options.runId,
+	};
+	// Only the test harness sets AF_OWNER (the process that made the stack, see tests/dead-owners.ts). The identity of the
+	// secrets directory goes next to it, so that a later run can remove the directory of a stack whose owner was killed.
+	// Production commands (restore) have no AF_OWNER and keep their labels unchanged.
+	const label = process.env.AF_OWNER ? OwnedDir.tokenOf(options.secretsDir) : undefined;
+	if (label !== undefined) env.AF_SECRETS_LABEL = `${label}@${options.secretsDir}`;
+	return env;
+};
 
 // The compose command line of a stack that a run owns.
 export const stackArgs = (options: StackOptions, ...rest: string[]): string[] => ownedComposeArgs(options.project, options.runId, ...rest);

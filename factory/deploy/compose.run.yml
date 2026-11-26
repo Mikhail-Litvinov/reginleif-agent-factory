@@ -2,17 +2,27 @@
 # restore check, tests). Every container, volume and network of such a project carries the run id, so cleanup removes
 # exactly what that run created and nothing else. The real stack is started from compose.yml alone, so its configuration
 # (and its container) does not change.
+#
+# af.owner and af.secrets are set only by the test harness (empty otherwise): the owner is "<worktree>:<pid>" of the process
+# that made the stack, and af.secrets is "<identity of its secrets directory>@<path>". They let the next test run of the same
+# worktree remove a stack whose owner was killed (tests/dead-owners.ts).
 services:
   postgres:
     labels:
       af.run: "${AF_RUN_ID:?set AF_RUN_ID}"
+      af.owner: "${AF_OWNER:-}"
+      af.secrets: "${AF_SECRETS_LABEL:-}"
 
 volumes:
   pgdata:
     labels:
       af.run: "${AF_RUN_ID:?set AF_RUN_ID}"
+      af.owner: "${AF_OWNER:-}"
+      af.secrets: "${AF_SECRETS_LABEL:-}"
 
 networks:
   default:
     labels:
       af.run: "${AF_RUN_ID:?set AF_RUN_ID}"
+      af.owner: "${AF_OWNER:-}"
+      af.secrets: "${AF_SECRETS_LABEL:-}"

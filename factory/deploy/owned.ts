@@ -165,12 +165,42 @@ export class OwnedDir {
 		this.id = id;
 	}
 
+	// The tokens of the directories this process made, by path, so that code which only holds the path (a compose
+	// environment) can put the identity next to it where a later run can find it (see `token`, `reclaim`).
+	private static readonly madeHere = new Map<string, string>();
+
 	/** Makes a private directory `<parent>/<prefix><random>` (exclusive by construction) and records its identity. */
 	static async make(parent: string, prefix: string): Promise<OwnedDir> {
 		const path = await mkdtemp(join(parent, prefix));
 		const id = await identityAt(path);
 		if (id === undefined) throw new Error(`${path} vanished right after it was created`);
-		return new OwnedDir(path, requireKnown(path, id));
+		const made = new OwnedDir(path, requireKnown(path, id));
+		OwnedDir.madeHere.set(path, made.token);
+		return made;
+	}
+
+	/** The identity of this directory as text (device:index:creation time), to be stored where another process can read it. */
+	get token(): string {
+		return `${this.id.dev}:${this.id.ino}:${this.id.birthtimeNs}`;
+	}
+
+	/** The token of a directory this process made with `make`, or undefined for any other path. */
+	static tokenOf(path: string): string | undefined {
+		return OwnedDir.madeHere.get(path);
+	}
+
+	/**
+	 * The directory that `path` names, when it still is the one whose `token` was recorded (by the process that made it,
+	 * which may be dead by now); undefined when the path is gone or now names anything else. This hands an earlier run's
+	 * directory to a later run for removal, by the same identity rule as the run that made it: a path alone never does.
+	 */
+	static async reclaim(path: string, token: string): Promise<OwnedDir | undefined> {
+		const match = /^(\d+):(\d+):(-?\d+)$/.exec(token);
+		if (match === null) return undefined;
+		const recorded: FileId = { dev: BigInt(match[1] as string), ino: BigInt(match[2] as string), birthtimeNs: BigInt(match[3] as string) };
+		const now = await identityAt(path);
+		if (now === undefined || !sameId(now, recorded)) return undefined;
+		return new OwnedDir(path, requireKnown(path, now));
 	}
 
 	/** Makes the subdirectory `name` (exclusively: an existing one is refused) and records its identity. */
