@@ -45,6 +45,8 @@ export interface BackupOptions {
 	readonly healthTimeoutMs?: number;
 	// Test hook: the base name of the run's files (default: a fresh unique name), to force a collision on purpose.
 	readonly nameFor?: () => string;
+	// Test hook: runs after the run removed its partial file, to let a test play another run that creates that path.
+	readonly hooks?: { readonly afterPartialRemoved?: () => Promise<void> };
 }
 
 export interface BackupResult {
@@ -129,9 +131,11 @@ export const backup = async (options: BackupOptions): Promise<BackupResult> => {
 	const sumPath = join(target, `${name}.dump.sha256`);
 	const manifestPath = join(target, `${name}.manifest.json`);
 	const manifestTemp = `${manifestPath}.partial`;
-	// Files this run created (each is recorded right after its exclusive creation succeeded): a failed run removes
-	// exactly these and never a file that belongs to someone else.
-	const mine: string[] = [];
+	// Files this run created and still owns (added right after its exclusive creation succeeded, dropped the moment
+	// the run itself removes the path): a failed run removes exactly these. A path this run already removed is
+	// free for anyone to create again, so it must not stay here. The names carry the run's random suffix, so
+	// another run only meets a path of this run when a test forces the same name (nameFor).
+	const mine = new Set<string>();
 	let finished = false;
 
 	let session: PsqlSession | undefined;
@@ -145,12 +149,14 @@ export const backup = async (options: BackupOptions): Promise<BackupResult> => {
 		const foreignKeys = JSON.parse(await session.query(FOREIGN_KEYS_SQL)) as ForeignKey[];
 
 		const dumped = await captureDump(dumpProcess(container, snapshot), partial);
-		mine.push(partial);
+		mine.add(partial);
 		await link(partial, dumpPath);
-		mine.push(dumpPath);
+		mine.add(dumpPath);
 		await rm(partial);
+		mine.delete(partial);
+		await options.hooks?.afterPartialRemoved?.();
 		await writeFile(sumPath, `${dumped.sha256}  ${name}.dump\n`, { flag: "wx" });
-		mine.push(sumPath);
+		mine.add(sumPath);
 		const manifest: Manifest = {
 			format: MANIFEST_FORMAT,
 			createdAt: new Date().toISOString(),
@@ -163,11 +169,12 @@ export const backup = async (options: BackupOptions): Promise<BackupResult> => {
 			foreignKeys,
 		};
 		await writeFile(manifestTemp, `${JSON.stringify(manifest, null, 2)}\n`, { flag: "wx" });
-		mine.push(manifestTemp);
+		mine.add(manifestTemp);
 		// link, not rename: a rename silently replaces a manifest that already has this name; link fails with EEXIST.
 		await link(manifestTemp, manifestPath);
-		mine.push(manifestPath);
+		mine.add(manifestPath);
 		await rm(manifestTemp);
+		mine.delete(manifestTemp);
 		finished = true;
 		return { manifestPath, dumpPath, manifest };
 	} finally {

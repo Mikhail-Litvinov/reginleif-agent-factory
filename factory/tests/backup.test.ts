@@ -117,6 +117,30 @@ describe("backup and restore check", () => {
 		}
 	});
 
+	it("a failed run never removes a path it already removed itself and another run created since", async () => {
+		const name = "af-20260101T000000Z-0badf00d";
+		const target = join(work, "stale-owner");
+		const partial = join(target, `${name}.dump.partial`);
+		const sums = join(target, `${name}.dump.sha256`);
+		await assert.rejects(
+			backup({
+				project: stack.project,
+				target,
+				nameFor: () => name,
+				hooks: {
+					afterPartialRemoved: async () => {
+						await writeFile(partial, "the other run's partial"); // another run with the same name
+						await writeFile(sums, "forces this run to fail"); // this run fails at its checksum file
+					},
+				},
+			}),
+			/EEXIST/,
+		);
+		assert.equal(await readFile(partial, "utf8"), "the other run's partial");
+		assert.equal(await readFile(sums, "utf8"), "forces this run to fail");
+		assert.deepEqual((await readdir(target)).sort(), [`${name}.dump.partial`, `${name}.dump.sha256`]);
+	});
+
 	it("never puts a password into the files or the manifest", async () => {
 		for (const name of ["af_bootstrap", "af_migrator", "af_api", "af_control", "af_backup", "af_reader"]) {
 			const password = (await stack.secret(name)).trim();
