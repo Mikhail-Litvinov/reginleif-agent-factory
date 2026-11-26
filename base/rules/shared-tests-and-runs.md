@@ -7,7 +7,8 @@
 - No tuning to one case: every number in code and tests notes its source and conditions; a limit that follows from a
   setting is derived from it in code.
 - Tests run as fast as possible: no real sleeps or waits on wall-clock timeouts (inject the clock or timer), seed in
-  batches, minimal per-file and per-run overhead. A slow suite is a defect, fixed before review.
+  batches, minimal per-file and per-run overhead. A slow suite is a defect: fixed before review when it blocks running
+  the mandatory checks, otherwise a backlog task that does not hold up the stage (Finishing a stage).
 - Targeted tests while working. The full suite once before finishing only when the change touches code with callers
   beyond the changed feature (shared modules, protocol, config, test helpers); a change inside one feature runs that
   feature's tests and the type check. Save the full output to a file before filtering; on a failure read it before

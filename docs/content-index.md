@@ -65,6 +65,7 @@
 | Rule | `base/rules/shared-specs-are-living-documents.md` | base | — | shared | all | always | — | — | — | — | — | — |
 | Rule | `base/rules/shared-temporary-files.md` | base | — | shared | all | always | — | — | — | — | — | — |
 | Rule | `base/rules/shared-tests-and-runs.md` | base | — | shared | all | always | — | — | — | — | — | — |
+| Rule | `base/rules/shared-finishing-a-stage.md` | base | — | shared | all | always | — | — | — | — | — | — |
 | Rule | `features/analysis-gate/rules/claude-analysis-gate.md` | analysis-gate | — | claude | all | `analysis-gate` on | — | — | — | — | — | — |
 | Rule | `features/codex/rules/claude-delegation-03-codex-01-heading.md` | codex | 03.01 | claude | all | `codex` on | — | — | — | — | — | — |
 | Rule | `features/codex/rules/claude-delegation-03-codex-02-orchestrator-codex-volunteers-on.md` | codex | 03.02 | claude | all | `codex` on; `volunteers` on | — | — | — | — | — | — |
@@ -106,5 +107,6 @@
 | Hook | `PreToolUse` | subagent-tasks-guard | — | all | `subagent-tasks-guard` on | `SubagentHandback` | `{{PYTHON}}` | `{{CLONE}}/features/subagent-tasks-guard/hooks/subagent_tasks_guard.py` | 30 | `Checking background tasks of the subagent` | — |
 | Hook | `SubagentStop` | subagent-tasks-guard | — | all | `subagent-tasks-guard` on | — | `{{PYTHON}}` | `{{CLONE}}/features/subagent-tasks-guard/hooks/subagent_tasks_guard.py` | 30 | `Checking background tasks of the subagent` | — |
 | Hook | `Stop` | reflection | — | all | `reflection` on | — | `{{PYTHON}}` | `-X utf8 {{CLONE}}/features/reflection/hooks/reflect.py` | 330 | `Reflecting on the turn` | `true` |
+| Hook | `Stop` | chief-assistant | — | all | `chief-assistant` on | — | `{{PYTHON}}` | `-X utf8 {{CLONE}}/features/chief-assistant/hooks/assist.py` | 330 | `Checking for idle stops` | `true` |
 
 Hook commands run from the clone. In a hook `command`, `{{PYTHON}}`, `{{BASH}}` and `rtk` become absolute paths at apply time (Git Bash on Windows). Elsewhere `{{PYTHON}}` is `python3` on Linux and `python` on Windows. Rule and hook paths use `{{CLONE}}` when rig needs an absolute path.
