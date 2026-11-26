@@ -6,6 +6,7 @@ import { conversationRepo, deviceRepo, deviceSessionRepo, messageRepo, notificat
 import { ownerRepo } from "./owners.ts";
 import { policyRepo } from "./policies.ts";
 import { projectRepo } from "./projects.ts";
+import { rightAnswerRepo, rightGrantRepo, rightRequestRepo, rightsSuspensionRepo, roleAssignmentRepo, roleRepo } from "./rights.ts";
 import { routingRuleRepo } from "./routing-rules.ts";
 import { settingsRepo } from "./settings.ts";
 import { taskRepo } from "./tasks.ts";
@@ -35,6 +36,12 @@ type RepoParts = {
 	messages: ReturnType<typeof messageRepo>;
 	polls: ReturnType<typeof pollRepo>;
 	pollAnswerRequests: ReturnType<typeof pollAnswerRequestRepo>;
+	roles: ReturnType<typeof roleRepo>;
+	roleAssignments: ReturnType<typeof roleAssignmentRepo>;
+	rightRequests: ReturnType<typeof rightRequestRepo>;
+	rightAnswers: ReturnType<typeof rightAnswerRepo>;
+	rightGrants: ReturnType<typeof rightGrantRepo>;
+	rightsSuspensions: ReturnType<typeof rightsSuspensionRepo>;
 };
 
 export type Repo = RepoParts & { transaction<T>(operation: (transactionRepo: RepoParts) => Promise<T>): Promise<T> };
@@ -62,6 +69,12 @@ export const createRepo = (db: PostgresJsDatabase<any>): Repo => ({
 	messages: messageRepo(db),
 	polls: pollRepo(db),
 	pollAnswerRequests: pollAnswerRequestRepo(db),
+	roles: roleRepo(db),
+	roleAssignments: roleAssignmentRepo(db),
+	rightRequests: rightRequestRepo(db),
+	rightAnswers: rightAnswerRepo(db),
+	rightGrants: rightGrantRepo(db),
+	rightsSuspensions: rightsSuspensionRepo(db),
 	transaction: <T>(operation: (transactionRepo: RepoParts) => Promise<T>): Promise<T> =>
 		db.transaction((tx) => operation(createRepo(tx))),
 });
