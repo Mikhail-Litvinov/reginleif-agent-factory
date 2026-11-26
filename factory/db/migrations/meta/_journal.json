@@ -43,6 +43,13 @@
       "when": 1795707336494,
       "tag": "0006_registry",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1795707336495,
+      "tag": "0007_rights",
+      "breakpoints": true
     }
   ]
 }
