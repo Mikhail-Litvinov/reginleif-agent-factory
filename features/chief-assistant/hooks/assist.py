@@ -26,7 +26,8 @@ line included, means the verdict is superseded: silent.
 
 The check, the wake counter and the emission are one step under a file lock. The counter is one small file per
 session (wakes-<session>.json: count and the transcript size at the last wake). At most MAX_WAKES wakes in a
-row; a message of the user (or a poll answer) newer than the last wake resets it.
+row; a message of the user newer than the last wake resets it. Only a record that names the user as its origin
+counts as the user's; a poll answer does not (nothing in its record says a human gave it).
 
 Every decision goes to ~/.claude/chief-assistant/log.jsonl with its verdict, cost, time and reason; an idle
 verdict also carries idle_point (the open item, normalized), so repeats at one point can be counted.
@@ -38,6 +39,7 @@ import contextlib
 import json
 import os
 import re
+import shlex
 import sys
 import threading
 import time
@@ -70,7 +72,8 @@ OWN_MARKER = "[chief-assistant]"
 # Loop guard: a session that ignores the wakes must not be woken for ever, so at most MAX_WAKES wakes in a row
 # without a message of the user in between. The last one asks the session to tell the user which item it stands
 # on and why it keeps stopping; after that the hook stays silent until the user writes. Only the user's own
-# messages (and answers to polls) reset the count; reflection's wakes and task notifications do not.
+# messages, positively identified by their origin, reset the count; poll answers, reflection's wakes, task
+# notifications and records without an origin do not.
 MAX_WAKES = 3
 PLAN_LIMIT = 12_000  # Characters of one plan sent to the model; a plan is a short working document.
 PLAN_BUDGET = 4 * PLAN_LIMIT  # All plans together: four full-size plans, so one active plan plus a few it read for reference.
@@ -92,6 +95,10 @@ PURE_READERS = frozenset({"cat", "type", "get-content", "gc", "head", "tail", "l
 GIT_READS = frozenset({"show", "diff", "log"})
 SED_IN_PLACE = re.compile(r"\s(?:-[A-Za-z]*i|--in-place)")
 SEGMENT_PREFIX = re.compile(r"(?:[A-Za-z_]\w*=\S*|sudo|time|command|exec|nohup|call|&)\s+", re.IGNORECASE)
+# Commands that change the directory later segments of the same shell line run in (bash and PowerShell spellings).
+DIRECTORY_CHANGERS = frozenset({"cd", "chdir", "pushd", "set-location", "sl", "push-location"})
+# A directory target holding one of these is not a literal path (home, a variable, a glob, an escape): unknown.
+NON_LITERAL_DIRECTORY = frozenset("~$%`*?")
 # Only these record types matter; every other line of a (possibly huge) transcript is skipped before parsing.
 RECORD = re.compile(r'"type"\s*:\s*"(?:user|assistant|attachment)"')
 LOCK_NAME = "state.lock"
@@ -118,6 +125,14 @@ def skipped(payload: dict) -> bool:
     return bool(os.environ.get(reflect.CHILD_ENV)) or entry.startswith("sdk") or os.environ.get("CLAUDE_CODE_SESSION_ATTENDED") == "0"
 
 
+def to_path(text: str) -> Path:
+    """A path spelling as a Path: either slash direction, MSYS `/e/...` read as `E:/...` on Windows."""
+    normal = text.replace("\\", "/")
+    if os.name == "nt":
+        normal = re.sub(r"^/([A-Za-z])/", r"\1:/", normal)
+    return Path(normal)
+
+
 def canonical(text: str, cwd: str, cache: dict) -> Path | None:
     """The existing plan file a path spelling names (absolute or relative to the project, either slash direction,
     MSYS `/e/...` on Windows), as its resolved full path; None when no such file exists. The resolved path is the
@@ -125,10 +140,7 @@ def canonical(text: str, cwd: str, cache: dict) -> Path | None:
     key = (text, cwd)
     if key in cache:
         return cache[key]
-    normal = text.replace("\\", "/")
-    if os.name == "nt":
-        normal = re.sub(r"^/([A-Za-z])/", r"\1:/", normal)
-    path = Path(normal)
+    path = to_path(text)
     if not path.is_absolute():
         path = Path(cwd) / path
     try:
@@ -175,26 +187,85 @@ def shell_segments(command: str) -> list[str]:
     return [s.strip() for s in segments if s.strip()]
 
 
-def is_pure_read(segment: str) -> bool:
-    """True when a simple command only reads: its first word is a recognised reader (`sed` only without -i, `git` only
-    show, diff or log). Anything else that names a plan (cp, mv, a script given the path, a redirect) is an edit."""
+def unprefixed(segment: str) -> str:
+    """A simple command without its leading environment assignments, `sudo`, `time`, `&`, ..."""
     rest = segment.strip()
     while True:
         prefix = SEGMENT_PREFIX.match(rest)
         if not prefix:
-            break
+            return rest
         rest = rest[prefix.end():]
-    words = rest.split()
+
+
+def words_of(rest: str) -> list[str]:
+    """The words of a simple command, quotes removed (a quoted word with spaces stays one); plain whitespace split when
+    the quotes do not balance. Backslashes are not escapes here: the text has already been made slash-only."""
+    try:
+        return shlex.split(rest, posix=True)
+    except ValueError:
+        return rest.split()
+
+
+def command_name(words: list[str]) -> str:
+    """The lowercased program name of a simple command: no folder, no `.exe`."""
     if not words:
-        return False
+        return ""
     first = words[0].strip("\"'").replace("\\", "/").rsplit("/", 1)[-1].lower()
-    if first.endswith(".exe"):
-        first = first[:-4]
+    return first[:-4] if first.endswith(".exe") else first
+
+
+def git_subcommand(words: list[str]) -> tuple[int, list[str]]:
+    """For a `git` command: the index of its subcommand and the `-C <dir>` directories before it, in order."""
+    index, directories = 1, []
+    while index + 1 < len(words) and words[index] == "-C":
+        directories.append(words[index + 1])
+        index += 2
+    return index, directories
+
+
+def is_pure_read(segment: str) -> bool:
+    """True when a simple command only reads: its first word is a recognised reader (`sed` only without -i, `git` only
+    show, diff or log, after any `-C <dir>`). Anything else that names a plan (cp, mv, a script given the path, a
+    redirect) is an edit."""
+    rest = unprefixed(segment)
+    words = words_of(rest)
+    first = command_name(words)
+    if not first:
+        return False
     if first == "sed":
         return not SED_IN_PLACE.search(" " + rest)
     if first == "git":
-        return len(words) > 1 and words[1] in GIT_READS
+        index, _ = git_subcommand(words)
+        return index < len(words) and words[index] in GIT_READS
     return first in PURE_READERS
+
+
+def moved(base: str | None, target: str) -> str | None:
+    """The directory `target` names from `base`, or None when it cannot be known: no base for a relative target, or a
+    target that is not a literal path (empty, `-`, `~`, `$HOME`, a glob, ...)."""
+    if not target or target == "-" or NON_LITERAL_DIRECTORY & set(target):
+        return None
+    path = to_path(target)
+    if path.is_absolute():
+        return os.path.normpath(str(path))
+    return os.path.normpath(str(Path(base) / path)) if base is not None else None
+
+
+def directory_of(segment: str, workdir: str | None) -> tuple[str | None, str | None]:
+    """(the directory this simple command runs in, the directory the next one runs in); None is unknown. `cd`,
+    `pushd`, `Set-Location`, `Push-Location` (and their short names) change it for what follows, flags such as
+    `-Path` skipped; `git -C <dir>` changes it for its own command only."""
+    words = words_of(unprefixed(segment))
+    first = command_name(words)
+    if first in DIRECTORY_CHANGERS:
+        targets = [w for w in words[1:] if w == "-" or not w.startswith("-")]
+        return workdir, moved(workdir, targets[0] if targets else "")
+    if first == "git":
+        own = workdir
+        for directory in git_subcommand(words)[1]:
+            own = moved(own, directory)
+        return own, workdir
+    return workdir, workdir
 
 
 def plan_mentions(name: str, args: object, cwd: str, cache: dict) -> list[tuple[Path, bool]]:
@@ -219,16 +290,26 @@ def plan_mentions(name: str, args: object, cwd: str, cache: dict) -> list[tuple[
             continue
         # a shell command is judged per simple command; any other string is one unit that only reads
         units = shell_segments(normal) if text is command else [normal]
+        workdir: str | None = cwd
         for unit in units:
+            unit_dir = cwd
+            if text is command:
+                # a relative plan path means the directory the command runs in at that point, not always the payload's
+                unit_dir, workdir = directory_of(unit, workdir)
             if PLAN_DIR not in unit:
                 continue
             quoted = [m.group(2).strip() for m in QUOTED_PLAN.finditer(unit)]
             bare = [m.group(0) for m in PLAN_PATH.finditer(unit)]
             writes = text is command and bool(REDIRECT_INTO_PLAN.search(unit) or not is_pure_read(unit))
+            # the tracked directory first, the payload's too: the tracking is a guess (a cd that failed, an unknown target)
+            places = [d for d in dict.fromkeys((unit_dir, cwd)) if d is not None]
+            named: set[Path] = set()
             for span in quoted + bare:
-                path = canonical(span, cwd, cache)
-                if path is not None:
-                    found.append((path, writes))
+                for place in places:
+                    path = canonical(span, place, cache)
+                    if path is not None and path not in named:
+                        named.add(path)
+                        found.append((path, writes))
     return found
 
 
@@ -246,17 +327,6 @@ def touch(plans: dict, path: Path) -> None:
     plans[path] = True
 
 
-HUMAN_ORIGINS = frozenset({"human", "channel"})  # record origin kinds of the user's own words (typed; from Telegram)
-
-
-def is_hook_wake(text: str) -> bool:
-    """Whether a user-role text, in a record that names no origin, is a bare wake of this hook or of reflection: it
-    starts with the marker. Never a marker found further in: a user message that merely quotes one is the user's own.
-    The wrapped shape Claude Code 2.1.330 records a real wake in (a task-notification, then a system-reminder holding
-    the hook's stderr) is no user text for `reflect.is_users` either, whatever the origin says."""
-    return text.lstrip().startswith((OWN_MARKER, reflect.WAKE_MARKER))
-
-
 def record_origin(record: dict) -> object:
     """The `origin` of a user record, or of a queued_command attachment (it sits in the attachment); None when absent."""
     origin = record.get("origin")
@@ -264,33 +334,25 @@ def record_origin(record: dict) -> object:
     return origin if origin is not None else attachment.get("origin") if isinstance(attachment, dict) else None
 
 
-def from_user(record: dict, raw: str, text: str) -> bool:
-    """Whether the user-role text of a record is the user's own words, judged by the record's origin: `human` and
-    `channel` (Telegram) are the user's, any other origin (task-notification, plugin, a subagent hand-back, ...) is
-    not, whatever the text says. A `channel` text is still checked for the hub's own messages. A record without an
-    origin (an older transcript) falls back to the text: not a bare hook wake, and a user text (the recorded wrapper is an event there)."""
+def from_user(record: dict, text: str) -> bool:
+    """Whether the user-role text of a record is positively the user's own words, judged by the record's origin only:
+    `human` (typed) is the user's whatever the text says, even text that quotes a marker; `channel` (Telegram) is the
+    user's unless it is one of the hub's own messages. Any other origin (task-notification, plugin, a subagent
+    hand-back, ...) and a record with no origin are not the user's: Claude Code writes the user's words with an
+    origin, and what carries none (reminders, compaction summaries, interrupt notes, harness prompts) is not them.
+    Fail closed: an unidentified record never resets the wake count and is never shown as the user's."""
     origin = record_origin(record)
-    if origin is None:
-        return not is_hook_wake(raw) and reflect.is_users(text)
     kind = origin.get("kind") if isinstance(origin, dict) else None
-    return kind == "human" or (kind in HUMAN_ORIGINS and reflect.is_users(text))
+    if kind == "human":
+        return True
+    return kind == "channel" and reflect.is_users(text)
 
 
-def human_lines(lines: list[str]) -> list[str]:
-    """The transcript lines without the records that are not the user's own words (see `from_user`): those whose origin
-    says so, and, when a record has no origin, those whose text is a hook wake. The model is shown the user's latest
-    messages from what is left."""
-    kept = []
-    for line in lines:
-        record = parsed(line)
-        origin = record_origin(record) if record else None
-        if origin is not None:
-            if not (isinstance(origin, dict) and origin.get("kind") in HUMAN_ORIGINS):
-                continue
-        elif any(kind == "user" and is_hook_wake(data) for kind, _, data in reflect.line_events([line])):
-            continue
-        kept.append(line)
-    return kept
+def classify(line: str, text: str) -> str:
+    """The event kind of a user-role text for `reflect.events_of`, from the record's origin (see `from_user`) instead of
+    reflection's text classification: "user" for the user's words, "event" for everything else."""
+    record = parsed(line)
+    return "user" if record is not None and from_user(record, text) else "event"
 
 
 def scan(transcript: Path, cwd: str, background_tasks: object = None, limit: int | None = None) -> dict:
@@ -298,7 +360,7 @@ def scan(transcript: Path, cwd: str, background_tasks: object = None, limit: int
     be hundreds of MB, so lines of other record types are skipped before parsing. Every record is judged block by
     block: a user record holding a tool result and the user's own text counts for both. Returns:
       plans       the existing plan files the session edited (latest first), then those it only referred to (latest first)
-      reset_at    the byte offset where the line of the user's latest message (or poll answer) starts; -1 when none
+      reset_at    the byte offset where the line of the user's latest message starts; -1 when none
       poll        whether a poll is pending
       background  (id, info) of the background tasks that still run: every running entry of the Stop payload's own
                   list when it is given, else the tasks the session launched by the transcript
@@ -333,13 +395,11 @@ def scan(transcript: Path, cwd: str, background_tasks: object = None, limit: int
                             touch(edited if writes else read, path)
                 elif kind == "tool_result":
                     ident = data.get("tool_use_id", "")
-                    if ident in polls:
-                        polls.discard(ident)
-                        if not data.get("is_error"):
-                            reset_at = start  # the user answered the poll
+                    # The result closes the poll but is no proof of a human answer (a hook can answer it too): no reset.
+                    polls.discard(ident)
                 elif kind == "user":
                     text = reflect.REMINDER.sub("", data).strip()
-                    if text and from_user(record, data, text):
+                    if text and from_user(record, text):
                         reset_at = start
                         polls.clear()
     ordered = list(reversed(edited)) + [p for p in reversed(read) if p not in edited]
@@ -462,9 +522,10 @@ def final_message(payload: dict, events: list[dict]) -> str:
     return payload.get("last_assistant_message") or next((e["text"] for e in reversed(events) if e["kind"] == "assistant"), "")
 
 
-def model_text(payload: dict, transcript: Path, found: dict, events: list[dict], wakes: int, humans: list[dict]) -> str:
-    """`humans` are the events of the lines that are not marked as someone else's (see `human_lines`)."""
-    users = [e for e in humans if e["kind"] in reflect.USER_KINDS]
+def model_text(payload: dict, transcript: Path, found: dict, events: list[dict], wakes: int) -> str:
+    """`events` come from `reflect.events_of` with `classify`: only records the origin names as the user's are `user`
+    events, so the user's latest messages and the current turn are built from the same, origin-based judgement."""
+    users = [e for e in events if e["kind"] == "user"]
     latest = "\n".join(reflect.line_of(e, reflect.CALL_LIMIT, reflect.RESULT_LIMIT, reflect.TEXT_LIMIT) for e in users[-reflect.USER_MESSAGES:])
     return "\n\n".join([
         f"RULES\n{reflect.rules(payload, transcript)}",
@@ -529,7 +590,7 @@ def counter_file(key: str) -> Path:
 
 
 def read_count(key: str, found: dict) -> int:
-    """The wakes in a row of this session: the saved count, unless the user wrote (or answered a poll) after the
+    """The wakes in a row of this session: the saved count, unless the user wrote after the
     transcript size it was saved at. A missing or broken file reads as zero."""
     try:
         state = json.loads(counter_file(key).read_text(encoding="utf-8"))
@@ -586,8 +647,9 @@ def assess(payload: dict, emit=None) -> str | None:
         settle("wake-limit", f"{wakes} wakes in a row without a message of the user")
         return None
     lines = reflect.tail_lines(transcript)
-    events = reflect.events_of(lines)
-    text = model_text(payload, transcript, found, events, wakes, reflect.events_of(human_lines(lines)))
+    # A poll answer is shown as a plain tool result (answers=False): nothing in its record says a human gave it.
+    events = reflect.events_of(lines, classify=classify, answers=False)
+    text = model_text(payload, transcript, found, events, wakes)
     dirs = list(dict.fromkeys(p.parent for p in found["plans"]))
     answer, cost, error = reflect.ask(MODEL, VERDICTS, text, cwd, dirs, started, prompt_file=PROMPT_FILE, schema_text=SCHEMA)
     seconds = round(time.monotonic() - started, 2)

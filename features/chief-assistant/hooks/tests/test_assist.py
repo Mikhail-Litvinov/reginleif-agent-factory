@@ -125,9 +125,9 @@ class Transcript:
         """The session stopped a task itself: a TaskStop call; the task never sends a terminal notification."""
         self.result(self.call("TaskStop", {"task_id": task_id}), f"Successfully stopped task: {task_id}")
 
-    def failed_stop(self, task_id, text="Error: No task found with ID"):
+    def failed_stop(self, task_id, text="<tool_use_error>Could not stop the task</tool_use_error>"):
         """A TaskStop call that failed: its tool_result is an error, so the task may still run."""
-        self.result(self.call("TaskStop", {"task_id": task_id}), f"{text}: {task_id}", error=True)
+        self.result(self.call("TaskStop", {"task_id": task_id}), text, error=True)
 
     def fast_launch(self):
         """A background launch whose command ended before the answer: the result names no task."""
@@ -202,7 +202,7 @@ class AssistCase(unittest.TestCase):
     def session(self, prefix="u"):
         """A session that read its plan, worked, and stopped; the caller adds to it before the final message."""
         log = Transcript(prefix=prefix)
-        log.user("Implement the plan")
+        log.human("Implement the plan")
         log.read_plan(self.plan)
         log.result(log.call("Edit", {"file_path": "src/a.py"}), "ok")
         return log
@@ -303,7 +303,7 @@ class LegitStopTests(AssistCase):
 
     def test_no_plan_touched_is_a_legit_stop(self):
         log = Transcript()
-        log.user("What is in the repository?")
+        log.human("What is in the repository?")
         log.result(log.call("Bash", {"command": "ls"}), "a b c")
         self.assertIsNone(self.assess(log))
         self.assertEqual(self.calls, [])
@@ -320,7 +320,7 @@ class LegitStopTests(AssistCase):
         spec.parent.mkdir(parents=True)
         spec.write_text("design", encoding="utf-8")
         log = Transcript()
-        log.user("Read the spec")
+        log.human("Read the spec")
         log.read_plan(spec)
         self.assertIsNone(self.assess(log))
         self.assertEqual(self.calls, [])
@@ -415,10 +415,22 @@ class BackgroundLivenessTests(AssistCase):
         self.assertEqual(self.logged()[-1]["decision"], "background")
 
     def test_a_stop_that_says_the_task_is_not_running_counts_as_stopped(self):
+        # The real wording Claude Code returns for a task that already finished.
         log = self.session()
         log.background("bz9k")
-        log.failed_stop("bz9k", "Error: Task is not running")
+        log.failed_stop("bz9k", "<tool_use_error>Task bz9k is not running (status: completed)</tool_use_error>")
         self.assertIsNotNone(self.assess(log))
+
+    def test_an_error_that_only_mentions_not_running_leaves_the_task_running(self):
+        for text in ("Error: Task is not running",
+                     "<tool_use_error>Task other is not running (status: completed)</tool_use_error>",
+                     "<tool_use_error>Could not stop it: the worker is not running a handler</tool_use_error>"):
+            with self.subTest(text=text):
+                log = self.session()
+                log.background("bz9k")
+                log.failed_stop("bz9k", text)
+                self.assertIsNone(self.assess(log))
+                self.assertEqual(self.logged()[-1]["decision"], "background")
 
     def test_a_stop_call_without_a_result_yet_leaves_the_task_running(self):
         log = self.session()
@@ -573,7 +585,7 @@ class PlanDetectionTests(AssistCase):
     def test_the_active_edited_plan_stays_in_the_model_input_after_later_plans_that_fill_the_budget(self):
         fillers = self.fillers(6)
         log = Transcript()
-        log.user("Implement the plan")
+        log.human("Implement the plan")
         log.read_plan(self.plan, "Edit")
         for path in fillers:
             log.read_plan(path)
@@ -810,11 +822,94 @@ class PlanDetectionTests(AssistCase):
         self.assertIn(str(big[0]), [row for row in text.splitlines() if row.startswith("PLANS NOT SHOWN")][0])
 
 
+class ShellDirectoryTests(AssistCase):
+    """A relative plan path in a shell command is resolved where the command stands when it reads it: after `cd`,
+    `Set-Location`, `pushd` in the same command, or inside `git -C`. The payload cwd is tried as well."""
+
+    def plans_of(self, command, tool="Bash"):
+        log = Transcript()
+        log.result(log.call(tool, {"command": command}), "ok")
+        transcript = self.dir / "plans.jsonl"
+        log.write(transcript)
+        return ASSIST.scan(transcript, str(self.project))["plans"]
+
+    def plan_in(self, folder, name="sub.md"):
+        path = self.project / folder / "docs" / "superpowers" / "plans" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("# Sub\n- [ ] item\n", encoding="utf-8")
+        return path
+
+    REL = "docs/superpowers/plans/sub.md"
+
+    def test_a_directory_change_in_the_same_command_decides_where_the_relative_plan_is(self):
+        sub = self.plan_in("sub")
+        commands = (("Bash", f"cd sub && cat {self.REL}"), ("Bash", f"cd sub; cat {self.REL}"), ("Bash", f"cd 'sub' && cat {self.REL}"),
+                    ("Bash", f"pushd sub && cat {self.REL}"), ("Bash", f"cd ./sub && ls && cat {self.REL}"),
+                    ("Bash", f"cd -P sub && cat {self.REL}"), ("Bash", f"cd sub\ncat {self.REL}"),
+                    ("PowerShell", f"Set-Location sub; Get-Content {self.REL}"), ("PowerShell", f"Set-Location -Path sub; Get-Content {self.REL}"),
+                    ("PowerShell", f"sl sub; gc {self.REL}"), ("PowerShell", f"Push-Location sub; Get-Content '{self.REL}'"),
+                    ("Bash", f"git -C sub diff -- {self.REL}"), ("Bash", f"git -C 'sub' show {self.REL}"))
+        for tool, command in commands:
+            with self.subTest(command=command):
+                self.assertEqual(self.plans_of(command, tool), [sub])
+
+    def test_the_directory_change_follows_backslashes_parent_steps_and_quoted_spaces(self):
+        sub = self.plan_in("my dir")
+        deeper = self.plan_in("a/b")
+        for command, expected in ((f'cd "my dir" && cat {self.REL}', sub), (f"cd 'my dir'; cat {self.REL}", sub),
+                                  (f"cd a\\b && cat {self.REL}", deeper), (f"cd a/b/.. && cd b && cat {self.REL}", deeper),
+                                  (f"cd a && cd b && cat {self.REL}", deeper)):
+            with self.subTest(command=command):
+                self.assertEqual(self.plans_of(command), [expected])
+
+    def test_an_absolute_directory_change_is_followed(self):
+        sub = self.plan_in("sub")
+        self.assertEqual(self.plans_of(f"cd {(self.project / 'sub').as_posix()} && cat {self.REL}"), [sub])
+
+    def test_the_payload_cwd_is_tried_too(self):
+        self.plan_in("sub")
+        # sub holds no feature.md: the plan only the project has is found from the payload cwd
+        self.assertEqual(self.plans_of("cd sub && cat docs/superpowers/plans/feature.md"), [self.plan])
+        # a directory that cannot be known (home, the previous one, a variable) leaves the payload cwd
+        for target in ("~", "-", "$HOME", "$OLDPWD", ""):
+            with self.subTest(target=target):
+                self.assertEqual(self.plans_of(f"cd {target} && cat docs/superpowers/plans/feature.md"), [self.plan])
+
+    def test_a_plan_found_in_both_places_is_two_plans_and_one_found_twice_is_one(self):
+        twin = self.plan_in("sub", "feature.md")
+        found = self.plans_of("cd sub && cat docs/superpowers/plans/feature.md")
+        self.assertCountEqual(found, [twin, self.plan])
+        self.assertEqual(self.plans_of("cd . && cat docs/superpowers/plans/feature.md"), [self.plan])
+        self.assertEqual(self.plans_of(f"cd sub && cat {self.plan.as_posix()}"), [self.plan])
+
+    def test_git_dash_c_covers_only_its_own_command(self):
+        self.plan_in("sub")
+        self.assertEqual(self.plans_of(f"git -C sub status && cat {self.REL}"), [])
+
+    def test_a_cd_inside_quotes_is_no_directory_change(self):
+        self.plan_in("sub")
+        self.assertEqual(self.plans_of(f'echo "cd sub && x" && cat {self.REL}'), [])
+
+    def test_an_edit_after_a_directory_change_is_still_an_edit(self):
+        sub = self.plan_in("sub")
+        other = self.plan_in("sub", "other.md")
+        log = Transcript()
+        log.result(log.call("Bash", {"command": "cd sub && sed -i 's/a/b/' docs/superpowers/plans/sub.md"}), "ok")
+        log.read_plan(other)
+        transcript = self.dir / "plans.jsonl"
+        log.write(transcript)
+        self.assertEqual(ASSIST.scan(transcript, str(self.project))["plans"], [sub, other])
+
+    def test_git_dash_c_before_a_reader_is_still_a_pure_read(self):
+        self.assertTrue(ASSIST.is_pure_read("git -C sub diff -- docs/superpowers/plans/sub.md"))
+        self.assertFalse(ASSIST.is_pure_read("git -C sub checkout -- docs/superpowers/plans/sub.md"))
+
+
 class ModelInputTests(AssistCase):
     def test_input_holds_rules_plan_latest_user_messages_turn_and_final_message(self):
         log = Transcript()
         for i in range(5):
-            log.user(f"message number {i}")
+            log.human(f"message number {i}")
             log.assistant(f"answer {i}")
         log.read_plan(self.plan)
         log.result(log.call("Edit", {"file_path": "src/unique_file.py"}), "ok")
@@ -847,7 +942,7 @@ class ModelInputTests(AssistCase):
 
     def test_a_russian_user_message_reaches_the_model_intact(self):
         log = Transcript()
-        log.user(RUSSIAN_MESSAGE)
+        log.human(RUSSIAN_MESSAGE)
         log.read_plan(self.plan)
         self.assess(log)
         self.assertIn(RUSSIAN_MESSAGE, self.calls[0]["text"])
@@ -862,7 +957,7 @@ class ModelInputTests(AssistCase):
 
     def test_the_own_wake_is_not_shown_to_the_model_as_a_message_of_the_user(self):
         log = Transcript()
-        log.user("the real request of the user")
+        log.human("the real request of the user")
         log.read_plan(self.plan)
         log.assistant("Step one done.")
         log.user(f"{ASSIST.OWN_MARKER} You stopped with work left")
@@ -990,7 +1085,7 @@ class LoopGuardTests(AssistCase):
     def test_a_message_of_the_user_resets_the_count(self):
         log = self.session()
         self.wake_n(log, 3)
-        log.user("Why did you stop?")
+        log.human("Why did you stop?")
         text = self.assess(log, final="Sorry.")
         self.assertIsNotNone(text)
         self.assertNotIn("Write the user plainly", text)
@@ -998,13 +1093,14 @@ class LoopGuardTests(AssistCase):
         self.assertIsNotNone(self.assess(log, final="Again after the message."))
         self.assertEqual(self.logged()[-1]["wakes"], 1)
 
-    def test_a_poll_answer_resets_the_count(self):
+    def test_a_poll_answer_never_resets_the_count(self):
+        """A poll's result record carries no origin: nothing in it proves a human answered (a hook can answer too)."""
         log = self.session()
         self.wake_n(log, 3)
         ident = log.call("AskUserQuestion", {"questions": []})
         log.result(ident, "Option A")
-        self.assertIsNotNone(self.assess(log, final="Going with option A."))
-        self.assertEqual(self.logged()[-1]["wakes"], 0)
+        self.assertIsNone(self.assess(log, final="Going with option A."))
+        self.assertEqual(self.logged()[-1]["decision"], "wake-limit")
 
     def test_own_wakes_reflection_wakes_and_notifications_neither_count_nor_reset(self):
         log = self.session()
@@ -1091,7 +1187,7 @@ class MixedRecordTests(AssistCase):
     def test_the_user_text_next_to_a_tool_result_resets_the_wake_counter(self):
         log = self.session()
         self.seed(3, 1)  # the first user message sits at offset 0, before the saved point
-        self.mixed(log, "Why did you stop?")
+        self.mixed(log, "Why did you stop?", origin={"kind": "human"})
         self.assertIsNotNone(self.assess(log))
         self.assertEqual(self.logged()[-1]["wakes"], 0)
 
@@ -1108,7 +1204,7 @@ class MixedRecordTests(AssistCase):
             with self.subTest(marker):
                 log = self.session()
                 self.seed(3, 1)
-                log.user(f"What does {marker} in your last message mean?")
+                log.human(f"What does {marker} in your last message mean?")
                 self.assertIsNotNone(self.assess(log))
                 self.assertEqual(self.logged()[-1]["wakes"], 0)
 
@@ -1116,7 +1212,7 @@ class MixedRecordTests(AssistCase):
         for marker in (ASSIST.OWN_MARKER, REFLECT.WAKE_MARKER):
             with self.subTest(marker):
                 log = Transcript()
-                log.user(f"What does {marker} in your last message mean?")
+                log.human(f"What does {marker} in your last message mean?")
                 log.read_plan(self.plan)
                 self.calls.clear()
                 self.assess(log)
@@ -1134,7 +1230,7 @@ class MixedRecordTests(AssistCase):
                 self.assertEqual(self.logged()[-1]["decision"], "wake-limit")
                 self.assertEqual(self.calls, [])
         log = Transcript()
-        log.user("the real request of the user")
+        log.human("the real request of the user")
         log.read_plan(self.plan)
         log.assistant("Step one done.")
         log.attach_wake(ASSIST.OWN_MARKER)
@@ -1217,19 +1313,60 @@ class MixedRecordTests(AssistCase):
         self.assertIsNone(self.assess(log))
         self.assertEqual(self.logged()[-1]["decision"], "wake-limit")
 
-    def test_a_record_without_origin_falls_back_to_the_exact_wrapper_shape(self):
+    def test_a_record_without_origin_is_never_the_users(self):
         wrapped = (f"<task-notification>\n<summary>Stop hook feedback</summary>\n</task-notification>\n<system-reminder>\n"
                    f'Stop hook blocking error from command "Stop": {ASSIST.OWN_MARKER} You stopped with work left\n</system-reminder>')
+        quoted = f"Why does it say Stop hook blocking error from command \"Stop\": {ASSIST.OWN_MARKER} here?"
+        for text in (wrapped, quoted, "Plain words that look like the user", "Why did you stop?"):
+            with self.subTest(text[:40]):
+                log = self.session()
+                self.seed(3, 1)
+                log.user(text)
+                self.assertIsNone(self.assess(log))
+                self.assertEqual(self.logged()[-1]["decision"], "wake-limit")
+
+    def test_a_record_without_origin_does_not_reach_the_model_as_a_user_message(self):
+        log = Transcript()
+        log.human("the real request of the user")
+        log.read_plan(self.plan)
+        log.user("Plain words that look like the user")
+        self.calls.clear()
+        self.assess(log)
+        users = self.calls[0]["text"].split("USER'S LATEST MESSAGES\n", 1)[1].split("\n\n", 1)[0]
+        self.assertIn("the real request of the user", users)
+        self.assertNotIn("Plain words that look like the user", users)
+
+    def test_a_human_message_that_looks_like_a_notification_resets_and_reaches_both_places_the_model_reads(self):
+        """reflect's text classification calls this text an event; the record's human origin decides instead."""
+        text = "<task-notification>\n<summary>pasted by the user</summary>\n</task-notification> why did this fire?"
         log = self.session()
         self.seed(3, 1)
-        log.user(wrapped)
-        self.assertIsNone(self.assess(log))
-        self.assertEqual(self.logged()[-1]["decision"], "wake-limit")
-        log = self.session()
-        self.seed(3, 1)
-        log.user(f"Why does it say Stop hook blocking error from command \"Stop\": {ASSIST.OWN_MARKER} here?")  # a quote, not the wrapper
+        log.human(text)
+        self.calls.clear()
         self.assertIsNotNone(self.assess(log))
         self.assertEqual(self.logged()[-1]["wakes"], 0)
+        model_input = self.calls[0]["text"]
+        users = model_input.split("USER'S LATEST MESSAGES\n", 1)[1].split("\n\n", 1)[0]
+        turn = model_input.split("THIS TURN\n", 1)[1]
+        self.assertIn("pasted by the user", users)
+        # the turn starts right after the user's message: it is not a notification and does not end up in the turn
+        self.assertNotIn("NOTIFICATION", model_input)
+        self.assertNotIn("pasted by the user", turn)
+        self.assertIn("Step one is done.", turn)
+
+    def test_a_poll_answer_reaches_the_model_as_a_tool_result_not_as_the_users_words(self):
+        log = Transcript()
+        log.human("the real request of the user")
+        log.read_plan(self.plan)
+        ident = log.call("AskUserQuestion", {"questions": []})
+        log.result(ident, "Option Zeta")
+        self.calls.clear()
+        self.assess(log)
+        model_input = self.calls[0]["text"]
+        users = model_input.split("USER'S LATEST MESSAGES\n", 1)[1].split("\n\n", 1)[0]
+        self.assertNotIn("Option Zeta", users)
+        self.assertNotIn("poll answer", model_input)
+        self.assertIn("Option Zeta", model_input)
 
     def test_a_notification_text_next_to_a_tool_result_finishes_its_task(self):
         log = self.session()
@@ -1240,7 +1377,7 @@ class MixedRecordTests(AssistCase):
     def test_a_poll_answer_and_a_user_text_in_one_record_clear_the_pending_poll(self):
         log = self.session()
         ident = log.call("AskUserQuestion", {"questions": []})
-        self.mixed(log, "Option A, and keep going", tool_use_id=ident)
+        self.mixed(log, "Option A, and keep going", tool_use_id=ident, origin={"kind": "human"})
         self.assess(log)
         self.assertEqual(len(self.calls), 1)
 
@@ -1292,7 +1429,7 @@ class SupersededVerdictTests(AssistCase):
         return lambda: self.append(*self.after_stop(build))
 
     def test_a_user_message_during_the_model_call_discards_the_verdict(self):
-        self.stale_by(self.late(lambda log: log.user("Wait, change of plans")))
+        self.stale_by(self.late(lambda log: log.human("Wait, change of plans")))
 
     def test_a_tool_call_during_the_model_call_discards_the_verdict(self):
         self.stale_by(self.late(lambda log: log.call("Edit", {"file_path": "src/b.py"})))
@@ -1413,7 +1550,7 @@ class SupersededVerdictTests(AssistCase):
         self.assertEqual(self.logged()[-1]["decision"], "unidentified")
 
     def test_a_superseded_stop_leaves_the_next_stop_free_to_wake(self):
-        self.during_ask = self.late(lambda log: log.user("Wait"))
+        self.during_ask = self.late(lambda log: log.human("Wait"))
         log = self.session()
         self.assertIsNone(self.assess(log))
         self.during_ask = None

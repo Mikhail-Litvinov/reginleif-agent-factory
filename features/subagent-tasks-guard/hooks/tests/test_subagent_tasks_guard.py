@@ -194,6 +194,32 @@ class SubagentTasksGuardTests(unittest.TestCase):
         self.write(start_bash("toolu_1", "bash0001") + failed_stop("toolu_2", "bash0001", text))
         self.assert_allowed(self.handback())
 
+    def test_a_failed_taskstop_saying_no_task_was_found_counts_as_stopped(self):
+        # The real wording for an id Claude Code no longer knows (sampled from main transcripts).
+        text = ("<tool_use_error>No task found with ID: bash0001. Background agents running or waiting: "
+                "none</tool_use_error>")
+        self.write(start_bash("toolu_1", "bash0001") + failed_stop("toolu_2", "bash0001", text))
+        self.assert_allowed(self.handback())
+
+    def test_a_not_running_error_about_another_task_keeps_this_task_live(self):
+        text = "<tool_use_error>Task bash0002 is not running (status: completed)</tool_use_error>"
+        self.write(start_bash("toolu_1", "bash0001") + failed_stop("toolu_2", "bash0001", text))
+        self.assert_denied(self.handback(), "bash0001")
+
+    def test_a_no_task_found_error_about_another_id_keeps_this_task_live(self):
+        text = "<tool_use_error>No task found with ID: bash0002. Background agents running or waiting: none</tool_use_error>"
+        self.write(start_bash("toolu_1", "bash0001") + failed_stop("toolu_2", "bash0001", text))
+        self.assert_denied(self.handback(), "bash0001")
+
+    def test_an_error_that_only_mentions_not_running_in_prose_keeps_the_task_live(self):
+        for text in ("<tool_use_error>Could not stop bash0001: the worker is not running a signal handler</tool_use_error>",
+                     "<tool_use_error>Task bash0001 is not running (status: completed) but its child still is</tool_use_error>",
+                     "<tool_use_error>Cannot stop: Task bash0001 is not running (status: completed)</tool_use_error>",
+                     "<tool_use_error>Task bash0001 is not running</tool_use_error>"):
+            with self.subTest(text=text):
+                self.write(start_bash("toolu_1", "bash0001") + failed_stop("toolu_2", "bash0001", text))
+                self.assert_denied(self.handback(), "bash0001")
+
     def test_a_retry_after_a_failed_taskstop_that_succeeds_counts_as_stopped(self):
         self.write(start_bash("toolu_1", "bash0001") + failed_stop("toolu_2", "bash0001") + stop_task("toolu_3", "bash0001"))
         self.assert_allowed(self.handback())

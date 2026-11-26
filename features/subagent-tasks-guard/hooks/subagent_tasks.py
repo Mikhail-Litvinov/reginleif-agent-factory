@@ -7,7 +7,8 @@ record has `isSidechain` and `agentId`):
 - a Monitor result record carries `toolUseResult.taskId`;
 - a background Agent result record carries `toolUseResult.isAsync: true` and `toolUseResult.agentId`;
 - a TaskStop call is a `tool_use` named `TaskStop` with `input.task_id`; it counts as a stop only when its
-  `tool_result` is not an error (an error that says the task is "not running" counts too);
+  `tool_result` is not an error (an error counts only when it is exactly Claude Code's message for this task id being
+  finished or unknown, see `_stop_succeeded`);
 - a finished task arrives as `type: "attachment"` with `attachment.commandMode == "task-notification"` and XML in
   `attachment.prompt`; only a notification with `<status>` is terminal (a Monitor event notification has none).
 Stdlib only.
@@ -29,7 +30,9 @@ BACKGROUND_TEXT = re.compile(r"Command running in background with ID:\s*([A-Za-z
 NOTIFICATION = re.compile(r"<task-notification>(.*?)</task-notification>", re.DOTALL)
 TASK_ID = re.compile(r"<task-id>\s*([^<\s]+)\s*</task-id>")
 TASK_STATUS = re.compile(r"<status>\s*[^<\s]")
-NOT_RUNNING = re.compile(r"\bnot running\b", re.IGNORECASE)
+# The two TaskStop errors that mean "this task is not running" (see _stop_succeeded); matched against the whole text.
+NOT_RUNNING = re.compile(r"<tool_use_error>Task (?P<id>[A-Za-z0-9_-]+) is not running \(status: [A-Za-z_]+\)</tool_use_error>")
+NOT_FOUND = re.compile(r"<tool_use_error>No task found with ID: (?P<id>[A-Za-z0-9_-]+)\.(?: [^<]*)?</tool_use_error>")
 
 
 def _label(use):
@@ -59,13 +62,22 @@ def _result_text(block):
     return ""
 
 
-def _stop_succeeded(block):
-    # A TaskStop result counts as a stop when it is not an error, or when its error says the task is not running (the
-    # goal, a task that is not running, already holds). Any other error (task not found, tool failure) leaves the
-    # task live: fail-closed.
+def _stop_succeeded(block, target):
+    # A TaskStop result counts as a stop when it is not an error, or when its error is exactly one of the two messages
+    # Claude Code returns for a task that is already finished or no longer known (the goal, a task that is not
+    # running, already holds). Any other error (tool failure, a message about another task, prose that merely says
+    # "not running") leaves the task live: fail-closed. Real wording, sampled from Claude Code main transcripts
+    # (tool_result of a TaskStop call with is_error true):
+    #   <tool_use_error>Task bh1lcit0a is not running (status: completed)</tool_use_error>
+    #   <tool_use_error>No task found with ID: begalc77z. Background agents running or waiting: ...</tool_use_error>
     if block.get("is_error") is not True:
         return True
-    return bool(NOT_RUNNING.search(_result_text(block)))
+    text = _result_text(block).strip()
+    for pattern in (NOT_RUNNING, NOT_FOUND):
+        found = pattern.fullmatch(text)
+        if found and found.group("id") == target:
+            return True
+    return False
 
 
 def _task_id_of(tool, result, text):
@@ -132,7 +144,7 @@ class Tasks:
                 continue
             target = self._stops.pop(block.get("tool_use_id"), None)
             if target is not None:
-                if _stop_succeeded(block):
+                if _stop_succeeded(block, target):
                     self.stopped.add(target)
                 continue
             use = self._uses.get(block.get("tool_use_id"))

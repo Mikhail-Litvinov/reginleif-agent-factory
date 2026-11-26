@@ -189,34 +189,39 @@ def is_users(text: str) -> bool:
     return not any(m in text for m in EVENT_MARKS) and not TELEGRAM_HUB_OWN.search(text)
 
 
-def events_of(lines: list[str]) -> list[dict]:
+def events_of(lines: list[str], classify=None, answers: bool = True) -> list[dict]:
     """The main chain as {kind, stamp, ...}: user (the user's words), event (a notification),
-    assistant, tool_use, tool_result (with the seconds since its call)."""
+    assistant, tool_use, tool_result (with the seconds since its call).
+    `classify(line, text)` decides per user-role text whether it is "user" or "event"; by default the text decides
+    (`is_users`), a caller that knows more (the record's origin) passes its own. With `answers` False a poll's result is
+    an ordinary tool result: it does not prove that a human answered, so only reflection shows it as the user's."""
     out: list[dict] = []
     called: dict[str, str] = {}
     polls: set[str] = set()
-    for kind, stamp, data in line_events(lines):
-        if kind == "user":
-            text = REMINDER.sub("", data).strip()
-            if text:
-                out.append({"kind": "user" if is_users(text) else "event", "stamp": stamp, "text": text})
-        elif kind == "assistant":
-            out.append({"kind": "assistant", "stamp": stamp, "text": data})
-        elif kind == "tool_use":
-            called[data.get("id", "")] = stamp
-            if data.get("name") == POLL_TOOL:
-                polls.add(data.get("id", ""))
-            args = json.dumps(data.get("input"), ensure_ascii=False)
-            out.append({"kind": "tool_use", "stamp": stamp, "name": data.get("name"), "args": args})
-        elif kind == "tool_result" and data.get("tool_use_id", "") in polls and not data.get("is_error"):
-            # a poll's result holds the user's own answers, not tool output
-            out.append({"kind": "answer", "stamp": stamp, "text": block_text(data.get("content"))})
-        elif kind == "tool_result":
-            start = called.get(data.get("tool_use_id", ""))
-            took = seconds_between(start, stamp) if start else None
-            out.append({"kind": "tool_result", "stamp": stamp, "text": block_text(data.get("content")), "error": bool(data.get("is_error")), "took": took})
-        elif kind in ("boundary", "summary", "session"):
-            out.append({"kind": kind, "stamp": stamp, "text": data})
+    for line in lines:
+        for kind, stamp, data in line_events([line]):
+            if kind == "user":
+                text = REMINDER.sub("", data).strip()
+                if text:
+                    judged = classify(line, text) if classify else "user" if is_users(text) else "event"
+                    out.append({"kind": judged, "stamp": stamp, "text": text})
+            elif kind == "assistant":
+                out.append({"kind": "assistant", "stamp": stamp, "text": data})
+            elif kind == "tool_use":
+                called[data.get("id", "")] = stamp
+                if data.get("name") == POLL_TOOL:
+                    polls.add(data.get("id", ""))
+                args = json.dumps(data.get("input"), ensure_ascii=False)
+                out.append({"kind": "tool_use", "stamp": stamp, "name": data.get("name"), "args": args})
+            elif answers and kind == "tool_result" and data.get("tool_use_id", "") in polls and not data.get("is_error"):
+                # a poll's result holds the user's own answers, not tool output
+                out.append({"kind": "answer", "stamp": stamp, "text": block_text(data.get("content"))})
+            elif kind == "tool_result":
+                start = called.get(data.get("tool_use_id", ""))
+                took = seconds_between(start, stamp) if start else None
+                out.append({"kind": "tool_result", "stamp": stamp, "text": block_text(data.get("content")), "error": bool(data.get("is_error")), "took": took})
+            elif kind in ("boundary", "summary", "session"):
+                out.append({"kind": kind, "stamp": stamp, "text": data})
     return out
 
 
