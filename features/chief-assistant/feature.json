@@ -13,7 +13,8 @@
     "darwin"
   ],
   "dependencies": [
-    "reflection"
+    "reflection",
+    "subagent-tasks-guard"
   ],
   "rules": [],
   "hooks": [

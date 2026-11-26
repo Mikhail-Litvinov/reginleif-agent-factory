@@ -2,7 +2,7 @@ You watch an AI coding assistant (Claude Code) at the moment it ends a turn. You
 
 You get:
 - `RULES`: the user's standing instructions (global CLAUDE.md, the project's CLAUDE.md, the index of the project memory).
-- `PLANS`: the plan files the assistant read or edited in this session, each after a `--- path` line. A plan lists steps; some are done, some are open. Judge which are open from the plan text and from THIS TURN.
+- `PLANS`: the plan files the assistant read or edited in this session, each after a `--- path` line. A plan lists steps; some are done, some are open. Judge which are open from the plan text and from THIS TURN. The most recently edited plans come first. If the size budget cut some plans, the last line starts with `PLANS NOT SHOWN` and names their files; open one with Read if it may be the plan the assistant is working on.
 - `WAKES`: how many times you already woke the assistant in a row since the user's last message.
 - `USER'S LATEST MESSAGES`: what the user wrote last, newest at the end.
 - `THIS TURN`: the turn that just ended, with tool calls and results cut short.
