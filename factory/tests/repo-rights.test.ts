@@ -71,7 +71,7 @@ describe("migration 0007 rights repositories", () => {
 	});
 
 	it("ends a grant with its stop order in the same transaction, then suspends and restores without reviving the grant", async () => {
-		await db.insert(regulationVersions).values({ id: id(20), number: 1, status: "draft", clauses: [], clausesBytes: 0 });
+		await db.insert(regulationVersions).values({ id: id(20), number: 2, status: "draft", clauses: [], clausesBytes: 0 });
 		await repo.projects.create({ id: id(21), name: "repo-rights-lifecycle-project", workspacePolicy: "worktree" });
 		const task = await repo.tasks.create({ id: id(22), projectId: id(21), title: "rights lifecycle", priority: 1 }, {
 			id: id(23), requirements: "requirements", acceptanceCriteria: [], constraints: {},

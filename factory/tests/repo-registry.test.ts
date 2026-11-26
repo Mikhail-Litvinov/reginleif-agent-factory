@@ -83,23 +83,23 @@ describe("registry repositories", () => {
 		await repo.registry.embeddings.create({ id: id(11), recordId: unrelated.id, modelVersion: "bench-model", dimensions: otherVector.length, embedding: otherVector });
 		await repo.registry.embeddings.create({ id: id(17), recordId: unrelated.id, modelVersion: "other-model", dimensions: vector.length, embedding: vector });
 		assert.equal((await repo.registry.embeddings.forRecord(target.id, "bench-model")).length, 1);
-		const hits = await repo.registry.embeddings.searchVector({ embedding: vector, modelVersion: "bench-model", query: "unused", limit: 5, threshold: 0.9 });
+		const hits = await repo.registry.embeddings.searchVector({ embedding: vector, modelVersion: "bench-model", query: "unused", limit: 5, threshold: 0 });
 		assert.equal(hits[0]?.record.id, target.id);
 		assert.ok(hits[0]!.score >= hits[1]!.score);
 		assert.deepEqual(await repo.registry.embeddings.searchVector({ embedding: vector, modelVersion: "bench-model", query: "unused", limit: 5, threshold: 1.01 }), []);
 	});
 
 	it("searches full text and trigrams by score, limit and threshold", async () => {
-		const first = await repo.registry.records.create(record(12, "cobalt registry phrase", "preserve the cobalt sample"));
-		const second = await repo.registry.records.create(record(13, "cobalt registry phrase", "preserve the cobalt sample carefully"));
-		const fullText = await repo.registry.records.searchFullText({ query: "cobalt registry", language: "en", limit: 5, threshold: 0 });
+		const first = await repo.registry.records.create(record(12, "tungsten registry phrase", "preserve the tungsten sample"));
+		const second = await repo.registry.records.create(record(13, "tungsten registry phrase", "preserve the tungsten sample carefully"));
+		const fullText = await repo.registry.records.searchFullText({ query: "tungsten registry", language: "en", limit: 5, threshold: 0 });
 		assert.equal(fullText.length, 2);
 		assert.ok(fullText[0]!.score >= fullText[1]!.score);
-		assert.deepEqual(await repo.registry.records.searchFullText({ query: "cobalt registry", language: "en", limit: 5, threshold: 1_000_000 }), []);
-		const trigram = await repo.registry.records.searchTrigram({ query: "cobalt registry phrase", limit: 2, threshold: 0 });
+		assert.deepEqual(await repo.registry.records.searchFullText({ query: "tungsten registry", language: "en", limit: 5, threshold: 1_000_000 }), []);
+		const trigram = await repo.registry.records.searchTrigram({ query: "tungsten registry phrase", limit: 2, threshold: 0 });
 		assert.deepEqual(trigram.map((hit) => hit.record.id), [first.id, second.id]);
 		assert.ok(trigram[0]!.score >= trigram[1]!.score);
-		assert.deepEqual(await repo.registry.records.searchTrigram({ query: "cobalt registry phrase", limit: 5, threshold: 1.01 }), []);
+		assert.deepEqual(await repo.registry.records.searchTrigram({ query: "tungsten registry phrase", limit: 5, threshold: 1.01 }), []);
 	});
 
 	it("creates inquiry results and records a verdict once", async () => {

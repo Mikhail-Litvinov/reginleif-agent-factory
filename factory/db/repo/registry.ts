@@ -126,7 +126,8 @@ export const registryRepo = (db: PostgresJsDatabase<any>) => ({
 			db.select().from(registryEmbeddings).where(and(eq(registryEmbeddings.recordId, recordId), ...(modelVersion === undefined ? [] : [eq(registryEmbeddings.modelVersion, modelVersion)])))
 				.orderBy(asc(registryEmbeddings.modelVersion)),
 		searchVector: async (input: SearchInput & { embedding: number[]; modelVersion: string }): Promise<SearchHit[]> => {
-			const distance = sql<number>`${registryEmbeddings.embedding} <=> ${input.embedding}`;
+			// postgres-js sends number[] as float8[], which has no <=> operator; bind the vector literal text and cast it.
+			const distance = sql<number>`${registryEmbeddings.embedding} <=> ${JSON.stringify(input.embedding)}::vector`;
 			const score = sql<number>`1 - (${distance})`;
 			return db.select({ record: registryRecords, score }).from(registryEmbeddings)
 				.innerJoin(registryRecords, eq(registryRecords.id, registryEmbeddings.recordId))
