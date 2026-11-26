@@ -14,6 +14,18 @@ backup name (the UTC time as `yyyyMMddTHHmmssZ`, a dash, 8 hex digits).
 
 `$env:AF_SECRETS_DIR = $secrets` is needed by every `docker compose` command below.
 
+`$proveVolume = { param($p) $n = $p + '_pgdata'; $j = docker volume inspect --format '{{json .Labels}}' $n 2>$null; if ($LASTEXITCODE -eq 0) { $l = $j | ConvertFrom-Json; if ($null -eq $l -or $l.'com.docker.compose.project' -ne $p -or $l.'com.docker.compose.volume' -ne 'pgdata') { throw "refusing: volume $n is not made by compose project $p" } }; $global:LASTEXITCODE = 0 }`
+
+The proof that a data volume is the stack's own (the same line is in `deployment.md`, which explains it). A volume of
+that name that compose of that project did not make stops the line with `refusing`. Every command below that brings a
+project up, mounts the data volume or removes it starts with `& $proveVolume '<project>'` on the same line, followed
+by `;` and the command: a line pasted on its own stops only itself.
+
+`$protectedDir = { param($d) $null = node factory/deploy/setup-secrets.ts --check-access $d; if ($LASTEXITCODE -ne 0) { throw "refusing: $d is not a protected directory" }; $global:LASTEXITCODE = 0 }`
+
+The proof that a directory that will hold a copy of the database is protected like the secrets directory (the same line
+is in `deployment.md`, which explains it).
+
 ## What a restore loses
 
 Everything written after the backup that is restored: rows, new accounts' grants made after it, and any change made
@@ -32,6 +44,12 @@ the row counts and foreign keys equal those recorded at backup time. The newest 
 taken, and again before a real restore. Check the secrets directory too, without changing it:
 
 `node factory/deploy/setup-secrets.ts --check $secrets`
+
+It prints `secrets ready` and exits 0 only when the directory holds all six valid secret files, open to the current
+user, SYSTEM and Administrators only, in a place that cannot be committed (a git-ignored path inside a checkout is
+accepted); otherwise it prints `secrets NOT ready` with the problems and exits 1. A wrong command line, here and in
+every command of this document, exits 2 with a `usage:` line. `restore.ts` runs this same check before anything else
+and stops with `secrets are not ready: <problem>` (exit 1) without touching Docker when the directory fails it.
 
 ## Restoring into a new project
 
@@ -77,7 +95,7 @@ uses a passfile that exists only while the command runs.
 
    `$env:AF_RUN_ID = $hex; $env:AF_PG_PORT = '55432'`
 
-   `docker compose -p "agent-factory-restored-$hex" -f factory/deploy/compose.yml -f factory/deploy/compose.run.yml up -d`
+   `& $proveVolume "agent-factory-restored-$hex"; docker compose -p "agent-factory-restored-$hex" -f factory/deploy/compose.yml -f factory/deploy/compose.run.yml up -d`
 
    Wait until this prints `healthy` (run it again until it does), and point the applications at `127.0.0.1:55432`:
 
@@ -96,8 +114,9 @@ uses a passfile that exists only while the command runs.
 
    `docker compose -p agent-factory -f factory/deploy/compose.yml down`
 
-   `docker volume rm agent-factory_pgdata`
+   `& $proveVolume 'agent-factory'; docker volume rm agent-factory_pgdata`
 
+   The proof comes first: a volume of that name that compose did not make is someone else's and is not removed.
    Nothing in the procedure does this.
 
 `restore.ts` replaces the fragile manual steps of an earlier version (dropping the database and piping the dump through
@@ -123,24 +142,32 @@ new-project procedure and the switch-over were not run on the real stack with ta
   the log says `refusing to start`, the data directory has no record of a completed initialisation: see `deployment.md`
   "A start that refuses" (it is not a crash, and a restart will not change it).
 - Data volume intact but the server refuses to start: do not delete the volume. Stop the container (it must not write
-  while copied) and wait for the stop, then copy the volume read-only into an existing directory, written once as
-  `$copy = '<volume copy dir>'`:
+  while copied) and wait for the stop, then copy the volume read-only into an existing, protected directory, written
+  once as `$copy = '<volume copy dir>'`. The copy holds the whole database, so the directory must be protected like the
+  backups directory: restrict it with the `icacls` command of `deployment.md` "Backup" (with `$copy` in place of
+  `$backups`); the copy command below checks it and refuses otherwise:
 
   `docker stop agent-factory-postgres-1`
 
   `docker wait agent-factory-postgres-1`
 
-  The copy goes to a new file whose name is made now (time and a random part), and the command refuses to write when
-  that name exists: the shell inside the container opens the file with no-overwrite (`set -C`), so an earlier copy is
-  never replaced. Note the name it prints:
+  The copy goes to a new file whose name is made now (time and a random part):
 
   `$name = 'pgdata-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.tgz'`
 
-  `docker run --rm -e NAME=$name -v agent-factory_pgdata:/d:ro -v "${copy}:/o" alpine sh -c 'set -C; tar -C /d -czf - . > /o/$NAME'`
+  The one command below does four things in this order, and stops at the first that fails. It checks that `$copy` is
+  protected (`$protectedDir`). It checks that the volume is the stack's own (`$proveVolume`): a same-name volume that
+  compose did not make is not copied. Inside the container the shell then writes to `<name>.part`, with no-overwrite
+  (`set -C`), and only a finished archive that reads back as a whole (`tar -t`) is renamed to its final name, without
+  replacing a file (`mv -n`); the name is printed only then. An interrupted copy (Ctrl+C, the container stopped), a full
+  disk or a failed write leaves no `.tgz` and removes its `.part` file and exits non-zero; no half archive is ever
+  presented as the result. (Only a kill that gives the shell no chance to react, such as a power loss, can leave a
+  `.part` file; it is never a copy, delete it by hand.)
 
-  `$name`
+  `& $protectedDir $copy; & $proveVolume 'agent-factory'; docker run --rm -e NAME=$name -v agent-factory_pgdata:/d:ro -v "${copy}:/o" alpine sh -c 'set -C; f() { kill $p 2>/dev/null; rm -f /o/$NAME.part; }; g() { exit 1; }; [ ! -e /o/$NAME ] || exit 1; trap f EXIT; trap g INT TERM HUP; tar -C /d -czf - . > /o/$NAME.part & p=$!; wait $p && tar -tzf /o/$NAME.part > /dev/null && mv -n /o/$NAME.part /o/$NAME && [ ! -e /o/$NAME.part ] && echo $NAME'`
 
-  and then go to the restore above. (The copy command names no password.) The image `alpine` is pulled when absent.
+  It prints the name of the file and nothing else on success; then go to the restore above. (The copy command names no
+  password.) The image `alpine` is pulled when absent.
 
 ## Not covered
 

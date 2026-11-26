@@ -9,6 +9,7 @@ import { backup } from "../deploy/backup/backup.ts";
 import { PsqlSession, psql, run, runChecked } from "../deploy/lib.ts";
 import { SECRET_NAMES } from "../deploy/setup-secrets.ts";
 import { Cleanups, createTestStack, type TestStack } from "./helpers.ts";
+import { createNetwork, runContainerResult } from "./owned-docker.ts";
 import { disposeScratch, makeScratch } from "./scratch.ts";
 
 // Prints every process's command line and environment in the container, as the given user.
@@ -115,11 +116,11 @@ describe("hardening", () => {
 			const name = `af-test-client-${randomBytes(4).toString("hex")}`;
 			const script = `umask 077; f=$(mktemp); printf '*:*:*:${role}:%s\\n' "$(cat /s/${role})" > "$f"; ` +
 				`PGPASSFILE="$f" PGCONNECT_TIMEOUT=3 psql -w -h ${host} -U ${role} -d agent_factory ${extra} -Atc 'select 42'`;
-			const result = await run("docker", [
-				"run", "--name", name, "--label", `af.run=${stack.runId}`, "--network", network, "--tmpfs", "/var/lib/postgresql/data",
+			const result = await runContainerResult(stack.runId,
+				"--name", name, "--network", network, "--tmpfs", "/var/lib/postgresql/data",
 				"--mount", `type=bind,source=${stack.secretsDir},target=/s,readonly`,
 				"--entrypoint", "sh", await image(), "-c", script,
-			]);
+			);
 			return { code: result.code ?? -1, text: result.stdout + result.stderr };
 		};
 
@@ -146,7 +147,7 @@ describe("hardening", () => {
 		it("a container on another docker network cannot reach the server", async () => {
 			const other = `af-test-net-${randomBytes(4).toString("hex")}`;
 			const [, ipText] = await Promise.all([
-				runChecked("docker", ["network", "create", "--label", `af.run=${stack.runId}`, other]),
+				createNetwork(stack.runId, other),
 				runChecked("docker", ["inspect", "--format", `{{(index .NetworkSettings.Networks "${stack.project}_default").IPAddress}}`, stack.container]),
 			]);
 			const ip = ipText.trim();

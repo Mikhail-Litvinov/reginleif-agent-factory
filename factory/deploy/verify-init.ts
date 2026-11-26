@@ -3,12 +3,16 @@
 // init scripts). It only reads. Used before marking a database that was made before the marker existed
 // (docs/agent-factory/deployment.md "A start that refuses"): the marker is created only when every check passes.
 //
-//   node deploy/verify-init.ts [--project agent-factory] [--with-marker]
+//   node deploy/verify-init.ts [--project agent-factory | --container <container name>] [--with-marker]
+//
+// --container names the container directly, for one made by hand that belongs to no compose project (the upgrade and the
+// restart-loop procedures); it cannot be combined with --project.
 //
 // Prints one line per check, `ok   <name>` or `FAIL <name>: <detail>`, and exits 0 when all pass, 1 when any fails, 2 on a
 // wrong argument. --with-marker adds the check that the marker .af-init-complete exists (a database not yet marked fails
 // that one by definition, so it is asked for only after marking).
 import { APPLICATION_ROLES, BOOTSTRAP_ROLE, CHECKS, HBA_RULES_SQL, hbaRuleProblems, type Check, type HbaRule, type SqlCheck } from "./init-postconditions.ts";
+import { UsageError, parseCliArgs, reportCliFailure } from "./cli-args.ts";
 import { DATABASE, findContainer, run, tryPsql } from "./lib.ts";
 
 export interface CheckResult {
@@ -63,6 +67,17 @@ export const probeWrongPassword = async (container: string, role: string, option
 	return `the login as ${role} with a wrong password failed, but not for the password: ${firstLine(attempt.stderr, `exit ${attempt.code}`)}`;
 };
 
+// One login over TCP as `role` with the password of its own secret file, which the rules must refuse (the bootstrap role:
+// "host all af_bootstrap all reject"). null when the server refuses it because of pg_hba.conf, as it must; the problem when it
+// lets the login in (a legacy rule, or a file changed on disk that the server never loaded) or fails for another reason
+// (a wrong password would also refuse, but that is no proof of the rules).
+export const probeRefusedByRules = async (container: string, role: string, options: ServerOptions = {}): Promise<string | null> => {
+	const attempt = await tryPsql(container, role, "select 1;", { database: options.database ?? DATABASE, tcp: true, port: options.port });
+	if (attempt.code === 0) return `the server accepted a login as ${role} over TCP: no active rule refuses it`;
+	if (/pg_hba\.conf/i.test(attempt.stderr)) return null;
+	return `the login as ${role} over TCP failed, but not because of the rules: ${firstLine(attempt.stderr, `exit ${attempt.code}`)}`;
+};
+
 export const verifyInit = async (options: VerifyOptions = {}): Promise<CheckResult[]> => {
 	const container = options.container ?? (await findContainer(options.project ?? "agent-factory"));
 	const checks = CHECKS.filter((check) => !(check.kind === "shell" && check.isMarker && !options.withMarker));
@@ -74,7 +89,7 @@ export const verifyInit = async (options: VerifyOptions = {}): Promise<CheckResu
 		const verdicts = new Map<number, string>();
 		const batch = await tryPsql(container, CHECKING_ROLE, batchSql(sqlChecks), { database: DATABASE, tcp: true });
 		if (batch.code !== 0) {
-			return { verdicts, sqlProblem: `could not run the catalog checks as ${CHECKING_ROLE}: ${(batch.stderr.trim() || batch.stdout.trim() || `exit ${batch.code}`).split(/\r?\n/)[0]}` };
+			return { verdicts, sqlProblem: `could not run the catalog checks as ${CHECKING_ROLE}: ${firstLine(batch.stderr || batch.stdout, `exit ${batch.code}`)}` };
 		}
 		for (const line of batch.stdout.split(/\r?\n/)) {
 			const match = /^(\d+)\|(.*)$/.exec(line.trim());
@@ -97,16 +112,20 @@ export const verifyInit = async (options: VerifyOptions = {}): Promise<CheckResu
 			const problems = await checkActiveHba(container);
 			return problems.length === 0 ? success(check) : failure(check, problems.join("; "));
 		}
+		if (check.kind === "refused") {
+			const problem = await probeRefusedByRules(container, check.role, { database: check.database });
+			return problem === null ? success(check) : failure(check, problem);
+		}
 		if (check.kind === "login" && check.wrongPassword) {
 			const problem = await probeWrongPassword(container, check.role);
 			return problem === null ? success(check) : failure(check, problem);
 		}
 		if (check.kind === "login") {
 			const attempt = await tryPsql(container, check.role, "select 1;", { database: DATABASE, tcp: true });
-			return attempt.code === 0 && attempt.stdout.trim() === "1" ? success(check) : failure(check, (attempt.stderr.trim() || `exit ${attempt.code}`).split(/\r?\n/)[0] as string);
+			return attempt.code === 0 && attempt.stdout.trim() === "1" ? success(check) : failure(check, firstLine(attempt.stderr, `exit ${attempt.code}`));
 		}
 		const attempt = await run("docker", ["exec", "-u", "postgres", container, "sh", "-c", check.script]);
-		return attempt.code === 0 ? success(check) : failure(check, (attempt.stdout.trim() || attempt.stderr.trim() || `exit ${attempt.code}`).split(/\r?\n/)[0] as string);
+		return attempt.code === 0 ? success(check) : failure(check, firstLine(attempt.stdout || attempt.stderr, `exit ${attempt.code}`));
 	};
 	return Promise.all(checks.map(resultOf));
 };
@@ -114,26 +133,11 @@ export const verifyInit = async (options: VerifyOptions = {}): Promise<CheckResu
 export const formatResults = (results: readonly CheckResult[]): string[] =>
 	results.map((result) => (result.ok ? `ok   ${result.name}` : `FAIL ${result.name}: ${result.detail}`));
 
-const parseArgs = (argv: string[]): VerifyOptions => {
-	let project = "agent-factory";
-	let withMarker = false;
-	for (let i = 0; i < argv.length; i += 1) {
-		const flag = argv[i];
-		if (flag === "--project") {
-			const value = argv[++i];
-			if (!value || value.startsWith("--")) throw new UsageError("--project needs a project name");
-			project = value;
-		} else if (flag === "--with-marker") withMarker = true;
-		else throw new UsageError(`unknown argument: ${flag}`);
-	}
-	return { project, withMarker };
-};
-
-class UsageError extends Error {}
-
 if (import.meta.main) {
 	try {
-		const results = await verifyInit(parseArgs(process.argv.slice(2)));
+		const { values, present } = parseCliArgs(process.argv.slice(2), { flags: { "--project": "value", "--container": "value", "--with-marker": "boolean" } });
+		if (values["--project"] !== undefined && values["--container"] !== undefined) throw new UsageError("--container and --project cannot be used together");
+		const results = await verifyInit({ project: values["--project"] ?? "agent-factory", container: values["--container"], withMarker: present.has("--with-marker") });
 		for (const line of formatResults(results)) console.log(line);
 		const failed = results.filter((result) => !result.ok).length;
 		if (failed > 0) {
@@ -143,8 +147,6 @@ if (import.meta.main) {
 			console.log(`all ${results.length} checks passed (${APPLICATION_ROLES.length} application roles).`);
 		}
 	} catch (error) {
-		console.error(`verify-init failed: ${error instanceof Error ? error.message : String(error)}`);
-		console.error("usage: node deploy/verify-init.ts [--project agent-factory] [--with-marker]");
-		process.exitCode = error instanceof UsageError ? 2 : 1;
+		reportCliFailure(error, "verify-init failed", "usage: node deploy/verify-init.ts [--project agent-factory | --container <container name>] [--with-marker]");
 	}
 }

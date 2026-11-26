@@ -6,8 +6,11 @@
 //   - files: every file-system delete (rm, rmSync, rmdir, rmdirSync, unlink, unlinkSync, through fs, fs.promises, fsp, a
 //     destructured or renamed import, a string key, any spelling over several lines) is forbidden, recursive or not, except
 //     in deploy/owned.ts (identity re-read before each) and the unlink of deploy/setup-secrets.ts (identity of the file it
-//     created re-read first). A shell `rm -r` is forbidden except the entrypoint's own private mktemp directory. Tests
-//     clean up through OwnedDir (deploy/owned.ts), never by a delete of their own.
+//     created re-read first). Tests clean up through OwnedDir (deploy/owned.ts), never by a delete of their own.
+//   - shell and PowerShell text: any `rm`, `rmdir`, `unlink`, `del`, `erase`, `ri`, `rd` command (recursive or not, in a
+//     script, a string or a template) and any `Remove-Item` is forbidden, except the fragments listed in SHELL_ALLOWED: each
+//     is one exact piece of text of one file (a script's own private temp file, a test's own entry in its own container),
+//     and a test checks that the listed piece still exists, so a stale entry cannot linger.
 // The check reads the whole text of each file, not line by line, so a removal split over several lines, a line continuation,
 // a multiline template string or an argument list spread over lines is seen. Its patterns are built from parts so that this
 // file does not match itself (it is excluded as well).
@@ -20,24 +23,39 @@ const PACKAGE_ROOT = decodeURIComponent(new URL("..", import.meta.url).pathname.
 const LIB = "deploy/lib.ts";
 const OWNED = "deploy/owned.ts";
 const SETUP_SECRETS = "deploy/setup-secrets.ts";
-const ENTRYPOINT = "deploy/postgres/entrypoint.sh";
 const SELF = "tests/removal-guard.test.ts";
 
 // The only functions of deploy/lib.ts that may remove docker resources: from the declaration to the first closing "};".
 const LIB_REMOVERS = ["removeOwned", "removeRecordedVolumes"];
-// The one recursive delete of a shell script: the entrypoint's own private mktemp directory in the container's tmpfs.
-const ENTRYPOINT_OWN = 'rm -rf -- "$init_dir"';
+// The shell removals that exist, by file, each an exact piece of that file's text (blanked before the shell rule looks). Each
+// removes only what its own script or test made: a private temp file or directory, or an entry in the test's own container.
+const SHELL_ALLOWED: Record<string, string[]> = {
+	"deploy/lib.ts": [`trap 'rm -f "$f"' EXIT`], // the passfile script deletes its own mktemp file
+	"tests/roles.test.ts": [`trap 'rm -f "$f"' EXIT`],
+	"deploy/postgres/entrypoint.sh": ['rm -f -- "$health_passfile.new"', 'rm -rf -- "$init_dir"'], // its own files in the container's tmpfs
+	"deploy/postgres/init/10-roles.sh": ['rm -f "$passfile"'],
+	"deploy/postgres/init/99-finish.sh": ['rm -f -- "$PGSERVICEFILE"'],
+	"tests/verify-init.test.ts": ['rm -f -- "\\$PGSERVICEFILE"'], // a regex that checks 99-finish.sh still contains the line above
+	"tests/interrupted-init.test.ts": [
+		'rm -f "$AF_INIT_DIR"/* && rmdir "$AF_INIT_DIR"',
+		'rm -f ${own.join(" ")} && for d in ${dirs.join(" ")}; do if [ -d "$d" ]; then rmdir "$d" || exit 1; fi; done && cd / && rmdir ${dir}',
+		"rmdir fails (loudly) on a directory", // a comment
+	],
+};
 
 // Whitespace between the words of a shell command, a backslash continuation included.
 const SP = String.raw`(?:\s|\\\r?\n)+`;
-const DOCKER_WORDS = ["down", "rm", "rmi", "prune", "--remove-orphans", "--volumes", "--force"].map((w) => `["'\`]${w}["'\`]`);
+const DOCKER_WORDS = ["down", "rm", "rmi", "remove", "prune", "--remove-orphans", "--volumes", "--force"].map((w) => `["'\`]${w}["'\`]`);
 const DOCKER_TEXT = [
-	String.raw`\bdocker${SP}(?:(?:container|volume|network|image|system|builder)${SP})?(?:rm|rmi|prune)\b`,
+	String.raw`\bdocker${SP}(?:(?:container|volume|network|image|system|builder|compose)${SP})?(?:rm|rmi|remove|prune)\b`,
 	String.raw`\bcompose\b(?:[^\n\\]|\\\r?\n)*?${SP}down\b`,
 	"--remove-orphans",
 ];
 const DOCKER = new RegExp([...DOCKER_WORDS, ...DOCKER_TEXT].join("|"), "gi");
-const SHELL_RECURSIVE = new RegExp(String.raw`\brm${SP}(?:-[a-zA-Z]*[rR][a-zA-Z]*\b|--recursive\b)`, "g");
+// A shell or PowerShell command that deletes: a remover word where a command word stands (not part of a name, a path, a
+// `--rm` flag or a member access) followed by an argument, or Remove-Item anywhere.
+const SHELL_REMOVERS = ["rm", "rmdir", "unlink", "del", "erase", "ri", "rd"];
+const SHELL_REMOVE = new RegExp(String.raw`(?<![\w$.-])(?:${SHELL_REMOVERS.join("|")})${SP}(?=[-"'$/.\\\w%~])|\bRemove-Item\b`, "gi");
 // Every file-system call that removes something, whatever its options: the recursive flag is not what makes it unsafe, an
 // unchecked name is.
 const FS_REMOVERS = ["rm", "rmSync", "rmdir", "rmdirSync", "unlink", "unlinkSync"];
@@ -87,14 +105,14 @@ const withoutLibRemovers = (text: string): string => {
 // The removal sites of a text, as "file:line: text". `file` is the path relative to the package root.
 export const removalSites = (file: string, text: string): string[] => {
 	let body = file === LIB ? withoutLibRemovers(text) : text;
-	if (file === ENTRYPOINT) body = body.split(ENTRYPOINT_OWN).join(" ".repeat(ENTRYPOINT_OWN.length));
+	for (const piece of SHELL_ALLOWED[file] ?? []) body = body.split(piece).join(" ".repeat(piece.length));
 	const found = new Map<number, string>();
 	const note = (index: number): void => {
 		const line = body.slice(0, index).split("\n").length;
 		if (!found.has(line)) found.set(line, `${file}:${line}: ${(body.split("\n")[line - 1] ?? "").trim()}`);
 	};
 	for (const match of body.matchAll(DOCKER)) note(match.index);
-	if (file !== OWNED) for (const match of body.matchAll(SHELL_RECURSIVE)) note(match.index);
+	if (file !== OWNED) for (const match of body.matchAll(SHELL_REMOVE)) note(match.index);
 	for (const pattern of fsRemovalPatterns(FS_REMOVERS.filter((name) => !fsAllowed(file).includes(name)))) {
 		for (const match of body.matchAll(pattern)) note(match.index);
 	}
@@ -133,7 +151,8 @@ describe("removal guard", () => {
 			'run("docker", [\n\t"container",\n\t"rm",\n\tid,\n])',
 			'run("docker", ["compose",\n "-p", p,\n "down"])',
 		];
-		for (const form of forms) assert.equal(removalSites("x.ts", form).length, 1, JSON.stringify(form));
+		// A form may be seen twice, as a docker removal and as a shell `rm` on another line of it.
+		for (const form of forms) assert.equal(removalSites("x.ts", form).length >= 1, true, JSON.stringify(form));
 	});
 
 	it("the guard catches a recursive file-system delete in every spelling, and leaves creation and reading alone", () => {
@@ -150,9 +169,9 @@ describe("removal guard", () => {
 		for (const fine of [
 			"await mkdir(dir, { recursive: true });",
 			"readdirSync(root, { recursive: true, encoding: 'utf8' })",
-			"trap 'rm -f \"$f\"' EXIT",
+			"docker run --rm -d alpine",
 			"await rename(path, `${path}.moved`);",
-			"const names = await readdir(dir); // a comment about remove and rmdir ordering",
+			"const names = await readdir(dir); // a comment about remove, rmdir, rm.",
 		]) assert.deepEqual(removalSites("tests/x.ts", fine), [], fine);
 	});
 
@@ -229,11 +248,65 @@ describe("removal guard", () => {
 		assert.equal(removalSites("tests/helpers.ts", body).length, 2);
 	});
 
-	it("the one shell script that removes a directory recursively is the entrypoint's own mktemp directory in the container", () => {
-		const own = 'init_dir=$(mktemp -d /dev/shm/af-init.XXXXXX)\n\t[ -s "$secret" ] || { rm -rf -- "$init_dir"; exit 1; }\n';
-		assert.deepEqual(removalSites("deploy/postgres/entrypoint.sh", own), []);
-		assert.equal(removalSites("deploy/postgres/entrypoint.sh", 'rm -rf -- "$HOME"').length, 1);
-		assert.equal(removalSites("deploy/other.sh", own).length, 1);
+	it("the guard catches the docker `remove` spellings", () => {
+		const forms = [
+			"docker volume remove some_volume",
+			"docker container remove c",
+			"docker network remove n",
+			"docker image remove i",
+			"docker compose rm -f",
+			'run("docker", ["volume", "remove", name])',
+			'run("docker", ["container", "remove", "-f", id])',
+			"const c = `docker \\\n  volume \\\n  remove x`;",
+		];
+		for (const form of forms) assert.equal(removalSites("tests/x.ts", form).length, 1, JSON.stringify(form));
+	});
+
+	it("the guard catches a shell or PowerShell delete in a script, a string or a template, recursive or not", () => {
+		const forms = [
+			"rm file.txt",
+			'rm -f "$x"',
+			"rm -- /x",
+			"cleanup() { rm $tmp; }",
+			"rmdir /x",
+			"unlink /x/y",
+			"run('sh', ['-c', 'rm /tmp/x'])",
+			"sh(`cd ${dir} && rm ${name}`)",
+			"sh(`cd ${dir} \\\n  && rm \\\n  ${name}`)",
+			"powershell -Command 'Remove-Item -Recurse -Force C:\\x'",
+			"Remove-Item $path",
+			"remove-item -Path x",
+			"ri -Force x",
+			"del x.txt",
+			"del /q x.txt",
+			"erase x.txt",
+			"rd /s /q x",
+			"cmd /c del x",
+			'run("powershell", ["-NoProfile", "-Command", "Remove-Item x"])',
+			"if (Test-Path x) { ri x }",
+		];
+		for (const form of forms) assert.equal(removalSites("tests/x.ts", form).length >= 1, true, JSON.stringify(form));
+		for (const fine of [
+			"docker run --rm alpine",
+			"const names = ['--rm', 'remove-orphans'];",
+			"fs.rm_helper(x)",
+			"const form = rm;",
+			"the rmdirs are listed above",
+			"const trim = 1; const norm = 2;",
+			"printf 'delete %s' x",
+		]) assert.deepEqual(removalSites("tests/x.ts", fine), [], fine);
+	});
+
+	it("each listed shell removal is exempt in its own file only, and still exists there", () => {
+		for (const [file, pieces] of Object.entries(SHELL_ALLOWED)) {
+			const text = readFileSync(join(PACKAGE_ROOT, file), "utf8");
+			for (const piece of pieces) {
+				assert.ok(text.includes(piece), `${file} no longer contains the listed piece ${JSON.stringify(piece)}: drop it from SHELL_ALLOWED`);
+				assert.deepEqual(removalSites(file, piece), [], `${file}: ${piece}`);
+				assert.equal(removalSites("deploy/other.sh", piece).length >= 1, true, `the piece must not be exempt elsewhere: ${piece}`);
+				assert.equal(removalSites(file, `${piece}\nrm -rf "$HOME"`).length, 1, `${file}: only the exact piece is exempt`);
+			}
+		}
 	});
 
 	it("deploy/lib.ts is where docker removal lives: it removes by the run label, and the exempt bodies exist", () => {

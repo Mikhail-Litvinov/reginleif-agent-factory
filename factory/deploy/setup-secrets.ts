@@ -1,7 +1,11 @@
 // Creates the secrets directory of the Agent Factory database: one file with a random password per account.
 //
 //   node deploy/setup-secrets.ts <directory>          create what is missing, then verify the access
-//   node deploy/setup-secrets.ts --check <directory>  verify only (changes nothing)
+//   node deploy/setup-secrets.ts --check <directory>  verify readiness only (changes nothing): all six files present and
+//                                                     valid, access restricted, and the place cannot be committed
+//   node deploy/setup-secrets.ts --check-access <directory>  only the access rule that backup.ts applies to its target
+//                                                     (no secret file needed, the place is not judged); exit 1 when too wide
+// A wrong command line exits 2 with the usage line.
 //
 // A file that exists is never overwritten (a changed password would lock the running database out). An existing file that
 // holds no password the init script accepts (empty, or with other characters) is not "kept" either: the command refuses and
@@ -19,9 +23,11 @@
 // every entry other than the three removed) and READ BACK before the first secret is written; when that verification
 // fails, nothing is written.
 import { randomBytes } from "node:crypto";
-import { closeSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, unlinkSync, writeSync, type BigIntStats } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { spawnSync } from "node:child_process";
+import { closeSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, statSync, unlinkSync, writeSync, type BigIntStats } from "node:fs";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { SID_ADMINISTRATORS, SID_SYSTEM, aclSids, pathsAccessProblems, restrictDirectory } from "./acl.ts";
+import { UsageError, parseCliArgs, reportCliFailure } from "./cli-args.ts";
 import { idOfStats, sameId } from "./identity.ts";
 
 // One secret per account; the first is the bootstrap superuser of the server (init and recovery only).
@@ -65,6 +71,72 @@ export const verifySecretsAccess = (directory: string): string[] => {
 	const target = resolve(directory);
 	if (!existsSync(target)) return [`${target} does not exist`];
 	return pathsAccessProblems([target, ...secretFiles(target)]);
+};
+
+// ONLY the access rule that backup.ts applies to its target (pathsAccessProblems): the directory itself, no secret file
+// required and the place not judged. For --check-access, which the documents use to test a backup directory.
+export const directoryAccessProblems = (directory: string): string[] => {
+	const target = resolve(directory);
+	if (!existsSync(target)) return [`${target} does not exist`];
+	if (!statSync(target).isDirectory()) return [`${target} is not a directory`];
+	return pathsAccessProblems([target]);
+};
+
+// The nearest ancestor of `path` that is a git checkout (holds an entry named .git, a directory or the file of a linked
+// worktree), or undefined. `path` is already resolved.
+const checkoutRootOf = (path: string): string | undefined => {
+	for (let dir = path; ; dir = dirname(dir)) {
+		if (existsSync(join(dir, ".git"))) return dir;
+		if (dirname(dir) === dir) return undefined;
+	}
+};
+
+// `path` with every link on the way resolved: through its nearest existing ancestor, then the part that does not exist yet.
+const resolveThroughLinks = (path: string): string => {
+	const rest: string[] = [];
+	let existing = resolve(path);
+	while (!existsSync(existing) && dirname(existing) !== existing) {
+		rest.unshift(basename(existing));
+		existing = dirname(existing);
+	}
+	return join(realpathSync.native(existing), ...rest);
+};
+
+// The location rule: a secret must not sit where a commit can take it. Judged on the RESOLVED path (a symlink or junction
+// from outside into a checkout leads into it). A place inside a checkout is allowed only when git itself ignores it
+// (`git check-ignore --no-index`: the rule of .gitignore files whether or not anything is tracked), and a failure to ask git
+// counts as "not ignored". The exception exists because an ignored scratch folder inside a checkout (a project's .tmp) is
+// a normal place for a test's secrets and can never be committed.
+export const worktreeProblems = (paths: string[]): string[] => {
+	const problems: string[] = [];
+	for (const path of paths) {
+		const resolved = resolveThroughLinks(path);
+		const root = checkoutRootOf(resolved);
+		if (root === undefined) continue;
+		const inside = relative(root, resolved).split(sep).join("/") || ".";
+		const asked = spawnSync("git", ["-C", root, "check-ignore", "-q", "--no-index", "--", inside], { encoding: "utf8" });
+		if (asked.status === 0) continue;
+		const why = asked.status === 1 ? "and not git-ignored: a secret there can be committed" : `and git could not say whether it is ignored (${asked.error?.message ?? (asked.stderr.trim() || `exit status ${asked.status}`)})`;
+		problems.push(`${resolved} is inside the git checkout ${root} ${why}; keep the secrets directory outside any checkout`);
+	}
+	return problems;
+};
+
+// Everything that must hold before the stack may be started from `directory`: it exists, holds all six secret files, each
+// with a valid password, the access is exactly the allowed holders, and the place cannot be committed (worktreeProblems).
+// The generic access check (verifySecretsAccess) stays what backup directories are verified with. Read-only; synchronous.
+export const secretsReadiness = (directory: string): string[] => {
+	const target = resolve(directory);
+	if (!existsSync(target)) return [`${target} does not exist`];
+	if (!statSync(target).isDirectory()) return [`${target} is not a directory`];
+	const problems: string[] = [];
+	for (const name of SECRET_NAMES) {
+		if (!existsSync(join(target, name))) problems.push(`the secret file ${join(target, name)} is missing (the password of ${name})`);
+	}
+	problems.push(...verifySecretsAccess(target), ...invalidSecretFiles(target));
+	const present = secretFiles(target);
+	problems.push(...worktreeProblems(present.length > 0 ? present : [target]));
+	return problems;
 };
 
 // The access of one secret file that was just created, before any secret byte is in it: the file's own effective
@@ -161,29 +233,37 @@ export const createSecrets = (directory: string, options: { lock?: Lock; verifyF
 };
 
 if (import.meta.main) {
-	const argv = process.argv.slice(2);
-	const checkOnly = argv[0] === "--check";
-	const directory = checkOnly ? argv[1] : argv[0];
-	if (!directory || argv.length > (checkOnly ? 2 : 1)) {
-		console.error("usage: node deploy/setup-secrets.ts [--check] <secrets directory>");
-		process.exitCode = 2;
-	} else if (checkOnly) {
-		const problems = [...verifySecretsAccess(directory), ...(existsSync(directory) ? invalidSecretFiles(directory) : [])];
-		if (problems.length === 0) console.log(`secrets access ok: ${resolve(directory)} is open to the current user, SYSTEM and Administrators only`);
-		else {
-			console.error(`secrets access NOT ok: ${resolve(directory)}`);
-			for (const problem of problems) console.error(`  - ${problem}`);
-			process.exitCode = 1;
-		}
-	} else {
-		try {
+	const usage = "usage: node deploy/setup-secrets.ts [--check | --check-access] <directory>";
+	try {
+		const { present, positionals } = parseCliArgs(process.argv.slice(2), { flags: { "--check": "boolean", "--check-access": "boolean" }, positionals: 1 });
+		if (present.has("--check") && present.has("--check-access")) throw new UsageError("--check and --check-access cannot be used together");
+		const directory = positionals[0] as string;
+		if (present.has("--check-access")) {
+			const problems = directoryAccessProblems(directory);
+			if (problems.length === 0) console.log(`access ok: ${resolve(directory)} is open to the current user, SYSTEM and Administrators only`);
+			else {
+				console.error(`access NOT ok: ${resolve(directory)}`);
+				for (const problem of problems) console.error(`  - ${problem}`);
+				process.exitCode = 1;
+			}
+		} else if (present.has("--check")) {
+			const problems = secretsReadiness(directory);
+			if (problems.length === 0) console.log(`secrets ready: ${resolve(directory)} holds all ${SECRET_NAMES.length} valid secret files, open to the current user, SYSTEM and Administrators only, and cannot be committed`);
+			else {
+				console.error(`secrets NOT ready: ${resolve(directory)}`);
+				for (const problem of problems) console.error(`  - ${problem}`);
+				process.exitCode = 1;
+			}
+		} else {
+			// Before anything is created: a new directory inside a checkout that does not ignore it is refused.
+			const placed = worktreeProblems([directory]);
+			if (placed.length > 0) throw new Error(`refused: nothing was created.\n${placed.map((p) => `  - ${p}`).join("\n")}`);
 			const result = createSecrets(directory);
 			console.log(`secrets directory: ${result.directory}`);
 			console.log(`created: ${result.created.join(", ") || "none"}`);
 			console.log(`kept (not overwritten): ${result.kept.join(", ") || "none"}`);
-		} catch (error) {
-			console.error(error instanceof Error ? error.message : String(error));
-			process.exitCode = 1;
 		}
+	} catch (error) {
+		reportCliFailure(error, "setup-secrets", usage);
 	}
 }

@@ -15,6 +15,8 @@
 // Passwords: the secrets directory holds them as files; they reach the server only through its secret mounts and
 // passfiles in the container (lib.ts), never an environment variable or a command line.
 import { resolve } from "node:path";
+import { integerValue, parseCliArgs, reportCliFailure } from "../cli-args.ts";
+import { secretsReadiness } from "../setup-secrets.ts";
 import { applyDatabaseGrants, compareRestored, restoreDump, verifyBackupFiles } from "./restore-check.ts";
 import { freePort, newRunId, projectResourcesExist, removeOwned, startStack, type StackOptions } from "../lib.ts";
 
@@ -42,6 +44,15 @@ export const restore = async (options: RestoreOptions): Promise<RestoreResult> =
 	const project = restoredProjectName(runId);
 	const port = options.port ?? (await freePort());
 	const fail = (problems: string[]): RestoreResult => ({ ok: false, problems, project, port, runId });
+	// The secrets must be ready (all six files, valid, protected, outside a git checkout unless git ignores the place)
+	// before anything else happens and long before any resource exists: a stack started with a missing or exposed secret
+	// would fail late and leave a half-made project to clean up.
+	try {
+		const unready = secretsReadiness(options.secretsDir);
+		if (unready.length > 0) return fail(unready.map((problem) => `secrets are not ready: ${problem}`));
+	} catch (error) {
+		return fail([`could not check the secrets: ${error instanceof Error ? error.message : String(error)}`]);
+	}
 	let verified;
 	try {
 		verified = await verifyBackupFiles(options.manifestPath);
@@ -84,21 +95,14 @@ export const restore = async (options: RestoreOptions): Promise<RestoreResult> =
 };
 
 if (import.meta.main) {
-	let manifestPath = "";
-	let secretsDir = "";
-	let port: number | undefined;
-	const argv = process.argv.slice(2);
-	for (let i = 0; i < argv.length; i += 1) {
-		if (argv[i] === "--manifest") manifestPath = argv[++i] ?? "";
-		else if (argv[i] === "--secrets") secretsDir = argv[++i] ?? "";
-		else if (argv[i] === "--port") port = Number(argv[++i]);
-		else console.error(`unknown argument: ${argv[i]}`);
-	}
-	if (!manifestPath || !secretsDir || (port !== undefined && !Number.isInteger(port))) {
-		console.error("usage: node deploy/backup/restore.ts --manifest <manifest file> --secrets <secrets dir> [--port <port>]");
-		process.exitCode = 2;
-	} else {
-		const result = await restore({ manifestPath, secretsDir, port });
+	const usage = "usage: node deploy/backup/restore.ts --manifest <manifest file> --secrets <secrets dir> [--port <port>]";
+	try {
+		const { values } = parseCliArgs(process.argv.slice(2), {
+			flags: { "--manifest": "value", "--secrets": "value", "--port": "value" },
+			required: ["--manifest", "--secrets"],
+		});
+		const port = values["--port"] === undefined ? undefined : integerValue("--port", values["--port"], 1, 65535);
+		const result = await restore({ manifestPath: values["--manifest"] as string, secretsDir: values["--secrets"] as string, port });
 		if (result.ok) {
 			console.log(`restored and verified in project ${result.project} (loopback port ${result.port}); the old stack was not touched`);
 		} else {
@@ -106,5 +110,7 @@ if (import.meta.main) {
 			for (const problem of result.problems) console.error(`  - ${problem}`);
 			process.exitCode = 1;
 		}
+	} catch (error) {
+		reportCliFailure(error, "restore FAILED", usage);
 	}
 }

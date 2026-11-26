@@ -17,6 +17,7 @@ import { readFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { pipeline } from "node:stream/promises";
+import { parseCliArgs, reportCliFailure } from "../cli-args.ts";
 import { createSecrets } from "../setup-secrets.ts";
 import { MANIFEST_FORMAT, streamDump, type Manifest } from "./backup.ts";
 import { DATABASE, FOREIGN_KEYS_SQL, ROW_COUNTS_SQL, execArgs, freePort, newRunId, psql, removeOwned, startStack, type ForeignKey } from "../lib.ts";
@@ -328,29 +329,17 @@ export const startScratch = async (prefix: string): Promise<ScratchServer> => {
 };
 
 if (import.meta.main) {
-	let manifestPath = "";
-	let prefix: string | undefined;
-	const argv = process.argv.slice(2);
-	for (let i = 0; i < argv.length; i += 1) {
-		if (argv[i] === "--manifest") manifestPath = argv[++i] ?? "";
-		else if (argv[i] === "--prefix") prefix = argv[++i];
-		else console.error(`unknown argument: ${argv[i]}`);
-	}
-	if (!manifestPath) {
-		console.error("usage: node deploy/backup/restore-check.ts --manifest <manifest file> [--prefix af-restore-check]");
-		process.exitCode = 2;
-	} else {
-		try {
-			const result = await restoreCheck({ manifestPath, prefix });
-			if (result.ok) console.log("restore check passed: checksum, row counts and foreign keys match the backup");
-			else {
-				console.error("restore check FAILED:");
-				for (const problem of result.problems) console.error(`  - ${problem}`);
-				process.exitCode = 1;
-			}
-		} catch (error) {
-			console.error(`restore check FAILED: ${error instanceof Error ? error.message : String(error)}`);
+	const usage = "usage: node deploy/backup/restore-check.ts --manifest <manifest file> [--prefix af-restore-check]";
+	try {
+		const { values } = parseCliArgs(process.argv.slice(2), { flags: { "--manifest": "value", "--prefix": "value" }, required: ["--manifest"] });
+		const result = await restoreCheck({ manifestPath: values["--manifest"] as string, prefix: values["--prefix"] });
+		if (result.ok) console.log("restore check passed: checksum, row counts and foreign keys match the backup");
+		else {
+			console.error("restore check FAILED:");
+			for (const problem of result.problems) console.error(`  - ${problem}`);
 			process.exitCode = 1;
 		}
+	} catch (error) {
+		reportCliFailure(error, "restore check FAILED", usage);
 	}
 }

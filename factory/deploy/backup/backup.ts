@@ -34,6 +34,7 @@ import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { DATABASE, FOREIGN_KEYS_SQL, PsqlSession, ROW_COUNTS_SQL, execArgs, findContainer, realClock, runChecked, waitHealthy, type Clock, type ForeignKey } from "../lib.ts";
 import { pathsAccessProblems, restrictDirectory } from "../acl.ts";
+import { parseCliArgs, reportCliFailure } from "../cli-args.ts";
 import { OwnedDir, OwnedFiles } from "../owned.ts";
 
 export const MANIFEST_FORMAT = "agent-factory-backup-1";
@@ -283,17 +284,11 @@ export const backup = async (options: BackupOptions): Promise<BackupResult> => {
 	return { ...(result as BackupResult), leftovers };
 };
 
+const USAGE = "usage: node deploy/backup/backup.ts --target <directory> [--project agent-factory]";
+
 const parseArgs = (argv: string[]): BackupOptions => {
-	let project = "agent-factory";
-	let target = "";
-	for (let i = 0; i < argv.length; i += 1) {
-		const flag = argv[i];
-		if (flag === "--target") target = argv[++i] ?? "";
-		else if (flag === "--project") project = argv[++i] ?? "";
-		else throw new Error(`unknown argument: ${flag}`);
-	}
-	if (!target) throw new Error("usage: node deploy/backup/backup.ts --target <directory> [--project agent-factory]");
-	return { project, target };
+	const { values } = parseCliArgs(argv, { flags: { "--target": "value", "--project": "value" }, required: ["--target"] });
+	return { project: values["--project"] ?? "agent-factory", target: values["--target"] as string };
 };
 
 if (import.meta.main) {
@@ -304,7 +299,6 @@ if (import.meta.main) {
 		console.log(`dump: ${result.dumpPath} (${result.manifest.dump.bytes} bytes, sha256 ${result.manifest.dump.sha256}); ${tables} tables counted`);
 		for (const leftover of result.leftovers) console.error(`warning: cleanup left: ${leftover}`);
 	} catch (error) {
-		console.error(`backup failed: ${error instanceof Error ? error.message : String(error)}`);
-		process.exitCode = 1;
+		reportCliFailure(error, "backup failed", USAGE);
 	}
 }

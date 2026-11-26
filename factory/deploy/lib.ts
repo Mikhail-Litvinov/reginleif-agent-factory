@@ -8,6 +8,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { createServer } from "node:net";
+import { StringDecoder } from "node:string_decoder";
 import { OwnedDir } from "./owned.ts";
 
 export const DATABASE = "agent_factory";
@@ -93,12 +94,44 @@ export const psql = async (container: string, role: string, sql: string, options
 export const tryPsql = (container: string, role: string, sql: string, options: PsqlOptions = {}): Promise<RunResult> =>
 	run("docker", execArgs(container, role, psqlProgram(role, options), options.wrongPassword), { input: sql });
 
+// UTF-8 text read from a byte stream. A chunk can end inside a multibyte character; the decoder holds that incomplete tail
+// until the next chunk, so a character split between chunks is never turned into replacement characters.
+export class Utf8Text {
+	private readonly decoder = new StringDecoder("utf8");
+
+	write(chunk: Buffer): string {
+		return this.decoder.write(chunk);
+	}
+
+	/** What the decoder still holds at the end of the stream (an incomplete character becomes a replacement character). */
+	end(): string {
+		return this.decoder.end();
+	}
+}
+
+// The same, cut into lines: `write` returns the lines completed by the chunk (a trailing "\r" removed) and keeps the rest.
+export class Utf8Lines {
+	private readonly text = new Utf8Text();
+	private pending = "";
+
+	write(chunk: Buffer): string[] {
+		this.pending += this.text.write(chunk);
+		const lines: string[] = [];
+		let newline = this.pending.indexOf("\n");
+		while (newline >= 0) {
+			lines.push(this.pending.slice(0, newline).replace(/\r$/, ""));
+			this.pending = this.pending.slice(newline + 1);
+			newline = this.pending.indexOf("\n");
+		}
+		return lines;
+	}
+}
+
 // A psql session that stays open: statements go in one at a time, each answering with exactly one line.
 export class PsqlSession {
 	private readonly child: ChildProcessWithoutNullStreams;
 	private readonly lines: string[] = [];
 	private readonly waiters: Array<{ resolve: (line: string) => void; reject: (error: Error) => void }> = [];
-	private pending = "";
 	private stderr = "";
 	private closed: Error | null = null;
 	private readonly exited: Promise<number | null>;
@@ -106,20 +139,17 @@ export class PsqlSession {
 	constructor(container: string, role: string, options: PsqlOptions = {}) {
 		this.child = spawn("docker", execArgs(container, role, psqlProgram(role, options), options.wrongPassword),{ stdio: ["pipe", "pipe", "pipe"] });
 		this.child.stdin.on("error", () => {});
+		const stdout = new Utf8Lines();
+		const stderr = new Utf8Text();
 		this.child.stdout.on("data", (chunk: Buffer) => {
-			this.pending += chunk.toString("utf8");
-			let newline = this.pending.indexOf("\n");
-			while (newline >= 0) {
-				this.deliver(this.pending.slice(0, newline).replace(/\r$/, ""));
-				this.pending = this.pending.slice(newline + 1);
-				newline = this.pending.indexOf("\n");
-			}
+			for (const line of stdout.write(chunk)) this.deliver(line);
 		});
 		this.child.stderr.on("data", (chunk: Buffer) => {
-			this.stderr += chunk.toString("utf8");
+			this.stderr += stderr.write(chunk);
 		});
 		this.exited = new Promise((resolvePromise) => {
 			this.child.on("close", (code) => {
+				this.stderr += stderr.end();
 				this.closed = new Error(`psql session ended (exit ${code}): ${this.stderr.trim()}`);
 				for (const waiter of this.waiters.splice(0)) waiter.reject(this.closed);
 				resolvePromise(code);

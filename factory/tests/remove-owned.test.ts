@@ -4,8 +4,9 @@
 // creation and removes exactly that volume at the end.
 import assert from "node:assert/strict";
 import { after, describe, it } from "node:test";
-import { newRunId, ownedResources, recordVolumes, removeOwned, removeRecordedVolumes, run, runChecked, RUN_LABEL } from "../deploy/lib.ts";
+import { newRunId, ownedResources, recordVolumes, removeOwned, removeRecordedVolumes, run } from "../deploy/lib.ts";
 import { Cleanups } from "./helpers.ts";
+import { createContainer, createVolume } from "./owned-docker.ts";
 
 const IMAGE = "alpine:latest";
 
@@ -24,7 +25,7 @@ describe("removeOwned removes what the run selected by its label, not what hangs
 		// Registered before the resources exist: the container goes first (by label), then the volume this test recorded.
 		cleanups.add(() => removeRecordedVolumes(recorded));
 		cleanups.add(() => removeOwned(runId));
-		const container = (await runChecked("docker", ["create", "--label", `${RUN_LABEL}=${runId}`, "-v", "/data", IMAGE, "true"])).trim();
+		const container = await createContainer(runId, "-v", "/data", IMAGE, "true");
 		recorded.push(...(await recordVolumes(container)));
 		assert.equal(recorded.length, 1, "the container must have exactly one anonymous volume");
 
@@ -39,9 +40,9 @@ describe("removeOwned removes what the run selected by its label, not what hangs
 		const other = newRunId();
 		cleanups.add(() => removeOwned(other));
 		cleanups.add(() => removeOwned(mine));
-		const volume = (await runChecked("docker", ["volume", "create", "--label", `${RUN_LABEL}=${mine}`, `af-test-${mine}`])).trim();
-		const otherVolume = (await runChecked("docker", ["volume", "create", "--label", `${RUN_LABEL}=${other}`, `af-test-${other}`])).trim();
-		const otherContainer = (await runChecked("docker", ["create", "--label", `${RUN_LABEL}=${other}`, "-v", `${otherVolume}:/data`, IMAGE, "true"])).trim();
+		const volume = await createVolume(mine, `af-test-${mine}`);
+		const otherVolume = await createVolume(other, `af-test-${other}`);
+		const otherContainer = await createContainer(other, "-v", `${otherVolume}:/data`, IMAGE, "true");
 
 		await removeOwned(mine);
 
@@ -55,7 +56,7 @@ describe("removeOwned removes what the run selected by its label, not what hangs
 		const runId = newRunId();
 		cleanups.add(() => removeOwned(runId));
 		// A named volume (an unnamed one is made anonymous by docker).
-		const volume = (await runChecked("docker", ["volume", "create", "--label", `${RUN_LABEL}=${runId}`, `af-test-${runId}`])).trim();
+		const volume = await createVolume(runId, `af-test-${runId}`);
 		await assert.rejects(removeRecordedVolumes([volume]), /not anonymous/);
 		assert.equal(await exists("volume", volume), true);
 	});

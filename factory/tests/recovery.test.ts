@@ -8,8 +8,9 @@ import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { backup, type BackupResult } from "../deploy/backup/backup.ts";
 import { restore } from "../deploy/backup/restore.ts";
-import { freePort, findContainer, psql, run, tryPsql } from "../deploy/lib.ts";
+import { freePort, findContainer, psql, tryPsql } from "../deploy/lib.ts";
 import { Cleanups, createTestStack, leftovers, trackedProject, type TestStack } from "./helpers.ts";
+import { createNetwork } from "./owned-docker.ts";
 import { disposeScratch, makeScratch } from "./scratch.ts";
 
 const ROLES = ["af_migrator", "af_api", "af_control", "af_backup", "af_reader"] as const;
@@ -120,8 +121,7 @@ describe("recovery into a new project", () => {
 		const { runId: squatter } = trackedProject(cleanups);
 		const { runId: victim } = trackedProject(cleanups);
 		const name = `agent-factory-restored-${victim}_squat`;
-		const made = await run("docker", ["network", "create", "--label", `af.run=${squatter}`, name]);
-		assert.equal(made.code, 0, made.stderr);
+		await createNetwork(squatter, name);
 		const result = await restore({ manifestPath: backupResult.manifestPath, secretsDir: old.secretsDir, runId: victim });
 		assert.equal(result.ok, false);
 		assert.match(result.problems.join("\n"), /refused: agent-factory-restored-.* already exists/);

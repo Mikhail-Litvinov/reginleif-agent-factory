@@ -1,13 +1,15 @@
 // Secrets: created once and never overwritten, kept out of the container's inspect data, required to start the stack.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, lstatSync, renameSync, statSync, writeFileSync, type BigIntStats } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, renameSync, statSync, symlinkSync, writeFileSync, type BigIntStats } from "node:fs";
 import { mkdtemp, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
-import { ownedComposeArgs, run } from "../deploy/lib.ts";
+import { restore, restoredProjectName } from "../deploy/backup/restore.ts";
+import { newRunId, ownedComposeArgs, projectResourcesExist, run } from "../deploy/lib.ts";
 import type { OwnedDir } from "../deploy/owned.ts";
-import { SECRET_NAMES, SID_ADMINISTRATORS, SID_SYSTEM, aclSids, createSecrets, removeIfSame, verifySecretsAccess } from "../deploy/setup-secrets.ts";
+import { pathsAccessProblems, restrictDirectory } from "../deploy/acl.ts";
+import { SECRET_NAMES, SID_ADMINISTRATORS, SID_SYSTEM, aclSids, createSecrets, directoryAccessProblems, removeIfSame, secretsReadiness, verifySecretsAccess, worktreeProblems } from "../deploy/setup-secrets.ts";
 import { Cleanups, leftovers, sharedStack, trackedProject, type TestStack } from "./helpers.ts";
 import { disposeScratch, makeScratch } from "./scratch.ts";
 
@@ -101,6 +103,95 @@ describe("secrets", () => {
 		assert.equal(result.code, 2);
 	});
 
+	// Readiness is more than "the access is not too wide": all six files exist, hold a valid password, are protected, and
+	// the directory is not where a commit could take it (the resolved path, after links, is outside a git checkout unless
+	// git ignores it). The generic access check (verifySecretsAccess) stays what backup directories use.
+	describe("secrets readiness", () => {
+		// A throw-away repository (empty template: no hooks or samples) inside the scratch directory; its own .git is the
+		// nearest one for everything under it, whatever checkout the scratch directory itself sits in.
+		const makeRepo = (name: string, ignore?: string): string => {
+			const repo = join(work, name);
+			mkdirSync(repo);
+			const init = spawnSync("git", ["init", "-q", "--template=", repo], { encoding: "utf8" });
+			assert.equal(init.status, 0, init.stderr);
+			if (ignore !== undefined) writeFileSync(join(repo, ".gitignore"), ignore);
+			return repo;
+		};
+
+		it("a complete, valid, protected directory outside any repository is ready", () => {
+			const dir = join(work, "ready");
+			createSecrets(dir);
+			assert.deepEqual(secretsReadiness(dir), []);
+		});
+
+		for (const missing of [["af_api"], ["af_bootstrap", "af_reader"], [...SECRET_NAMES]]) {
+			it(`a directory missing ${missing.length === SECRET_NAMES.length ? "all six files" : missing.join(" and ")} is not ready, and --check says so`, async () => {
+				const dir = join(work, `missing-${missing.join("-")}`);
+				createSecrets(dir);
+				for (const name of missing) renameSync(join(dir, name), join(dir, `${name}.moved`));
+				assert.deepEqual(verifySecretsAccess(dir), [], "the generic access check does not look for missing files");
+				const problems = secretsReadiness(dir);
+				for (const name of missing) assert.ok(problems.some((p) => p.includes(name) && /missing/.test(p)), `${name} must be named: ${problems.join("; ")}`);
+				const check = await run("node", [SETUP_CLI, "--check", dir]);
+				assert.equal(check.code, 1, check.stdout);
+				for (const name of missing) assert.match(check.stderr, new RegExp(name));
+			});
+		}
+
+		it("a directory that does not exist, and an empty one, are not ready", async () => {
+			const absent = join(work, "readiness-absent");
+			assert.ok(secretsReadiness(absent).some((p) => /does not exist/.test(p)));
+			const empty = await mkdtemp(join(work, "readiness-empty-"));
+			const problems = secretsReadiness(empty);
+			for (const name of SECRET_NAMES) assert.ok(problems.some((p) => p.includes(name)), `${name} must be named`);
+			assert.equal((await run("node", [SETUP_CLI, "--check", empty])).code, 1);
+		});
+
+		it("a directory inside a git checkout that does not ignore it is not ready, and setup refuses to create it there", async () => {
+			const repo = makeRepo("repo-plain");
+			const dir = join(repo, "secrets");
+			createSecrets(dir);
+			assert.deepEqual(verifySecretsAccess(dir), [], "access alone is fine; the location is the problem");
+			assert.ok(secretsReadiness(dir).some((p) => /git checkout/.test(p) && /not git-ignored/.test(p)), secretsReadiness(dir).join("; "));
+			assert.equal((await run("node", [SETUP_CLI, "--check", dir])).code, 1);
+			const fresh = join(repo, "fresh-secrets");
+			const setup = await run("node", [SETUP_CLI, fresh]);
+			assert.equal(setup.code, 1);
+			assert.match(setup.stderr, /git checkout/);
+			assert.equal(existsSync(fresh), false, "nothing is created inside the checkout");
+		});
+
+		it("a directory that git ignores is ready", async () => {
+			const repo = makeRepo("repo-ignored", "secrets/\n");
+			const dir = join(repo, "secrets");
+			createSecrets(dir);
+			assert.deepEqual(secretsReadiness(dir), []);
+			const setup = await run("node", [SETUP_CLI, join(repo, "secrets", "more")]);
+			assert.equal(setup.code, 0, setup.stderr);
+		});
+
+		it("a link (symlink or junction) from outside into a checkout is judged by where it leads", () => {
+			const repo = makeRepo("repo-linked");
+			const real = join(repo, "secrets");
+			createSecrets(real);
+			const link = join(work, "link-into-repo");
+			symlinkSync(real, link, "junction");
+			assert.ok(secretsReadiness(link).some((p) => /git checkout/.test(p)), secretsReadiness(link).join("; "));
+		});
+
+		it("restore refuses a directory that is not ready before it creates any resource", async () => {
+			const dir = join(work, "restore-not-ready");
+			createSecrets(dir);
+			renameSync(join(dir, "af_control"), join(dir, "af_control.moved"));
+			const runId = newRunId();
+			const result = await restore({ manifestPath: join(work, "no-such.manifest.json"), secretsDir: dir, runId });
+			assert.equal(result.ok, false);
+			assert.ok(result.problems.some((p) => /af_control/.test(p) && /missing/.test(p)), result.problems.join("; "));
+			assert.deepEqual(await leftovers(runId), []);
+			assert.deepEqual(await projectResourcesExist(restoredProjectName(runId)), []);
+		});
+	});
+
 	const onWindows = { skip: process.platform !== "win32" };
 	const USERS_SID = "S-1-5-32-545";
 	// Inheritance flags apply to a directory only (on a file icacls accepts them and records nothing).
@@ -108,6 +199,77 @@ describe("secrets", () => {
 		const result = spawnSync("icacls", [path, "/grant", `*${USERS_SID}:${isDirectory ? "(OI)(CI)" : ""}R`], { encoding: "utf8" });
 		assert.equal(result.status, 0, result.stderr || result.stdout);
 	};
+
+	// --check-access applies ONLY the access rule that backup.ts uses for its target (deploy/acl.ts pathsAccessProblems): no
+	// secret file is needed, and the location is not judged. It is what the documents use to test a backup directory.
+	describe("--check-access", () => {
+		const widen = (path: string): void => {
+			if (process.platform === "win32") grantUsers(path);
+			else chmodSync(path, 0o755);
+		};
+		const restricted = async (name: string): Promise<string> => {
+			const dir = join(work, name);
+			mkdirSync(dir);
+			restrictDirectory(dir, "test directory");
+			return dir;
+		};
+
+		it("a protected directory with no secret file in it passes, and prints that the access is ok", async () => {
+			const dir = await restricted("access-ok");
+			assert.deepEqual(directoryAccessProblems(dir), []);
+			const result = await run("node", [SETUP_CLI, "--check-access", dir]);
+			assert.equal(result.code, 0, result.stderr);
+			assert.match(result.stdout, /access ok/);
+			assert.equal(result.stderr, "");
+		});
+
+		it("an open directory fails and names the entry that is too wide", async () => {
+			const dir = await restricted("access-open");
+			widen(dir);
+			const problems = directoryAccessProblems(dir);
+			assert.ok(problems.length > 0);
+			const result = await run("node", [SETUP_CLI, "--check-access", dir]);
+			assert.equal(result.code, 1, result.stdout);
+			assert.match(result.stderr, /access NOT ok/);
+			assert.match(result.stderr, process.platform === "win32" ? /S-1-5-32-545/ : /mode 755/);
+			assert.equal(result.stdout, "");
+		});
+
+		it("a directory that does not exist fails", async () => {
+			const absent = join(work, "access-absent");
+			assert.deepEqual(directoryAccessProblems(absent), [`${absent} does not exist`]);
+			const result = await run("node", [SETUP_CLI, "--check-access", absent]);
+			assert.equal(result.code, 1);
+			assert.match(result.stderr, /does not exist/);
+		});
+
+		it("a file where a directory is expected fails", async () => {
+			const file = join(work, "access-file");
+			writeFileSync(file, "x");
+			assert.ok(directoryAccessProblems(file).some((p) => /not a directory/.test(p)), directoryAccessProblems(file).join("; "));
+			assert.equal((await run("node", [SETUP_CLI, "--check-access", file])).code, 1);
+		});
+
+		it("it does not judge the location: a protected directory inside an unignored checkout passes, which --check refuses", async () => {
+			const repo = join(work, "access-repo");
+			mkdirSync(repo);
+			const init = spawnSync("git", ["init", "-q", "--template=", repo], { encoding: "utf8" });
+			assert.equal(init.status, 0, init.stderr);
+			const dir = join(repo, "backups");
+			mkdirSync(dir);
+			restrictDirectory(dir, "test directory");
+			const result = await run("node", [SETUP_CLI, "--check-access", dir]);
+			assert.equal(result.code, 0, result.stderr);
+			assert.ok(worktreeProblems([dir]).length > 0, "the same place is a worktree problem, so the test can tell the two rules apart");
+		});
+
+		it("it gives the same verdict as the access rule backup.ts applies to its target", async () => {
+			const dir = await restricted("access-same");
+			assert.deepEqual(directoryAccessProblems(dir), pathsAccessProblems([dir]));
+			widen(dir);
+			assert.deepEqual(directoryAccessProblems(dir), pathsAccessProblems([dir]));
+		});
+	});
 
 	it("the ACL read back by SID holds only the current user, SYSTEM and Administrators, on the directory and each file", onWindows, () => {
 		const dir = join(work, "acl-ok");

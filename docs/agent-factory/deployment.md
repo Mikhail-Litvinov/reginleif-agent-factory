@@ -21,11 +21,40 @@ line, run them one after the other). How to read them:
   `$project = '<project>'` (the project name of the server to dump: `agent-factory`, or the restored project after a
   switch-over; used by the backup command only)
 
+  `$old = '<old deploy copy dir>'` (a directory that does not exist yet, outside the repository: "Upgrade of a running
+  stack" copies the deploy files of the running revision into it)
+
+  `$proveVolume = { param($p) $n = $p + '_pgdata'; $j = docker volume inspect --format '{{json .Labels}}' $n 2>$null; if ($LASTEXITCODE -eq 0) { $l = $j | ConvertFrom-Json; if ($null -eq $l -or $l.'com.docker.compose.project' -ne $p -or $l.'com.docker.compose.volume' -ne 'pgdata') { throw "refusing: volume $n is not made by compose project $p" } }; $global:LASTEXITCODE = 0 }`
+
+  The proof that a data volume is the stack's own (the same line is in `recovery.md`). A volume that is absent passes (the
+  command after it makes it). A volume of that name that compose of that project did not make (another project's, one
+  made by hand, one without compose labels) stops the line with `refusing`, before anything mounts, copies or removes it:
+  `up -d` would adopt such a volume as the database, and a removal would delete someone else's data. Every command below
+  that brings the stack up, mounts the data volume or removes it starts with `& $proveVolume 'agent-factory'` (the
+  project of that command) on the same line, followed by `;` and the command: a line pasted on its own stops only
+  itself, so a proof on an earlier line would not stop the command after it.
+
+  `$protectedDir = { param($d) $null = node factory/deploy/setup-secrets.ts --check-access $d; if ($LASTEXITCODE -ne 0) { throw "refusing: $d is not a protected directory" }; $global:LASTEXITCODE = 0 }`
+
+  The proof that a directory that will hold a copy of the database (a backups directory, the volume copy of
+  `recovery.md`) is protected like the secrets directory (the same line is in `recovery.md`). It runs
+  `setup-secrets.ts --check-access`, which judges only the access of the directory, with the same rule as the secrets
+  check and without asking for secret files, which a directory of copies does not have. It stops with `refusing`
+  (after the findings the check printed) when the directory does not exist, is not a directory, or is open to anyone but
+  the current user, SYSTEM and Administrators.
+
+- A command line that is wrong (an unknown or repeated option, a missing value or directory, options that exclude each
+  other) is refused before the command does anything: it prints the reason and a `usage:` line and exits 2. Exit 1 is
+  always a finding or a failure of the work itself.
+
 - An optional argument is a separate command, never an `[optional]` part of one.
 
 Every command in this document was executed as written on a scratch project (its own random project name, its own
 secrets directory, a free loopback port in place of 55432), except `restore.ts` against the real stack and the real
-switch-over, which were checked against the code only.
+switch-over, which were checked against the code only. The upgrade, its rollback and the way out of a restart loop are
+executed by `factory/tests/upgrade-rehearsal.test.ts` on a stack started from the revision before the marker (`a8c628a`),
+the same commands taken from this text; only `git pull --ff-only` is replaced there by a copy of the current
+`factory/deploy` files (the rehearsal has no remote), and the project name by the scratch one.
 
 ## Threat model of these tools
 
@@ -68,13 +97,15 @@ Nothing else on the machine is touched: the stack neither uses nor removes other
 
    `node factory/deploy/setup-secrets.ts --check $secrets`
 
-   It prints `secrets access ok` and exits 0, or lists the offending entries and exits 1 (2 on a usage error).
+   It prints `secrets ready` and exits 0 only when the directory holds all six valid secret files, their access is
+   exactly those three holders, and the place cannot be committed; otherwise it lists the problems and exits 1 (2 on a
+   usage error).
 
    Back these files up apart from the database backup (see "Not covered"): without them a restored database cannot be
    reached by anyone but the bootstrap role of a scratch server.
 3. Start:
 
-   `$env:AF_SECRETS_DIR = $secrets; docker compose -p agent-factory -f factory/deploy/compose.yml up -d`
+   `$env:AF_SECRETS_DIR = $secrets; & $proveVolume 'agent-factory'; docker compose -p agent-factory -f factory/deploy/compose.yml up -d`
 
    The first start creates the roles and the `agent_factory` database (`factory/deploy/postgres/init/10-roles.sh`). The
    server restarts once at the end of init, so for a minute the container reports `starting`. Wait for it, by running
@@ -83,7 +114,10 @@ Nothing else on the machine is touched: the stack neither uses nor removes other
    `docker inspect --format '{{.State.Health.Status}}' agent-factory-postgres-1`
 
    It must print `healthy` before the first connection or backup. Running the start command again on a running stack
-   changes nothing. The port 55432 on `127.0.0.1` is the default; to use another one set it before the start line and
+   changes nothing only while `factory/deploy/compose.yml` is unchanged since that stack was made: after an update of the
+   repository compose recreates the container from the new file, and a database made by an older revision is refused by
+   the new start wrapper (a restart loop). On a stack that already holds data, never run this line after an update: follow
+   "Upgrade of a running stack". The port 55432 on `127.0.0.1` is the default; to use another one set it before the start line and
    keep it set for every later `docker compose` line of this window, otherwise compose recreates the container on
    55432:
 
@@ -203,18 +237,27 @@ Under `unless-stopped` Docker tries again, and each attempt ends the same way, w
 volume is never served. Stop it with `docker compose -p agent-factory -f factory/deploy/compose.yml stop`.
 
 An interrupted first start, on a volume that holds nothing worth keeping (the first start of a new install or of a
-scratch project): stop the stack, delete the volume with the exact name that `docker volume ls` shows for the project,
-and start again from Install step 3. Never do this on a volume with real data: the deletion cannot be undone.
+scratch project): take the container down (the volume stays), delete the volume, and start again from Install step 3.
+The deletion line proves first, on the same line, that the volume is the one this stack made, and stops with `refusing`
+when a volume of that name is someone else's. Never do this on a volume with real data: the deletion cannot be undone.
+
+`docker compose -p agent-factory -f factory/deploy/compose.yml down`
+
+`& $proveVolume 'agent-factory'; docker volume rm agent-factory_pgdata`
 
 A database made before the marker existed (a legacy database) is refused too, although it is complete. The wrapper does
 not mark it by itself, because it cannot tell a complete database from a half-made one without logging in to a server
-that is not running. The owner marks it once, after checking it, ideally before the stack is updated, while the previous
-version still runs and answers (the check needs a running server; the new wrapper refuses to start an unmarked one).
-The check is a script, read-only, run from the repository root:
+that is not running. The owner marks it once, after checking it, while the previous version still runs and answers (the
+check needs a running server; the new wrapper refuses to start an unmarked one). The whole ordered sequence, with the
+backup before it, the proof that the same data is served afterwards and the way back, is "Upgrade of a running stack"
+below; a stack that already restarts in a loop has its own way out there. The two commands that do the marking are
+described here. The check is a script, read-only, run from the repository root:
 
 `node factory/deploy/verify-init.ts`
 
-For another project name, run the same command with `--project` and the name added at the end. It verifies, as `af_backup` in one session, every postcondition of
+For another project name, run the same command with `--project` and the name added at the end; for a container made by
+hand that belongs to no project (the restart-loop way out below), name the container instead, as in the checks of that procedure (the two options
+cannot be combined: exit 2). It verifies, as `af_backup` in one session, every postcondition of
 `init/10-roles.sh` and `init/99-finish.sh`: the six roles and their attributes (only `af_bootstrap` is a superuser;
 no other role may create roles or databases, replicate or bypass row security), that no role is a member of another,
 the read-only and timeout settings of `af_reader`, the owner of the database and of its schemas, the connect and schema
@@ -246,7 +289,169 @@ Then confirm it, which adds the check that the marker exists:
 
 `node factory/deploy/verify-init.ts --with-marker`
 
-Start (or wait for the next automatic attempt) and wait for `healthy` as in Install step 3.
+Start (or wait for the next automatic attempt) and wait for `healthy` as in Install step 3. Do not use `compose start`
+or `docker start` on the old container to bring it back after an update: they restart the container as it was made, with
+the old entrypoint. The container of the new revision is made by `up -d` (see the next section).
+
+## Upgrade of a running stack
+
+Applies to a stack that runs from an earlier revision of `factory/deploy` (made before the marker `.af-init-complete`
+and the start wrapper existed) and is to run the revision of the repository now. Updating the repository and running
+`up -d` at once is wrong: compose recreates the container from the new file, the new wrapper refuses the unmarked data
+directory, and `unless-stopped` restarts the refused container again and again, while the marking commands need a
+running container. The order below avoids that. Every step is a command to run and read; stop at the first one that does
+not do what its text says. Set `AF_SECRETS_DIR` (and `AF_PG_PORT` when the stack runs on another port) in this window
+first, as in "Stop and start":
+
+`$env:AF_SECRETS_DIR = $secrets`
+
+Upgrade, in this order:
+
+1. Save the deploy files of the revision that runs now, before the repository is updated: the way back needs them. The
+   copy refuses to overwrite a directory that exists. When the repository was already updated, check out the old
+   revision into a separate working tree and copy from there instead:
+
+   `if (Test-Path $old) { throw "refusing: $old exists" } else { Copy-Item -Recurse factory/deploy $old }`
+
+2. Update the repository:
+
+   `git pull --ff-only`
+
+3. Take a backup and check it restores (see "Backup" and "Restore check"). The newest manifest of the directory is the
+   one just made:
+
+   `node factory/deploy/backup/backup.ts --target $backups`
+
+   `$manifest = (Get-ChildItem $backups -Filter 'af-*.manifest.json' | Sort-Object LastWriteTime | Select-Object -Last 1).FullName`
+
+   `node factory/deploy/backup/restore-check.ts --manifest $manifest`
+
+4. Record what runs now: the container id, the data volume's name and the system identifier of the database (a number
+   that belongs to the data and survives every recreation of the container). The record is a new file next to the
+   backups; the proof comes first on the same line:
+
+   `$record = Join-Path $backups ('upgrade-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.json')`
+
+   `& $proveVolume 'agent-factory'; $id = docker inspect --format '{{.Id}}' agent-factory-postgres-1; $vol = (docker inspect --format '{{json .Mounts}}' agent-factory-postgres-1 | ConvertFrom-Json | Where-Object Destination -eq '/var/lib/postgresql/data').Name; $sysid = ((docker exec -u postgres agent-factory-postgres-1 /usr/lib/postgresql/16/bin/pg_controldata /var/lib/postgresql/data | Select-String 'Database system identifier').Line -replace '\D', ''); @{ container = $id; volume = $vol; system = $sysid } | ConvertTo-Json | Out-File -NoClobber -Encoding ascii $record`
+
+   `Get-Content $record`
+
+   The record must show a container id, the volume `agent-factory_pgdata` and a system identifier of about 19 digits.
+
+5. Check the database that runs, with the old container still up (read-only; every line must be `ok`, see "A start that
+   refuses" for what it covers):
+
+   `node factory/deploy/verify-init.ts`
+
+   When it exits 1, do not go on: restore from a known-good backup (`recovery.md`).
+
+6. Mark it, then confirm the marker:
+
+   `docker exec -u postgres agent-factory-postgres-1 touch /var/lib/postgresql/data/.af-init-complete`
+
+   `node factory/deploy/verify-init.ts --with-marker`
+
+7. Stop the old container and wait until the daemon has recorded the stop:
+
+   `docker compose -p agent-factory -f factory/deploy/compose.yml stop`
+
+   `docker wait agent-factory-postgres-1`
+
+8. Create the container of the new revision on the same volume, with the same secrets directory and port:
+
+   `& $proveVolume 'agent-factory'; docker compose -p agent-factory -f factory/deploy/compose.yml up -d`
+
+9. Wait for `healthy` (at most 3 minutes), then confirm that this is the new container on the old data before any
+   client connects. Each line below stops with `refusing` when its fact is wrong; when one does, do not start any client
+   and go to "Roll back":
+
+   `$i = 0; while ($i -lt 60 -and (docker inspect --format '{{.State.Health.Status}}' agent-factory-postgres-1) -ne 'healthy') { Start-Sleep 3; $i++ }`
+
+   `$r = Get-Content (Get-ChildItem $backups -Filter 'upgrade-*.json' | Sort-Object LastWriteTime | Select-Object -Last 1).FullName -Raw | ConvertFrom-Json`
+
+   `if ((docker inspect --format '{{.State.Health.Status}}' agent-factory-postgres-1) -ne 'healthy') { throw "refusing: the new container is not healthy" }`
+
+   `if ((docker inspect --format '{{.Id}}' agent-factory-postgres-1) -eq $r.container) { throw "refusing: this is still the old container" }`
+
+   `if ((docker inspect --format '{{json .Config.Entrypoint}}' agent-factory-postgres-1) -notmatch 'entrypoint\.sh') { throw "refusing: the container does not start through the wrapper" }`
+
+   `if ((docker inspect --format '{{json .Config.Healthcheck.Test}}' agent-factory-postgres-1) -notmatch 'af-init-complete') { throw "refusing: the container has the old healthcheck" }`
+
+   `if ((docker inspect --format '{{json .Mounts}}' agent-factory-postgres-1 | ConvertFrom-Json | Where-Object Destination -eq '/var/lib/postgresql/data').Name -ne $r.volume) { throw "refusing: the container serves another volume" }`
+
+   `if (((docker exec -u postgres agent-factory-postgres-1 /usr/lib/postgresql/16/bin/pg_controldata /var/lib/postgresql/data | Select-String 'Database system identifier').Line -replace '\D', '') -ne $r.system) { throw "refusing: the database is not the one recorded" }`
+
+   `node factory/deploy/verify-init.ts --with-marker`
+
+Roll back, when step 9 failed or the new revision is not wanted. The old revision is started again from the copy of
+step 1, on the same volume (the data was not changed by the upgrade except for the marker file, which the old revision
+ignores). The old container is not brought back with `start`: that is a container of a file that may no longer match
+the repository; it is made again from the copy:
+
+1. Stop the new container and wait for the stop:
+
+   `docker compose -p agent-factory -f factory/deploy/compose.yml stop`
+
+   `docker wait agent-factory-postgres-1`
+
+2. Make the container from the old files (the proof first, on the same line), and wait for `healthy`:
+
+   `& $proveVolume 'agent-factory'; docker compose -p agent-factory -f "$old/compose.yml" up -d`
+
+   `$i = 0; while ($i -lt 60 -and (docker inspect --format '{{.State.Health.Status}}' agent-factory-postgres-1) -ne 'healthy') { Start-Sleep 3; $i++ }`
+
+3. Confirm the same data is served (the line stops with `refusing` when not) and that the server answers:
+
+   `$r = Get-Content (Get-ChildItem $backups -Filter 'upgrade-*.json' | Sort-Object LastWriteTime | Select-Object -Last 1).FullName -Raw | ConvertFrom-Json`
+
+   `if (((docker exec -u postgres agent-factory-postgres-1 /usr/lib/postgresql/16/bin/pg_controldata /var/lib/postgresql/data | Select-String 'Database system identifier').Line -replace '\D', '') -ne $r.system) { throw "refusing: the database is not the one recorded" }`
+
+   `node factory/deploy/verify-init.ts --with-marker`
+
+A stack that already restarts in a loop (the repository was updated and `up -d` was run before the database was
+marked): the container never becomes healthy and `docker logs agent-factory-postgres-1` says `refusing to start`. The
+data is intact. The way out starts one container on the volume that does not run the wrapper (the image's own
+entrypoint, with the service's own settings), checks and marks the database there, and then makes the container of the
+service again:
+
+1. Stop the looping container and wait for the stop:
+
+   `docker compose -p agent-factory -f factory/deploy/compose.yml stop`
+
+   `docker wait agent-factory-postgres-1`
+
+2. Start the one-off container on the volume (the proof first, on the same line). The checks below name it
+   by its container name (the option `container` of `verify-init.ts`), so they need no project or service label to find it:
+
+   `& $proveVolume 'agent-factory'; docker compose -p agent-factory -f factory/deploy/compose.yml run -d --no-deps --name agent-factory-oneoff --entrypoint docker-entrypoint.sh postgres postgres -c hba_file=/etc/agent-factory/pg_hba.conf`
+
+   (The first `postgres` is the service, the rest is the server command of the service, which an overridden entrypoint
+   does not keep: without it the container exits at once with nothing to run.)
+
+3. Wait for `healthy` is not available here (the one-off has no wrapper-made passfile); wait until it answers, then check
+   and mark as in steps 5 and 6 above, naming the one-off container:
+
+   `$i = 0; while ($i -lt 60 -and (docker exec agent-factory-oneoff pg_isready -h 127.0.0.1 -U af_backup) -notmatch 'accepting') { Start-Sleep 3; $i++ }`
+
+   `node factory/deploy/verify-init.ts --container agent-factory-oneoff`
+
+   `docker exec -u postgres agent-factory-oneoff touch /var/lib/postgresql/data/.af-init-complete`
+
+   `node factory/deploy/verify-init.ts --container agent-factory-oneoff --with-marker`
+
+4. Stop the one-off container, wait for the stop, remove it (only after checking that it is the one-off container of
+   this project) and make the container of the service on the marked volume:
+
+   `docker stop agent-factory-oneoff`
+
+   `docker wait agent-factory-oneoff`
+
+   `if ((docker inspect --format '{{json .Config.Labels}}' agent-factory-oneoff | ConvertFrom-Json).'com.docker.compose.oneoff' -ne 'True') { throw "refusing: not a one-off container" } else { docker rm agent-factory-oneoff }`
+
+   `& $proveVolume 'agent-factory'; docker compose -p agent-factory -f factory/deploy/compose.yml up -d`
+
+   Then confirm as in step 9 (the record of step 4 exists only when step 4 was run before the update; without it, check
+   the health, the entrypoint and `verify-init.ts --with-marker`).
 
 ## Backup
 
@@ -270,10 +475,12 @@ existing directory once with (the last entry is the current user):
 `icacls $backups /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' "*$((whoami /user /fo csv /nh | ConvertFrom-Csv -Header n,s).s):(OI)(CI)F"`
 
 An entry the directory holds for another account itself (not inherited) stays after this command; remove it with
-`icacls $backups /remove` and the account's name. Verify the result with the check of the secrets directory, which
-tests exactly this rule and prints `secrets access ok`:
+`icacls $backups /remove` and the account's name. Verify the result with the check of the header, which runs the check
+of the secrets directory on this directory and keeps only its access findings (a directory of backups holds no secret
+files, so the "file is missing" findings do not apply); it stops with `refusing` and the entries when the directory is
+missing, is not a directory, is open to anyone else or can be committed, and prints nothing when the directory is fine:
 
-`node factory/deploy/setup-secrets.ts --check $backups`
+`& $protectedDir $backups`
 
 The run's private staging directory inside the target gets the same access explicitly and the result is read back
 before the first dump byte is written, so no dump is ever written under an access it merely inherited.
@@ -327,7 +534,11 @@ is never removed for being named like a test's or being found next to it. `facto
 when any other file under `factory/` holds a removal command. `factory/tests/first-start.test.ts` covers the first
 start (no password in any process, no trust rule ever written, wrapper started as documented), and
 `factory/tests/verify-init.test.ts` covers `verify-init.ts` against a real database with a table of deliberate
-breakages. A file
+breakages. `factory/tests/volume-identity.test.ts` runs every command of this document and of `recovery.md` that
+mounts or removes the data volume against a same-name volume that compose did not make: each must refuse and leave it
+whole. `factory/tests/docs-commands.test.ts` runs the emergency volume copy of `recovery.md` (existing name, full disk,
+interruption, unprotected directory), and `factory/tests/upgrade-rehearsal.test.ts` the upgrade, rollback and
+restart-loop procedures described above. A file
 shares one started server across its tests where they do not change it; `streams.test.ts` needs no docker and uses an
 injected clock, so nothing waits in real time. `npm --prefix factory run typecheck` checks the types. From the root,
 `bun test tests/factory-isolation.test.ts` checks that the factory package does not reach into the product code.

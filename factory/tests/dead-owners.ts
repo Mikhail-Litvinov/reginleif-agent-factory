@@ -18,9 +18,12 @@
 //    name pattern or a project name. The secrets directory is removed by the identity recorded at creation
 //    (OwnedDir.reclaim), so a path that now names another directory is left alone.
 //  - A run whose objects disagree about their owner is skipped (fail closed).
+//  - An anonymous volume (`-v /data`) cannot carry a label, so it is found through its container: the volumes of the run's
+//    containers are recorded before the containers are removed, and then removed (removeRecordedVolumes refuses a volume
+//    that is not anonymous).
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
-import { removeOwned, runChecked } from "../deploy/lib.ts";
+import { ownedResources, recordVolumes, removeOwned, removeRecordedVolumes, runChecked } from "../deploy/lib.ts";
 import { OwnedDir } from "../deploy/owned.ts";
 
 export const OWNER_LABEL = "af.owner";
@@ -115,6 +118,21 @@ const listKind = async (args: string[]): Promise<Listed[]> => {
 	return items;
 };
 
+// The run's objects by label, then the anonymous volumes of its containers (recorded before the containers go, since a
+// container's mounts are unreadable afterwards).
+const removeRunWithAnonymousVolumes = async (runId: string): Promise<void> => {
+	const recorded: string[] = [];
+	for (const container of (await ownedResources(runId)).containers) {
+		try {
+			recorded.push(...(await recordVolumes(container)));
+		} catch (error) {
+			if (!/no such/i.test(String(error))) throw error; // the container vanished meanwhile
+		}
+	}
+	await removeOwned(runId);
+	await removeRecordedVolumes([...new Set(recorded)]);
+};
+
 export const realSweepDeps = (): SweepDeps => ({
 	key: worktreeKey(PACKAGE_ROOT),
 	ownPid: process.pid,
@@ -124,7 +142,7 @@ export const realSweepDeps = (): SweepDeps => ({
 		...(await listKind(["network", "ls"])),
 		...(await listKind(["volume", "ls"])),
 	],
-	removeRun: (runId) => removeOwned(runId),
+	removeRun: removeRunWithAnonymousVolumes,
 	removeSecrets: async (path, token) => {
 		const dir = await OwnedDir.reclaim(path, token);
 		if (dir === undefined) return undefined;

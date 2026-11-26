@@ -47,7 +47,15 @@ export interface LoginCheck extends CheckBase {
 export interface HbaCheck extends CheckBase {
 	readonly kind: "hba";
 }
-export type Check = SqlCheck | ShellCheck | LoginCheck | HbaCheck;
+// A login over TCP as `role` with the password of its secret file that the server must REFUSE because of its rules (a
+// reject rule, or no rule at all), not because of a wrong password: a rule that would let the role in by its password fails
+// it. The rules in pg_hba_file_rules are read from the file on disk; this is what the running server really does.
+export interface RefusalCheck extends CheckBase {
+	readonly kind: "refused";
+	readonly role: string;
+	readonly database: string;
+}
+export type Check = SqlCheck | ShellCheck | LoginCheck | HbaCheck | RefusalCheck;
 
 export const FINISH_REMOVES_SERVICE_FILE = "99-finish: the bootstrap service file is removed";
 export const FINISH_NO_TRUST_RULE = "99-finish: no trust rule in the data directory's pg_hba.conf";
@@ -240,26 +248,52 @@ export interface HbaRule {
 	readonly auth_method: string | null;
 	readonly error: string | null;
 }
-// The only methods a rule may have: a password proven by scram, or a rejection. trust, peer, ident, md5, password, cert,
-// gss... let a login in without proving the password of the secret file.
-export const ALLOWED_AUTH_METHODS: readonly string[] = ["scram-sha-256", "reject"];
+// The rules of deploy/postgres/pg_hba.conf, in file order (the first matching rule decides, so the order is part of the
+// policy). A test keeps this list equal to the file. Every method is a password proven by scram, or a rejection: trust,
+// peer, ident, md5, password, cert, gss... would let a login in without proving the password of the secret file. The
+// bootstrap superuser works over the socket only (the first rule), its network rule is a reject, and the application roles
+// reach only the application database from the server's own subnet.
+export interface IntendedHbaRule {
+	readonly type: string;
+	readonly database: readonly string[];
+	readonly user_name: readonly string[];
+	readonly address: string | null;
+	readonly auth_method: string;
+}
+export const INTENDED_HBA_RULES: readonly IntendedHbaRule[] = [
+	{ type: "local", database: ["all"], user_name: ["all"], address: null, auth_method: "scram-sha-256" },
+	{ type: "host", database: ["all"], user_name: [BOOTSTRAP_ROLE], address: "all", auth_method: "reject" },
+	{ type: "host", database: ["agent_factory"], user_name: APPLICATION_ROLES, address: "samenet", auth_method: "scram-sha-256" },
+];
 // One JSON line: the file the server reads and its rules.
 export const HBA_RULES_SQL =
 	"select jsonb_build_object('file', current_setting('hba_file'), 'rules', coalesce((select jsonb_agg(to_jsonb(r) order by r.line_number) from (select line_number, type, database, user_name, address, auth_method, error from pg_hba_file_rules) r), '[]'::jsonb))::text;";
 
+const describeRule = (rule: { type: string; database: readonly string[] | null; user_name: readonly string[] | null; address: string | null; auth_method: string | null }): string =>
+	[rule.type, (rule.database ?? []).join(",") || "(none)", (rule.user_name ?? []).join(",") || "(none)", rule.address, rule.auth_method ?? "(none)"].filter((part) => part !== null).join(" ");
+
+const sameList = (a: readonly string[] | null, b: readonly string[]): boolean => a !== null && a.length === b.length && a.every((value, index) => value === b[index]);
+
+// The rules the server reports, compared in order with INTENDED_HBA_RULES: a legacy rule, a missing reject, a reordering
+// or a different method each show as a difference at the line where it happens.
 export const hbaRuleProblems = (rules: readonly HbaRule[]): string[] => {
 	if (rules.length === 0) return ["no rule is active (pg_hba_file_rules is empty)"];
 	const problems: string[] = [];
-	for (const rule of rules) {
-		if (rule.error) problems.push(`line ${rule.line_number}: the server cannot use this rule: ${rule.error}`);
-		else if (!ALLOWED_AUTH_METHODS.includes(rule.auth_method ?? "")) {
-			problems.push(`line ${rule.line_number}: an active ${rule.type} rule uses the method ${rule.auth_method ?? "(none)"}; only ${ALLOWED_AUTH_METHODS.join(" and ")} are allowed`);
+	rules.forEach((rule, index) => {
+		if (rule.error) {
+			problems.push(`line ${rule.line_number}: the server cannot use this rule: ${rule.error}`);
+			return;
 		}
-	}
+		const intended = INTENDED_HBA_RULES[index];
+		if (intended === undefined) {
+			problems.push(`line ${rule.line_number}: an unexpected rule after the intended ones: "${describeRule(rule)}"`);
+		} else if (rule.type !== intended.type || !sameList(rule.database, intended.database) || !sameList(rule.user_name, intended.user_name) || rule.address !== intended.address || rule.auth_method !== intended.auth_method) {
+			problems.push(`line ${rule.line_number}: the rule number ${index + 1} must be "${describeRule(intended)}" but is "${describeRule(rule)}"`);
+		}
+	});
+	for (const missing of INTENDED_HBA_RULES.slice(rules.length)) problems.push(`the intended rule "${describeRule(missing)}" is missing`);
 	return problems;
 };
-
-const WRONG_PASSWORD_ROLE = "af_api";
 
 export const CHECKS: readonly Check[] = [
 	{
@@ -267,12 +301,6 @@ export const CHECKS: readonly Check[] = [
 		name: "role af_bootstrap exists and is a superuser",
 		covers: [],
 		expression: `exists (select 1 from pg_roles where rolname = '${BOOTSTRAP_ROLE}' and rolsuper)`,
-	},
-	{
-		kind: "sql",
-		name: "no other role is a superuser",
-		covers: [],
-		expression: `not exists (select 1 from pg_roles where rolsuper and rolname <> '${BOOTSTRAP_ROLE}')`,
 	},
 	...APPLICATION_ROLES.map(roleCheck),
 	roleSetting("af_reader", "default_transaction_read_only", "on", "ALTER ROLE af_reader SET default_transaction_read_only = on"),
@@ -331,19 +359,29 @@ export const CHECKS: readonly Check[] = [
 	...policyChecks,
 	// What the statements above cannot show: the passwords, and the connect grant itself as the server enforces it.
 	...APPLICATION_ROLES.map((role): LoginCheck => ({ kind: "login", name: `login as ${role} to agent_factory with the password of its secret file`, covers: [], role })),
-	// A login that works proves the password only when no active rule lets any password in.
+	// A login that works proves the password only when no active rule lets any password in. The rules the server reports
+	// are compared with the intended ones; because that report comes from the file on disk (not necessarily what the
+	// server loaded), the server's behaviour is proven too: the bootstrap role is refused over TCP, and every role that
+	// may log in is refused with a wrong password (its right password is accepted by the login checks above).
 	{
 		kind: "hba",
-		name: "authentication: only scram-sha-256 and reject rules are active (pg_hba_file_rules)",
+		name: "authentication: the active rules are exactly the intended ones (pg_hba_file_rules)",
 		covers: [],
 	},
 	{
-		kind: "login",
-		name: `authentication: a login as ${WRONG_PASSWORD_ROLE} over TCP with a password that is in no secret file is refused`,
+		kind: "refused",
+		name: `authentication: a login as ${BOOTSTRAP_ROLE} over TCP is refused by the rules even with the right password`,
 		covers: [],
-		role: WRONG_PASSWORD_ROLE,
-		wrongPassword: true,
+		role: BOOTSTRAP_ROLE,
+		database: "postgres",
 	},
+	...APPLICATION_ROLES.map((role): LoginCheck => ({
+		kind: "login",
+		name: `authentication: a login as ${role} over TCP with a password that is in no secret file is refused`,
+		covers: [],
+		role,
+		wrongPassword: true,
+	})),
 	{
 		kind: "shell",
 		name: FINISH_REMOVES_SERVICE_FILE,

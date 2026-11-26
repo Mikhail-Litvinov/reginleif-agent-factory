@@ -98,6 +98,16 @@ describe("verify-init against a real database", { concurrency: false }, () => {
 		assert.match(ok.stdout, /^ok {3}role af_reader: login/m);
 	});
 
+	// A container made by hand (the upgrade and the restart-loop procedures) has no compose project: it is named directly.
+	it("--container names the container to check, without a project, and a container that does not exist fails", async () => {
+		const named = await run("node", ["deploy/verify-init.ts", "--container", container, "--with-marker"], { cwd: factoryDir });
+		assert.equal(named.code, 0, named.stdout + named.stderr);
+		assert.match(named.stdout, new RegExp(`all ${CHECKS.length} checks passed`));
+		const missing = await run("node", ["deploy/verify-init.ts", "--container", `${container}-no-such`], { cwd: factoryDir });
+		assert.equal(missing.code, 1, missing.stdout + missing.stderr);
+		assert.equal(missing.stdout.includes("checks passed"), false);
+	});
+
 	it("a wrong argument exits 2 and checks nothing", async () => {
 		const bad = await cli("--nonsense");
 		assert.equal(bad.code, 2, bad.stdout + bad.stderr);
@@ -115,7 +125,7 @@ describe("verify-init against a real database", { concurrency: false }, () => {
 	const mutations: Mutation[] = [
 		{ name: "a role that may create databases", breakIt: () => asBootstrap("ALTER ROLE af_api CREATEDB;"), repair: () => asBootstrap("ALTER ROLE af_api NOCREATEDB;"), fails: ["role af_api:"] },
 		{ name: "a role that may bypass row security", breakIt: () => asBootstrap("ALTER ROLE af_control BYPASSRLS;"), repair: () => asBootstrap("ALTER ROLE af_control NOBYPASSRLS;"), fails: ["role af_control:"] },
-		{ name: "a second superuser", breakIt: () => asBootstrap("ALTER ROLE af_migrator SUPERUSER;"), repair: () => asBootstrap("ALTER ROLE af_migrator NOSUPERUSER;"), fails: ["no other role is a superuser", "role af_migrator:"] },
+		{ name: "a second superuser", breakIt: () => asBootstrap("ALTER ROLE af_migrator SUPERUSER;"), repair: () => asBootstrap("ALTER ROLE af_migrator NOSUPERUSER;"), fails: ["role attributes", "role af_migrator:"] },
 		{ name: "a wrong connection limit of the reader", breakIt: () => asBootstrap("ALTER ROLE af_reader CONNECTION LIMIT 7;"), repair: () => asBootstrap("ALTER ROLE af_reader CONNECTION LIMIT 5;"), fails: ["role af_reader:"] },
 		{ name: "a reader without the statement timeout", breakIt: () => asBootstrap("ALTER ROLE af_reader RESET statement_timeout;"), repair: () => asBootstrap("ALTER ROLE af_reader SET statement_timeout = '30s';"), fails: ["af_reader: statement_timeout"] },
 		{ name: "a reader that may write", breakIt: () => asBootstrap("ALTER ROLE af_reader RESET default_transaction_read_only;"), repair: () => asBootstrap("ALTER ROLE af_reader SET default_transaction_read_only = on;"), fails: ["af_reader: default_transaction_read_only"] },
@@ -233,7 +243,7 @@ describe("verify-init against a real database", { concurrency: false }, () => {
 	it("an initialisation interrupted after the roles (the application database is missing) fails every catalog check", async () => {
 		await asBootstrap("DROP DATABASE agent_factory WITH (FORCE);", "postgres");
 		const results = await verify(true);
-		const sql = results.filter((r) => /^(role|database|schema|extension|default privileges|no other)/.test(r.name));
+		const sql = results.filter((r) => /^(role|database|schema|extension|default privileges)/.test(r.name));
 		assert.ok(sql.length > 10);
 		assert.ok(sql.every((r) => !r.ok && /could not run the catalog checks as af_backup/.test(r.detail)), formatResults(results).join("\n"));
 		// The login WITH the secret file's password fails (no database). The wrong-password probe is a different check: it is
