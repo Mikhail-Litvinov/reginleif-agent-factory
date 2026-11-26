@@ -6,7 +6,11 @@ import { conversationRepo, deviceRepo, deviceSessionRepo, messageRepo, notificat
 import { ownerRepo } from "./owners.ts";
 import { policyRepo } from "./policies.ts";
 import { projectRepo } from "./projects.ts";
+<<<<<<< HEAD
 import { registryRepo } from "./registry.ts";
+=======
+import { rightAnswerRepo, rightGrantRepo, rightRequestRepo, rightsSuspensionRepo, roleAssignmentRepo, roleRepo } from "./rights.ts";
+>>>>>>> p2-repoRights
 import { routingRuleRepo } from "./routing-rules.ts";
 import { settingsRepo } from "./settings.ts";
 import { taskRepo } from "./tasks.ts";
@@ -36,7 +40,16 @@ type RepoParts = {
 	messages: ReturnType<typeof messageRepo>;
 	polls: ReturnType<typeof pollRepo>;
 	pollAnswerRequests: ReturnType<typeof pollAnswerRequestRepo>;
+<<<<<<< HEAD
 	registry: ReturnType<typeof registryRepo>;
+=======
+	roles: ReturnType<typeof roleRepo>;
+	roleAssignments: ReturnType<typeof roleAssignmentRepo>;
+	rightRequests: ReturnType<typeof rightRequestRepo>;
+	rightAnswers: ReturnType<typeof rightAnswerRepo>;
+	rightGrants: ReturnType<typeof rightGrantRepo>;
+	rightsSuspensions: ReturnType<typeof rightsSuspensionRepo>;
+>>>>>>> p2-repoRights
 };
 
 export type Repo = RepoParts & { transaction<T>(operation: (transactionRepo: RepoParts) => Promise<T>): Promise<T> };
@@ -64,7 +77,16 @@ export const createRepo = (db: PostgresJsDatabase<any>): Repo => ({
 	messages: messageRepo(db),
 	polls: pollRepo(db),
 	pollAnswerRequests: pollAnswerRequestRepo(db),
+<<<<<<< HEAD
 	registry: registryRepo(db),
+=======
+	roles: roleRepo(db),
+	roleAssignments: roleAssignmentRepo(db),
+	rightRequests: rightRequestRepo(db),
+	rightAnswers: rightAnswerRepo(db),
+	rightGrants: rightGrantRepo(db),
+	rightsSuspensions: rightsSuspensionRepo(db),
+>>>>>>> p2-repoRights
 	transaction: <T>(operation: (transactionRepo: RepoParts) => Promise<T>): Promise<T> =>
 		db.transaction((tx) => operation(createRepo(tx))),
 });
