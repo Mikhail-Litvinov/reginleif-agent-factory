@@ -1,0 +1,216 @@
+# Unspecified API bodies
+
+The API document leaves these complete shapes open for their handler packages.
+
+## Requests
+
+- `POST /projects/{id}/archive`
+- `PUT /projects/{id}/policy`
+- `DELETE /projects/{id}/routing-rules/{rule}`
+- `DELETE /tasks/{id}`
+- `DELETE /tasks/{id}/dependencies/{dep}`
+- `POST /tasks/{id}/publish`
+- `POST /agents`
+- `PATCH /agents/{id}`
+- `DELETE /agents/{id}`
+- `POST /workers/{id}/heartbeat`
+- `POST /tokens/{id}/rotate`
+- `DELETE /tokens/{id}`
+- `POST /notifications/{id}/ack`
+- `DELETE /devices/{id}`
+- `DELETE /device-sessions/{id}`
+- `POST /hub/messages`
+- `POST /hub/polls`
+- `POST /hub/states`
+- `POST /system/stop-all`
+- `POST /registry/gate`
+- `POST /registry/records`
+- `POST /registry/records/{id}/activate`
+- `POST /registry/records/{id}/revoke`
+- `POST /registry/records/{id}/supersede`
+- `POST /regulation/versions`
+- `POST /regulation/versions/{id}/activate`
+- `POST /regulation/versions/{id}/revoke`
+- `POST /rights/requests/{id}/answer`
+- `POST /rights/grants/{id}/revoke`
+- `POST /personnel/incidents`
+- `POST /personnel/measures`
+- `POST /personnel/measures/{id}/restore`
+- `DELETE /personnel/chief-engineer`
+- `PUT /personnel/replacement-procedure`
+- `POST /robots`
+- `PATCH /robots/{id}`
+- `POST /robots/{id}/configurations`
+- `POST /robots/{id}/assignments`
+- `DELETE /robots/{id}/assignments/{aid}`
+- `POST /robots/{id}/leases`
+- `DELETE /robots/{id}/leases/{number}`
+- `PATCH /robot-zones/{id}`
+- `POST /robot-start-confirmations`
+- `POST /unattended-policies`
+- `POST /robots/{id}/stop`
+- `POST /robots/{id}/release`
+- `POST /robots/{id}/diagnostics`
+- `POST /robot-start-presses`
+- `POST /robot-skills/{id}/qualifications`
+- `POST /robot-experiments/{id}/admissions`
+- `POST /robots/{id}/maintenance`
+- `POST /robots/{id}/reports`
+- `POST /robots/{id}/challenges`
+
+## Responses
+
+- `GET /projects` — 200
+- `POST /projects` — 201
+- `GET /projects/{id}` — 200
+- `PATCH /projects/{id}` — default
+- `POST /projects/{id}/archive` — 200
+- `GET /projects/{id}/policy` — 200
+- `PUT /projects/{id}/policy` — default
+- `GET /projects/{id}/routing-rules` — 200
+- `POST /projects/{id}/routing-rules` — default
+- `DELETE /projects/{id}/routing-rules/{rule}` — default
+- `GET /tasks` — 200
+- `POST /tasks` — 201
+- `GET /tasks/{id}` — 200
+- `DELETE /tasks/{id}` — default
+- `GET /tasks/{id}/revisions` — 200
+- `GET /tasks/{id}/revisions/{n}` — 200
+- `POST /tasks/{id}/dependencies` — 201
+- `DELETE /tasks/{id}/dependencies/{dep}` — default
+- `GET /tasks/{id}/runs` — 200
+- `GET /tasks/{id}/events` — 200
+- `GET /tasks/{id}/artifacts` — 200
+- `GET /tasks/{id}/reviews` — 200
+- `GET /tasks/{id}/decisions` — 200
+- `GET /decisions/{id}` — 200
+- `POST /tasks/{id}/publish` — default
+- `POST /tasks/{id}/cleanup` — 200
+- `POST /tasks/{id}/cleanup` — 202
+- `GET /agents` — 200
+- `GET /agents/{id}` — 200
+- `POST /agents` — 201
+- `PATCH /agents/{id}` — default
+- `DELETE /agents/{id}` — default
+- `GET /workers` — 200
+- `GET /workers/{id}` — 200
+- `PATCH /workers/{id}` — default
+- `POST /workers/register` — 200
+- `POST /workers/{id}/heartbeat` — 200
+- `GET /tokens` — 200
+- `POST /tokens` — 201
+- `POST /tokens/{id}/rotate` — 201
+- `DELETE /tokens/{id}` — default
+- `GET /notifications` — 200
+- `POST /notifications/{id}/ack` — default
+- `POST /runs/{run_id}/artifacts` — default
+- `PUT /artifacts/{id}/content` — default
+- `POST /runs/{run_id}/proposals` — 201
+- `POST /devices` — 201
+- `POST /devices/enroll` — 201
+- `GET /devices` — 200
+- `GET /devices/{id}/sessions` — 200
+- `DELETE /devices/{id}` — default
+- `DELETE /device-sessions/{id}` — default
+- `GET /conversations` — 200
+- `GET /conversations/{id}` — 200
+- `GET /conversations/{id}/messages` — 200
+- `POST /conversations/{id}/messages` — default
+- `POST /hub/messages` — default
+- `POST /hub/polls` — default
+- `POST /hub/states` — default
+- `POST /conversations/{id}/polls/{poll_id}/answer` — 202
+- `GET /conversations/{id}/polls/{poll_id}` — 200
+- `GET /hub/poll-answers` — 200
+- `POST /hub/poll-answers/{id}/result` — default
+- `POST /hub/polls/{id}/result` — default
+- `GET /hub/polls` — 200
+- `POST /system/stop-all` — default
+- `POST /registry/inquiries` — 201
+- `GET /registry/inquiries/{id}` — 200
+- `POST /registry/inquiries/{id}/verdicts` — 201
+- `GET /registry/search` — 200
+- `GET /registry/records` — 200
+- `GET /registry/records/{id}` — 200
+- `POST /registry/records` — 201
+- `GET /registry/drafts` — 200
+- `POST /registry/records/{id}/activate` — default
+- `POST /registry/records/{id}/revoke` — default
+- `POST /registry/records/{id}/supersede` — default
+- `POST /registry/polls` — 201
+- `POST /registry/captures` — default
+- `GET /regulation/versions` — 200
+- `GET /regulation/versions/{id}` — 200
+- `POST /regulation/versions` — 201
+- `GET /regulation/versions/{id}/diff` — 200
+- `POST /regulation/versions/{id}/activate` — default
+- `POST /regulation/versions/{id}/revoke` — default
+- `GET /roles` — 200
+- `GET /roles/{id}` — 200
+- `GET /tasks/{id}/participants` — 200
+- `POST /rights/requests` — 200
+- `POST /rights/requests` — 202
+- `GET /rights/requests` — 200
+- `GET /rights/requests/{id}` — 200
+- `POST /rights/requests/{id}/answer` — default
+- `GET /rights/grants` — 200
+- `POST /rights/grants/{id}/revoke` — default
+- `GET /rights/suspensions` — 200
+- `GET /rights/suspensions/{id}` — 200
+- `POST /rights/suspensions/{id}/restore` — default
+- `GET /personnel/positions` — 200
+- `GET /personnel/positions/{id}` — 200
+- `GET /personnel/profiles` — 200
+- `GET /personnel/profiles/{agent_id}` — 200
+- `GET /personnel/assessments` — 200
+- `GET /personnel/assessments/{id}` — 200
+- `GET /personnel/incidents` — 200
+- `GET /personnel/incidents/{id}` — 200
+- `GET /personnel/measures` — 200
+- `GET /personnel/measures/{id}` — 200
+- `POST /personnel/incidents` — default
+- `POST /personnel/measures` — default
+- `POST /personnel/measures/{id}/restore` — default
+- `POST /personnel/chief-engineer` — default
+- `DELETE /personnel/chief-engineer` — default
+- `PUT /personnel/replacement-procedure` — default
+- `PUT /personnel/mode` — default
+- `GET /robots` — 200
+- `GET /robots/{id}` — 200
+- `POST /robots` — default
+- `PATCH /robots/{id}` — default
+- `GET /robots/{id}/configurations` — 200
+- `POST /robots/{id}/configurations` — default
+- `GET /robots/{id}/state` — 200
+- `POST /robots/{id}/assignments` — default
+- `DELETE /robots/{id}/assignments/{aid}` — default
+- `GET /robots/{id}/leases` — 200
+- `POST /robots/{id}/leases` — default
+- `DELETE /robots/{id}/leases/{number}` — default
+- `GET /robot-zones` — 200
+- `PATCH /robot-zones/{id}` — default
+- `POST /robot-start-confirmations` — default
+- `GET /unattended-policies` — 200
+- `POST /unattended-policies` — default
+- `POST /robots/{id}/stop` — 202
+- `POST /robots/{id}/release` — default
+- `GET /robots/{id}/diagnostics` — 200
+- `POST /robots/{id}/diagnostics` — default
+- `POST /robot-start-presses` — default
+- `GET /robot-skills` — 200
+- `GET /robot-skills/{id}` — 200
+- `POST /robot-skills/{id}/qualifications` — default
+- `POST /robot-experiments/{id}/admissions` — default
+- `GET /robots/{id}/maintenance` — 200
+- `POST /robots/{id}/maintenance` — default
+- `GET /inventory` — 200
+- `GET /robot-experiments` — 200
+- `GET /robot-experiments/{id}` — 200
+- `GET /robot-evidence/{id}` — 200
+- `GET /robot-stages` — 200
+- `POST /robots/{id}/reports` — default
+- `GET /robots/{id}/commands` — 200
+- `POST /robots/{id}/challenges` — default
+- `GET /system/ready` — 200
+- `GET /system/audit` — 200
+- `GET /openapi.json` — 200
