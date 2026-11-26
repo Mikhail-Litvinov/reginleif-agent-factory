@@ -6,6 +6,7 @@ import { conversationRepo, deviceRepo, deviceSessionRepo, messageRepo, notificat
 import { ownerRepo } from "./owners.ts";
 import { policyRepo } from "./policies.ts";
 import { projectRepo } from "./projects.ts";
+import { registryRepo } from "./registry.ts";
 import { routingRuleRepo } from "./routing-rules.ts";
 import { settingsRepo } from "./settings.ts";
 import { taskRepo } from "./tasks.ts";
@@ -35,6 +36,7 @@ type RepoParts = {
 	messages: ReturnType<typeof messageRepo>;
 	polls: ReturnType<typeof pollRepo>;
 	pollAnswerRequests: ReturnType<typeof pollAnswerRequestRepo>;
+	registry: ReturnType<typeof registryRepo>;
 };
 
 export type Repo = RepoParts & { transaction<T>(operation: (transactionRepo: RepoParts) => Promise<T>): Promise<T> };
@@ -62,6 +64,7 @@ export const createRepo = (db: PostgresJsDatabase<any>): Repo => ({
 	messages: messageRepo(db),
 	polls: pollRepo(db),
 	pollAnswerRequests: pollAnswerRequestRepo(db),
+	registry: registryRepo(db),
 	transaction: <T>(operation: (transactionRepo: RepoParts) => Promise<T>): Promise<T> =>
 		db.transaction((tx) => operation(createRepo(tx))),
 });
