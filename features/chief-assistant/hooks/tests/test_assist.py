@@ -220,6 +220,11 @@ class AssistCase(unittest.TestCase):
         log.write(transcript)
         return {"transcript_path": str(transcript), "session_id": "s1", "cwd": str(self.project), "last_assistant_message": final, **extra}
 
+    def seed(self, count, point=10 ** 9):
+        """The wake counter of session s1 as a past wake left it; `point` is the transcript size at that wake."""
+        self.state.mkdir(parents=True, exist_ok=True)
+        ASSIST.save_count("s1", count, point)
+
     def logged(self):
         return [json.loads(line) for line in (self.state / "log.jsonl").read_text(encoding="utf-8").splitlines()]
 
@@ -424,12 +429,28 @@ class BackgroundLivenessTests(AssistCase):
         listed = [{"id": "bz9k", "type": "shell", "status": "completed", "description": "tests"}]
         self.assertIsNotNone(self.assess(log, background_tasks=listed))
 
-    def test_a_listed_task_the_session_never_launched_does_not_count(self):
-        # The registry can list the async hook itself, which is running while it decides; counting it would silence
-        # the idle check for good. Only tasks the transcript shows the session launched count.
+    def test_a_listed_running_task_the_session_never_launched_counts(self):
+        # The payload list is authoritative: a task started by a hook, a command or another session still keeps the
+        # session busy, so the stop is legitimate and no model call is made.
         log = self.session()
-        listed = [{"id": "hook-itself", "type": "shell", "status": "running", "description": "Stop hook"}]
-        self.assertIsNotNone(self.assess(log, background_tasks=listed))
+        listed = [{"id": "from-elsewhere", "type": "shell", "status": "running", "description": "tests"}]
+        self.assertIsNone(self.assess(log, background_tasks=listed))
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.logged()[-1]["decision"], "background")
+
+    def test_every_running_entry_of_the_payload_list_counts_among_several(self):
+        log = self.session()
+        listed = [
+            {"id": "a", "type": "shell", "status": "completed"},
+            {"id": "b", "type": "shell", "status": "failed"},
+            {"id": "c", "type": "agent", "status": "running"},
+            {"id": "d", "type": "shell", "status": "running"},
+        ]
+        self.assertIsNone(self.assess(log, background_tasks=listed))
+        self.assertEqual(self.calls, [])
+        reason = self.logged()[-1]["reason"]
+        self.assertIn("2 background task(s)", reason)
+        self.assertTrue("c" in reason and "d" in reason and "a," not in reason and "b," not in reason)
 
     def test_without_the_payload_list_the_transcript_decides(self):
         log = self.session()
@@ -572,6 +593,41 @@ class PlanDetectionTests(AssistCase):
         log.read_plan(spaced, "Edit")
         self.assertEqual(self.plans_of(log), [spaced])
 
+    def nested(self, relative):
+        path = self.plan.parent / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("# Nested\n- [ ] step\n", encoding="utf-8")
+        return path
+
+    def test_a_plan_in_a_subfolder_named_in_a_shell_command_counts(self):
+        nested = self.nested("sub/work.md")
+        commands = ("cat docs/superpowers/plans/sub/work.md", f"cat {nested}", f"head -3 {nested.as_posix()}",
+                    "cat docs\\superpowers\\plans\\sub\\work.md")
+        for command in commands:
+            with self.subTest(command=command):
+                log = Transcript()
+                log.result(log.call("Bash", {"command": command}), "ok")
+                self.assertEqual(self.plans_of(log), [nested])
+
+    def test_a_quoted_plan_name_with_spaces_in_a_shell_command_counts(self):
+        spaced = self.nested("my plan.md")
+        commands = ('cat "docs/superpowers/plans/my plan.md"', "cat 'docs/superpowers/plans/my plan.md'",
+                    f'Get-Content "{spaced}"', f'cat "{spaced.as_posix()}" | head')
+        for command in commands:
+            with self.subTest(command=command):
+                log = Transcript()
+                log.result(log.call("Bash", {"command": command}), "ok")
+                self.assertEqual(self.plans_of(log), [spaced])
+
+    def test_a_nested_or_spaced_plan_written_by_a_shell_command_counts_as_edited(self):
+        nested = self.nested("sub/work.md")
+        spaced = self.nested("my plan.md")
+        log = Transcript()
+        log.read_plan(self.plan)
+        log.result(log.call("Bash", {"command": "sed -i 's/[ ]/[x]/' docs/superpowers/plans/sub/work.md"}), "ok")
+        log.result(log.call("Bash", {"command": 'echo done >> "docs/superpowers/plans/my plan.md"'}), "ok")
+        self.assertEqual(self.plans_of(log), [spaced, nested, self.plan])
+
     def test_files_that_only_look_like_plans_do_not_count(self):
         for text in ("cat docs/superpowers/plans/feature.md.bak", "cat docs/superpowers/plans/", "cat docs/superpowers/specs/feature.md",
                      "cat docs/superpowers/plans/feature.mdx"):
@@ -689,7 +745,9 @@ class WakeTests(AssistCase):
         self.assertTrue(text.startswith(ASSIST.OWN_MARKER))
         self.assertIn("Wire the hook (plan step two).", text)
         self.assertIn("plan step two is open", text)
-        self.assertNotIn("write the user plainly", text)
+        self.assertIn("check whether the user has written since or work is running", text)
+        self.assertIn("one short line", text)
+        self.assertNotIn("Write the user plainly", text)
 
     def test_every_decision_is_logged_with_verdict_cost_seconds_and_reason(self):
         self.assess(self.session())
@@ -740,133 +798,135 @@ class WakeTests(AssistCase):
 
 
 class LoopGuardTests(AssistCase):
-    """At most MAX_WAKES wakes in a row without a message of the user in between; the last one asks the session to
-    tell the user where it stands; after that the hook stays silent until the user writes."""
+    """At most MAX_WAKES wakes in a row without a message of the user in between, counted in one small state file per
+    session; the last wake asks the session to tell the user where it stands; after that the hook stays silent until
+    the user writes."""
 
-    def woken(self, log, count, same_point=True):
-        for i in range(count):
-            log.assistant(f"Stopped again {i}.")
-            log.user(f"{ASSIST.OWN_MARKER} You stopped with work left: Wire the hook")
-            log.result(log.call("Edit", {"file_path": f"src/w{i}.py"}), "ok")
+    def wake_n(self, log, count):
+        return [self.assess(log, final=f"Stopped at {i}.") for i in range(count)]
+
+    def counter(self):
+        return json.loads(ASSIST.counter_file("s1").read_text(encoding="utf-8"))
 
     def test_the_limit_is_three(self):
         self.assertEqual(ASSIST.MAX_WAKES, 3)
 
-    def test_a_second_wake_at_the_same_idle_point_is_allowed(self):
-        log = self.session()
-        self.woken(log, 1)
-        text = self.assess(log)
-        self.assertIsNotNone(text)
-        self.assertNotIn("write the user plainly", text)
-        self.assertEqual(self.logged()[-1]["wakes"], 1)
-
-    def test_a_wake_without_any_tool_call_is_still_followed_by_another_wake(self):
-        log = self.session()
-        log.assistant("Ok.")
-        log.user(f"{ASSIST.OWN_MARKER} You stopped with work left")
-        self.assertIsNotNone(self.assess(log, final="Understood."))
+    def test_the_first_two_wakes_are_plain_reminders(self):
+        texts = self.wake_n(self.session(), 2)
+        self.assertTrue(all(texts))
+        for text in texts:
+            self.assertNotIn("Write the user plainly", text)
+        self.assertEqual([entry["wakes"] for entry in self.logged()], [0, 1])
 
     def test_the_third_wake_asks_the_session_to_tell_the_user(self):
         log = self.session()
-        self.woken(log, 2)
-        text = self.assess(log)
-        self.assertIn("write the user plainly", text)
+        self.wake_n(log, 2)
+        text = self.assess(log, final="Stopped at 2.")
+        self.assertIn("Write the user plainly", text)
         self.assertIn("Step two: wire the hook", text)
         self.assertIn("why you keep stopping", text)
+        self.assertIn("First check whether the user has written since or work is running", text)
         self.assertEqual(self.logged()[-1]["wakes"], 2)
 
     def test_the_fourth_idle_stop_is_silent_and_makes_no_model_call(self):
         log = self.session()
-        self.woken(log, 3)
-        self.assertIsNone(self.assess(log))
-        self.assertEqual(self.calls, [])
+        self.wake_n(log, 3)
+        asked = len(self.calls)
+        self.assertIsNone(self.assess(log, final="Stopped again."))
+        self.assertEqual(len(self.calls), asked)
         entry = self.logged()[-1]
         self.assertEqual(entry["decision"], "wake-limit")
         self.assertEqual(entry["wakes"], 3)
 
+    def test_a_wake_saves_its_count_and_the_transcript_size_of_the_stop(self):
+        log = self.session()
+        self.assess(log)
+        self.assertEqual(self.counter(), {"count": 1, "point": (self.dir / "session.jsonl").stat().st_size})
+        self.assess(log, final="Again.")
+        self.assertEqual(self.counter()["count"], 2)
+
+    def test_other_sessions_have_their_own_counter_file(self):
+        log = self.session()
+        self.wake_n(log, 3)
+        other = self.session("o")
+        text = ASSIST.assess(self.payload_for(other, "Stopped.", name="other.jsonl", session_id="s2"))
+        self.assertIsNotNone(text)
+        self.assertEqual(self.logged()[-1]["wakes"], 0)
+        self.assertEqual(sorted(p.name for p in self.state.iterdir() if p.name.startswith("wakes")), ["wakes-s1.json", "wakes-s2.json"])
+
     def test_a_message_of_the_user_resets_the_count(self):
         log = self.session()
-        self.woken(log, 3)
+        self.wake_n(log, 3)
         log.user("Why did you stop?")
-        log.assistant("Sorry.")
-        text = self.assess(log)
+        text = self.assess(log, final="Sorry.")
         self.assertIsNotNone(text)
-        self.assertNotIn("write the user plainly", text)
+        self.assertNotIn("Write the user plainly", text)
         self.assertEqual(self.logged()[-1]["wakes"], 0)
-
-    def test_a_user_message_between_wakes_restarts_the_count(self):
-        log = self.session()
-        self.woken(log, 2)
-        log.user("Keep going")
-        self.woken(log, 1)
-        self.assess(log)
+        self.assertIsNotNone(self.assess(log, final="Again after the message."))
         self.assertEqual(self.logged()[-1]["wakes"], 1)
 
-    def test_reflection_wakes_and_notifications_neither_count_nor_reset(self):
+    def test_a_poll_answer_resets_the_count(self):
         log = self.session()
-        self.woken(log, 2)
+        self.wake_n(log, 3)
+        ident = log.call("AskUserQuestion", {"questions": []})
+        log.result(ident, "Option A")
+        self.assertIsNotNone(self.assess(log, final="Going with option A."))
+        self.assertEqual(self.logged()[-1]["wakes"], 0)
+
+    def test_own_wakes_reflection_wakes_and_notifications_neither_count_nor_reset(self):
+        log = self.session()
+        self.wake_n(log, 2)
+        log.user(f"{ASSIST.OWN_MARKER} You stopped with work left: Wire the hook")
         log.user(f"{REFLECT.WAKE_MARKER} Reflection on your previous answer")
-        log.notify("whatever")
-        text = self.assess(log)
+        log.notify("whatever", "toolu_x")
+        text = self.assess(log, final="Stopped after the wakes.")
         self.assertEqual(self.logged()[-1]["wakes"], 2)
-        self.assertIn("write the user plainly", text)
+        self.assertIn("Write the user plainly", text)
 
-    def test_a_wake_in_its_real_task_notification_wrapper_counts_and_finishes_no_task(self):
+    def test_the_assistant_quoting_the_marker_is_not_a_message_of_the_user(self):
         log = self.session()
-        log.background("bg_1")
-        wrapped = ("<task-notification>\n<summary>Stop hook feedback\n</task-notification>\n<system-reminder>\n"
-                   f'Stop hook blocking error from command "Stop": {ASSIST.OWN_MARKER} You stopped with work left\n</system-reminder>')
-        for _ in range(2):
-            log.add("user", wrapped, origin={"kind": "task-notification", "producer": "session-task"})
-        transcript = self.dir / "session.jsonl"
-        log.write(transcript)
-        found = ASSIST.scan(transcript, str(self.project))
-        self.assertEqual(found["wakes"], 2)
-        self.assertEqual([task_id for task_id, _ in found["background"]], ["bg_1"])
-
-    def test_the_assistant_quoting_the_marker_is_not_a_wake(self):
-        log = self.session()
+        self.wake_n(log, 2)
         log.assistant(f"The hook said {ASSIST.OWN_MARKER} earlier.")
-        self.assess(log)
-        self.assertEqual(self.logged()[-1]["wakes"], 0)
+        self.assess(log, final="Stopped.")
+        self.assertEqual(self.logged()[-1]["wakes"], 2)
 
-    def test_the_marker_inside_a_tool_result_is_not_a_wake(self):
+    def test_the_marker_inside_a_tool_result_is_not_a_message_of_the_user(self):
         log = self.session()
+        self.wake_n(log, 2)
         log.result(log.call("Bash", {"command": "grep marker log"}), f"{ASSIST.OWN_MARKER} You stopped")
-        self.assess(log)
-        self.assertEqual(self.logged()[-1]["wakes"], 0)
+        self.assess(log, final="Stopped.")
+        self.assertEqual(self.logged()[-1]["wakes"], 2)
 
-    def test_the_count_lives_in_the_locked_state_so_a_transcript_that_lags_cannot_exceed_the_limit(self):
-        log = self.session()
-        texts = [self.assess(log, final=f"Stopped at {i}.") for i in range(4)]
-        self.assertTrue(all(texts[:3]))
-        self.assertNotIn("write the user plainly", texts[1])
-        self.assertIn("write the user plainly", texts[2])
-        self.assertIsNone(texts[3])
-        self.assertEqual(self.logged()[-1]["decision"], "wake-limit")
-        self.assertEqual(len(self.calls), 3)  # the limit is known before the model is asked
-
-    def test_a_message_of_the_user_resets_the_count_kept_in_the_state(self):
-        log = self.session()
-        for i in range(3):
-            self.assess(log, final=f"Stopped at {i}.")
-        log.user("Why did you stop?")
-        text = self.assess(log, final="Because of the plan.")
-        self.assertIsNotNone(text)
-        self.assertNotIn("write the user plainly", text)
+    def test_a_broken_counter_file_reads_as_zero(self):
+        self.state.mkdir(parents=True, exist_ok=True)
+        ASSIST.counter_file("s1").write_text("{broken", encoding="utf-8")
+        self.assertIsNotNone(self.assess(self.session()))
         self.assertEqual(self.logged()[-1]["wakes"], 0)
-        again = self.assess(log, final="Second stop after the message.")
-        self.assertIsNotNone(again)
-        self.assertEqual(self.logged()[-1]["wakes"], 1)
+        self.assertEqual(self.counter()["count"], 1)
+
+    def test_the_counter_round_trips_and_leaves_no_temporary_file(self):
+        self.seed(2, 100)
+        self.assertEqual(ASSIST.read_count("s1", {"reset_at": -1}), 2)
+        ASSIST.save_count("s1", 3, 200)
+        self.assertEqual(ASSIST.read_count("s1", {"reset_at": 199}), 3)
+        self.assertEqual([p.name for p in self.state.iterdir() if p.name.startswith("wakes")], ["wakes-s1.json"])
+
+    def test_the_count_is_zero_when_the_user_wrote_at_or_after_the_saved_point(self):
+        self.seed(2, 100)
+        self.assertEqual(ASSIST.read_count("s1", {"reset_at": 99}), 2)
+        self.assertEqual(ASSIST.read_count("s1", {"reset_at": 100}), 0)
+        self.assertEqual(ASSIST.read_count("s1", {"reset_at": 500}), 0)
+
+    def test_a_missing_counter_reads_as_zero(self):
+        self.assertEqual(ASSIST.read_count("nobody", {"reset_at": -1}), 0)
 
     def test_two_checks_for_two_different_stops_at_count_two_issue_one_third_wake(self):
         payloads = []
         for name, prefix, pad in (("one.jsonl", "a", "p"), ("two.jsonl", "b", "padding " * 30)):
             log = self.session(prefix)
-            self.woken(log, 2)
             log.assistant(pad)
-            log.assistant("Stopped.")
             payloads.append(self.payload_for(log, "Stopped.", name=name))
+        self.seed(2)
         barrier = threading.Barrier(2)
         self.during_ask = lambda: barrier.wait(timeout=30)
         results = []
@@ -879,11 +939,12 @@ class LoopGuardTests(AssistCase):
         self.assertEqual(sum(1 for r in results if r), 1)
         self.assertEqual(sorted(entry["decision"] for entry in self.logged()), ["idle", "wake-limit"])
 
-    def test_a_legit_stop_after_a_wake_ends_the_chain_quietly(self):
-        self.answer = dict(OK)
+    def test_a_legit_stop_after_a_wake_ends_the_chain_quietly_and_counts_nothing(self):
         log = self.session()
-        self.woken(log, 1)
+        self.assess(log)
+        self.answer = dict(OK)
         self.assertIsNone(self.assess(log, final="I am blocked: which database do I use?"))
+        self.assertEqual(self.counter()["count"], 1)
 
 
 class MixedRecordTests(AssistCase):
@@ -894,24 +955,20 @@ class MixedRecordTests(AssistCase):
         block = {"type": "tool_result", "tool_use_id": tool_use_id, "content": "output"}
         log.add("user", [block, {"type": "text", "text": text}], **extra)
 
-    def woken(self, log, count):
-        for i in range(count):
-            log.assistant(f"Stopped again {i}.")
-            log.user(f"{ASSIST.OWN_MARKER} You stopped with work left: Wire the hook")
-
     def test_the_user_text_next_to_a_tool_result_resets_the_wake_counter(self):
         log = self.session()
-        self.woken(log, 3)
+        self.seed(3, 1)  # the first user message sits at offset 0, before the saved point
         self.mixed(log, "Why did you stop?")
-        self.assess(log)
+        self.assertIsNotNone(self.assess(log))
         self.assertEqual(self.logged()[-1]["wakes"], 0)
-        self.assertEqual(len(self.calls), 1)
 
-    def test_a_wake_text_next_to_a_tool_result_still_counts_as_a_wake(self):
+    def test_a_wake_text_next_to_a_tool_result_does_not_reset_the_counter(self):
         log = self.session()
+        self.seed(3, 1)
         self.mixed(log, f"{ASSIST.OWN_MARKER} You stopped with work left")
-        self.assess(log)
-        self.assertEqual(self.logged()[-1]["wakes"], 1)
+        self.assertIsNone(self.assess(log))
+        self.assertEqual(self.logged()[-1]["decision"], "wake-limit")
+        self.assertEqual(self.calls, [])
 
     def test_a_notification_text_next_to_a_tool_result_finishes_its_task(self):
         log = self.session()
@@ -926,141 +983,111 @@ class MixedRecordTests(AssistCase):
         self.assess(log)
         self.assertEqual(len(self.calls), 1)
 
-    def test_a_launch_result_and_a_user_text_in_one_record_keep_the_task_and_reset_the_counter(self):
+    def test_a_record_of_untracked_tool_results_only_keeps_the_count(self):
         log = self.session()
-        self.woken(log, 3)
-        ident = log.call("Bash", {"run_in_background": True, "command": "bun test"})
-        block = {"type": "tool_result", "tool_use_id": ident, "content": "started"}
-        log.add("user", [block, {"type": "text", "text": "Keep going"}], toolUseResult={"backgroundTaskId": "bz9k"})
-        self.assertIsNone(self.assess(log))
-        self.assertEqual(self.logged()[-1]["decision"], "background")
-        self.assertEqual(self.logged()[-1]["wakes"], 0)
-
-    def test_a_record_of_untracked_tool_results_only_is_still_skipped_without_effect(self):
-        log = self.session()
-        self.woken(log, 2)
+        self.seed(2)
         log.result(log.call("Bash", {"command": "ls"}), "a b c")
         self.assess(log)
         self.assertEqual(self.logged()[-1]["wakes"], 2)
 
 
 class SupersededVerdictTests(AssistCase):
-    """The model takes up to a minute. When anything was appended to the transcript after the stop point, the verdict
-    is stale: the user wrote, or a new turn began. It is discarded, and the check and the wake counter update happen
+    """The model takes up to a minute. The transcript size is taken at the start. When, at the end, the file holds
+    anything after it but the stop's own bookkeeping, or a line that is not complete JSON, the verdict may be stale
+    and a doubt counts as stale: the hook stays silent and counts nothing. The check, the count and the emit happen
     under one lock."""
 
-    def stale_by(self, build):
-        self.during_ask = lambda: self.append(*self.after_stop(build))
-        self.assertIsNone(self.assess(self.session()))
+    def stopped(self, name="session.jsonl"):
+        log = self.session()
+        log.assistant("Step one is done.")
+        return self.payload_for(log, "Step one is done.", name=name)
+
+    def stale_by(self, grow):
+        self.during_ask = grow
+        emitted = []
+        payload = self.stopped()
+        self.assertIsNone(ASSIST.assess(payload, emitted.append))
+        self.assertEqual(emitted, [])
         self.assertEqual(len(self.calls), 1)
         self.assertEqual(self.logged()[-1]["decision"], "superseded")
-        self.assertEqual(ASSIST.load_state(), {})
+        self.assertFalse(ASSIST.counter_file("s1").exists())
 
-    def test_a_user_message_during_the_model_call_discards_the_verdict(self):
-        self.stale_by(lambda log: log.user("Wait, change of plans"))
-
-    def test_a_new_assistant_turn_during_the_model_call_discards_the_verdict(self):
-        self.stale_by(lambda log: log.assistant("Continuing with step two"))
-
-    def test_a_new_tool_call_during_the_model_call_discards_the_verdict(self):
-        self.stale_by(lambda log: log.call("Edit", {"file_path": "src/b.py"}))
-
-    def test_a_tool_result_during_the_model_call_discards_the_verdict(self):
-        self.stale_by(lambda log: log.result("toolu_1", "ok"))
-
-    def test_a_notification_during_the_model_call_discards_the_verdict(self):
-        self.stale_by(lambda log: log.notify("bz9k"))
-
-    def test_records_that_are_no_activity_do_not_discard_the_verdict(self):
-        records = [{"type": "queue-operation", "operation": "enqueue", "timestamp": "2026-01-01T11:00:00.000Z", "content": ""},
-                   {"type": "system", "subtype": "stop_hook_summary", "timestamp": "2026-01-01T11:00:01.000Z"}]
-        self.during_ask = lambda: self.append(*records)
-        self.assertIsNotNone(self.assess(self.session()))
+    def fresh_by(self, grow):
+        self.during_ask = grow
+        emitted = []
+        text = ASSIST.assess(self.stopped(), emitted.append)
+        self.assertIsNotNone(text)
+        self.assertEqual(emitted, [text])
         self.assertEqual(self.logged()[-1]["decision"], "idle")
 
-    def test_the_final_message_that_lands_in_the_file_late_is_not_a_new_turn(self):
-        log = self.session()
-        log.write(self.dir / "session.jsonl")
-        final = "Step one is done."
-        payload = {"transcript_path": str(self.dir / "session.jsonl"), "session_id": "s1", "cwd": str(self.project), "last_assistant_message": final}
-        self.during_ask = lambda: self.append(*self.after_stop(lambda extra: extra.assistant(final)))
-        self.assertIsNotNone(ASSIST.assess(payload))
+    def append_raw(self, text):
+        with open(self.dir / "session.jsonl", "ab") as handle:
+            handle.write(text.encode("utf-8"))
 
-    def test_a_user_message_that_lands_before_the_scan_starts_discards_the_verdict(self):
-        """The stop point is fixed before anything is read; a record appended after that is never part of the baseline."""
-        real = ASSIST.scan
+    def late(self, build):
+        return lambda: self.append(*self.after_stop(build))
 
-        def scan(*args, **kwargs):
-            self.append(*self.after_stop(lambda log: log.user("Wait, change of plans")))
-            return real(*args, **kwargs)
+    def test_a_user_message_during_the_model_call_discards_the_verdict(self):
+        self.stale_by(self.late(lambda log: log.user("Wait, change of plans")))
 
-        with mock.patch.object(ASSIST, "scan", scan):
-            self.assertIsNone(self.assess(self.session()))
-        self.assertEqual(self.logged()[-1]["decision"], "superseded")
-        self.assertEqual(ASSIST.load_state(), {})
+    def test_a_tool_call_during_the_model_call_discards_the_verdict(self):
+        self.stale_by(self.late(lambda log: log.call("Edit", {"file_path": "src/b.py"})))
 
-    def test_a_new_turn_with_the_same_final_text_is_not_the_final_message_of_the_stop(self):
-        final = "Step one is done."
-        self.during_ask = lambda: self.append(*self.after_stop(lambda log: log.assistant(final)))
-        self.assertIsNone(self.assess(self.session(), final=final))
-        self.assertEqual(self.logged()[-1]["decision"], "superseded")
-        self.assertEqual(ASSIST.load_state(), {})
+    def test_a_second_assistant_text_during_the_model_call_discards_the_verdict(self):
+        self.stale_by(self.late(lambda log: (log.assistant("Continuing"), log.assistant("with step two"))))
 
-    def test_a_late_record_with_the_final_text_must_continue_the_chain_of_the_stop(self):
-        final = "Step one is done."
-        payload = self.payload_for(self.session(), final)
-        stray = Transcript(parent="nowhere", prefix="stray")
-        stray.assistant(final)
-        self.during_ask = lambda: self.append(*stray.entries)
+    def test_a_notification_during_the_model_call_discards_the_verdict(self):
+        self.stale_by(self.late(lambda log: log.notify("bz9k", "toolu_x")))
+
+    def test_queued_input_during_the_model_call_discards_the_verdict(self):
+        self.stale_by(self.late(lambda log: log.attach_notification("bz9k")))
+
+    def test_a_tool_result_during_the_model_call_discards_the_verdict(self):
+        self.stale_by(self.late(lambda log: log.result("toolu_1", "ok")))
+
+    def test_a_queue_operation_during_the_model_call_discards_the_verdict(self):
+        record = {"type": "queue-operation", "operation": "enqueue", "timestamp": "2026-01-01T11:00:00.000Z", "content": "typed"}
+        self.stale_by(lambda: self.append(record))
+
+    def test_a_half_written_line_during_the_model_call_discards_the_verdict(self):
+        self.stale_by(lambda: self.append_raw('{"type": "assistant", "mess'))
+
+    def test_a_complete_line_that_is_not_json_during_the_model_call_discards_the_verdict(self):
+        self.stale_by(lambda: self.append_raw("not json at all\n"))
+
+    def test_system_records_during_the_model_call_do_not_discard_the_verdict(self):
+        self.fresh_by(self.late(lambda log: (log.system("stop_hook_summary"), log.system("turn_duration"))))
+
+    def test_an_attachment_that_is_not_queued_input_does_not_discard_the_verdict(self):
+        self.fresh_by(lambda: self.append({"type": "attachment", "timestamp": "2026-01-01T11:00:00.000Z", "attachment": {"type": "hook_success"}}))
+
+    def test_the_final_message_that_lands_in_the_file_late_does_not_discard_the_verdict(self):
+        self.fresh_by(self.late(lambda log: log.assistant("Step one is done.")))
+
+    def test_a_transcript_that_ends_inside_a_line_is_not_identified_and_makes_no_model_call(self):
+        payload = self.stopped()
+        self.append_raw('{"type": "assis')
         self.assertIsNone(ASSIST.assess(payload))
-        self.assertEqual(self.logged()[-1]["decision"], "superseded")
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.logged()[-1]["decision"], "unidentified")
 
-    def test_the_late_final_message_is_accepted_once_with_its_thinking_record_and_no_more(self):
-        final = "Step one is done."
-        payload = self.payload_for(self.session(), final)
-        self.during_ask = lambda: self.append(*self.after_stop(lambda log: (log.add("assistant", [{"type": "thinking", "thinking": "hm"}]), log.assistant(final))))
-        self.assertIsNotNone(ASSIST.assess(payload))
-        ASSIST.save_state({})
-        payload = self.payload_for(self.session(), final)
-        self.during_ask = lambda: self.append(*self.after_stop(lambda log: (log.assistant(final), log.assistant(final))))
+    def test_an_empty_transcript_is_not_identified(self):
+        (self.dir / "session.jsonl").write_text("", encoding="utf-8")
+        payload = {"transcript_path": str(self.dir / "session.jsonl"), "session_id": "s1", "cwd": str(self.project)}
         self.assertIsNone(ASSIST.assess(payload))
-        self.assertEqual(self.logged()[-1]["decision"], "superseded")
+        self.assertEqual(self.logged()[-1]["decision"], "unidentified")
 
     def test_a_superseded_stop_leaves_the_next_stop_free_to_wake(self):
-        self.during_ask = lambda: self.append(*self.after_stop(lambda log: log.user("Wait")))
+        self.during_ask = self.late(lambda log: log.user("Wait"))
         log = self.session()
         self.assertIsNone(self.assess(log))
         self.during_ask = None
-        self.assertIsNotNone(self.assess(log))
+        self.assertIsNotNone(self.assess(log, final="Stopped again."))
+        self.assertEqual(self.logged()[-1]["wakes"], 0)
 
-    def test_the_same_stop_never_wakes_twice(self):
-        log = self.session()
-        log.assistant("Step one is done.")
-        log.write(self.dir / "session.jsonl")
-        payload = {"transcript_path": str(self.dir / "session.jsonl"), "session_id": "s1", "cwd": str(self.project), "last_assistant_message": "Step one is done."}
-        self.assertIsNotNone(ASSIST.assess(payload))
-        self.assertIsNone(ASSIST.assess(payload))
-        self.assertEqual(self.logged()[-1]["decision"], "duplicate")
-
-    def test_two_checks_at_once_wake_exactly_once(self):
-        log = self.session()
-        log.assistant("Step one is done.")
-        log.write(self.dir / "session.jsonl")
-        payload = {"transcript_path": str(self.dir / "session.jsonl"), "session_id": "s1", "cwd": str(self.project), "last_assistant_message": "Step one is done."}
-        barrier = threading.Barrier(2)
-        self.during_ask = lambda: barrier.wait(timeout=30)
-        results = []
-        threads = [threading.Thread(target=lambda: results.append(ASSIST.assess(dict(payload)))) for _ in range(2)]
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join(timeout=60)
-        self.assertEqual(len(results), 2)
-        self.assertEqual(sum(1 for r in results if r), 1)
-
-    def test_the_check_the_state_read_and_the_state_write_all_happen_inside_the_lock(self):
+    def test_the_check_the_save_and_the_emit_all_happen_inside_the_lock_in_that_order(self):
         order = []
-        real = {name: getattr(ASSIST, name) for name in ("state_lock", "appended_after", "load_state", "save_state")}
+        real = {name: getattr(ASSIST, name) for name in ("state_lock", "grew_beyond", "save_count")}
 
         @contextlib.contextmanager
         def lock():
@@ -1075,11 +1102,28 @@ class SupersededVerdictTests(AssistCase):
                 return real[name](*args, **kwargs)
             return inner
 
-        with mock.patch.object(ASSIST, "state_lock", lock), mock.patch.object(ASSIST, "appended_after", wrap("appended_after", "check")), \
-                mock.patch.object(ASSIST, "load_state", wrap("load_state", "load")), \
-                mock.patch.object(ASSIST, "save_state", wrap("save_state", "save")):
-            self.assertIsNotNone(self.assess(self.session()))
-        self.assertEqual(order, ["enter", "check", "load", "save", "exit"])
+        payload = self.stopped()
+        with mock.patch.object(ASSIST, "state_lock", lock), mock.patch.object(ASSIST, "grew_beyond", wrap("grew_beyond", "check")), \
+                mock.patch.object(ASSIST, "save_count", wrap("save_count", "save")):
+            text = ASSIST.assess(payload, lambda wake: order.append("emit"))
+        self.assertIsNotNone(text)
+        self.assertEqual(order, ["enter", "check", "save", "emit", "exit"])
+
+    def test_nothing_is_emitted_at_the_wake_limit(self):
+        self.seed(3)
+        emitted = []
+        self.assertIsNone(ASSIST.assess(self.payload_for(self.session(), "Stopped."), emitted.append))
+        self.assertEqual(emitted, [])
+        self.assertEqual(self.logged()[-1]["decision"], "wake-limit")
+
+    def test_the_wake_limit_found_inside_the_lock_emits_nothing(self):
+        """Another check took the third wake while this one was thinking."""
+        self.seed(2)
+        self.during_ask = lambda: self.seed(3)
+        emitted = []
+        self.assertIsNone(ASSIST.assess(self.payload_for(self.session(), "Stopped."), emitted.append))
+        self.assertEqual(emitted, [])
+        self.assertEqual(self.logged()[-1]["decision"], "wake-limit")
 
     def test_the_lock_can_be_taken_again_after_it_is_released(self):
         with ASSIST.state_lock():
@@ -1087,17 +1131,6 @@ class SupersededVerdictTests(AssistCase):
         with ASSIST.state_lock():
             pass
         self.assertTrue((self.state / "state.lock").exists())
-
-    def test_the_state_is_replaced_atomically_and_survives_a_reload(self):
-        ASSIST.save_state({"s1": {"point": 10}})
-        self.assertEqual(ASSIST.load_state(), {"s1": {"point": 10}})
-        self.assertEqual([p.name for p in self.state.iterdir() if p.name.startswith("wakes")], ["wakes.json"])
-
-    def test_a_missing_or_broken_state_file_reads_as_empty(self):
-        self.assertEqual(ASSIST.load_state(), {})
-        self.state.mkdir(parents=True, exist_ok=True)
-        (self.state / "wakes.json").write_text("{broken", encoding="utf-8")
-        self.assertEqual(ASSIST.load_state(), {})
 
 
 class SharedAskTests(AssistCase):
