@@ -42,7 +42,7 @@ const decisions = [
 
 function relayPayload(schema: z.ZodType): z.ZodType {
   if (schema instanceof z.ZodObject) {
-    return schema.extend({ press_id: z.string().uuid(), telegram_user_id: z.number().int() });
+    return schema.extend({ press_id: z.string(), telegram_user_id: z.number().int() });
   }
   if (schema instanceof z.ZodUnion) {
     const options = schema.options.map((option) => {

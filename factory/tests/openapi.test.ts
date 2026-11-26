@@ -18,7 +18,8 @@ test('relay decisions carry the press identity with the decision payload', () =>
   assert.ok(route && typeof route.request !== 'string');
   const body = { revision_number: 1, reason: 'reason', press_id: '00000000-0000-4000-8000-000000000001', telegram_user_id: 123 };
   assert.equal(route.request.safeParse(body).success, true);
-  assert.equal(route.request.safeParse({ ...body, press_id: 'press' }).success, false);
+  assert.equal(route.request.safeParse({ ...body, press_id: 'press' }).success, true);
+  assert.equal(route.request.safeParse({ ...body, press_id: 42 }).success, false);
 });
 
 test('relay resolve-block preserves the call-owner variant', () => {
@@ -189,12 +190,55 @@ test('idempotency keys carry the documented length and character constraints', (
   assert.ok(parameter.schema.pattern);
 });
 
-test('worker registration requires a UUID machine identifier and an integer contract version', () => {
+test('worker registration takes a text machine identifier and an integer contract version', () => {
   const route = routes.find((entry) => entry.method === 'POST' && entry.path === '/workers/register');
   assert.ok(route && typeof route.request !== 'string');
-  const body = { machine_id: '00000000-0000-4000-8000-000000000001', name: 'worker', platform: 'linux', capabilities: {}, version: 'example', contract_version: 1 };
+  const body = { machine_id: 'host-example', name: 'worker', platform: 'linux', capabilities: {}, version: 'example', contract_version: 1 };
   assert.equal(route.request.safeParse(body).success, true);
-  assert.equal(route.request.safeParse({ ...body, machine_id: 'host-example' }).success, false);
+  assert.equal(route.request.safeParse({ ...body, machine_id: 7 }).success, false);
+});
+
+// Text-typed `*_id` fields, each by the database column that backs it. A column's own definition beats api.md's
+// general rule that every `*_id` is a uuid (api.md:375), which holds only where no column says otherwise.
+const textIdColumns: Record<string, string> = {
+  machine_id: 'database.md:47 workers.machine_id text unique; database.md:85 registry_records.machine_id text nullable',
+  press_id: 'database.md:61 task_decisions.press_id text nullable; database.md:85 registry_records.press_id text unique where not null',
+};
+const textIdFields = new Set(Object.keys(textIdColumns));
+
+test('a *_id field backed by a text column is not typed as a uuid in the generated contract', () => {
+  const document: unknown = JSON.parse(generateOpenApi(routes));
+  const isUuid = (schema: unknown): boolean => {
+    if (!schema || typeof schema !== 'object') return false;
+    const node = schema as Record<string, unknown>;
+    if (node.format === 'uuid') return true;
+    return ['anyOf', 'oneOf', 'allOf'].some((key) => Array.isArray(node[key]) && (node[key] as unknown[]).some(isUuid));
+  };
+  const seen = new Set<string>();
+  const uuidTyped: string[] = [];
+  const visit = (node: unknown, where: string): void => {
+    if (Array.isArray(node)) {
+      node.forEach((item, index) => visit(item, `${where}[${index}]`));
+      return;
+    }
+    if (!node || typeof node !== 'object') return;
+    const record = node as Record<string, unknown>;
+    const properties = record.properties && typeof record.properties === 'object' ? record.properties as Record<string, unknown> : {};
+    for (const [name, schema] of Object.entries(properties)) {
+      if (!textIdFields.has(name)) continue;
+      seen.add(name);
+      if (isUuid(schema)) uuidTyped.push(`${where}.${name}`);
+    }
+    if (typeof record.name === 'string' && 'in' in record && textIdFields.has(record.name)) {
+      seen.add(record.name);
+      if (isUuid(record.schema)) uuidTyped.push(`${where}.${record.name}`);
+    }
+    for (const [key, value] of Object.entries(record)) visit(value, `${where}.${key}`);
+  };
+  visit(document, '');
+  assert.deepEqual(uuidTyped, []);
+  // Every text column must be found in the document, so the walk cannot pass vacuously.
+  assert.deepEqual([...seen].sort(), [...textIdFields].sort());
 });
 
 test('the registry gate describes its documented pass response', () => {
