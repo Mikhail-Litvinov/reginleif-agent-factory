@@ -31,8 +31,10 @@ NOTIFICATION = re.compile(r"<task-notification>(.*?)</task-notification>", re.DO
 TASK_ID = re.compile(r"<task-id>\s*([^<\s]+)\s*</task-id>")
 TASK_STATUS = re.compile(r"<status>\s*[^<\s]")
 # The two TaskStop errors that mean "this task is not running" (see _stop_succeeded); matched against the whole text.
-NOT_RUNNING = re.compile(r"<tool_use_error>Task (?P<id>[A-Za-z0-9_-]+) is not running \(status: [A-Za-z_]+\)</tool_use_error>")
-NOT_FOUND = re.compile(r"<tool_use_error>No task found with ID: (?P<id>[A-Za-z0-9_-]+)\.(?: [^<]*)?</tool_use_error>")
+# Only a terminal status proves the task is gone (sampled: "completed"; the others are the harness's other end states),
+# and "No task found" only with the one suffix Claude Code adds (the list of other tasks), not other trailing text.
+NOT_RUNNING = re.compile(r"<tool_use_error>Task (?P<id>[A-Za-z0-9_-]+) is not running \(status: (?:completed|failed|killed|stopped)\)</tool_use_error>")
+NOT_FOUND = re.compile(r"<tool_use_error>No task found with ID: (?P<id>[A-Za-z0-9_-]+)\. Background agents running or waiting: [^<]*</tool_use_error>")
 
 
 def _label(use):
@@ -106,6 +108,30 @@ class Tasks:
         self.finished = set()  # ids with a terminal task notification
         self._uses = {}  # tool_use id -> {"name": ..., "label": ...}
         self._stops = {}  # tool_use id of a TaskStop call still waiting for its result -> the task id it targets
+
+    def to_state(self):
+        """The whole state as plain JSON data, so a reader of a growing transcript can continue where it stopped
+        (`from_state`); feeding the rest of the records to the restored object gives what one pass over all would."""
+        return {"owned": self.owned, "stopped": sorted(self.stopped), "finished": sorted(self.finished),
+                "uses": self._uses, "stops": self._stops}
+
+    @classmethod
+    def from_state(cls, state):
+        """The Tasks a `to_state` result describes. Raises ValueError for data of another shape."""
+        if not isinstance(state, dict):
+            raise ValueError("tasks state is not an object")
+        tasks = cls()
+        for name, target in (("owned", tasks.owned), ("uses", tasks._uses), ("stops", tasks._stops)):
+            value = state.get(name)
+            if not isinstance(value, dict):
+                raise ValueError(f"tasks state has no {name}")
+            target.update(value)
+        for name, target in (("stopped", tasks.stopped), ("finished", tasks.finished)):
+            value = state.get(name)
+            if not isinstance(value, list):
+                raise ValueError(f"tasks state has no {name}")
+            target.update(value)
+        return tasks
 
     def feed(self, record):
         if not isinstance(record, dict):

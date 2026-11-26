@@ -17,7 +17,7 @@ import tempfile
 import threading
 import time
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -81,8 +81,24 @@ class Transcript:
         """A message the user sent from Telegram: origin kind channel."""
         return self.add("user", text, origin={"kind": "channel", "server": "plugin:telegram-hub:telegram-hub"})
 
-    def assistant(self, text):
-        return self.add("assistant", [{"type": "text", "text": text}])
+    IMAGE = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgo="}}
+
+    def human_image(self):
+        """A message of the user that is a pasted image only: list content of image blocks, no text block (as recorded)."""
+        return self.add("user", [dict(self.IMAGE)], origin={"kind": "human"})
+
+    def queued(self, blocks, origin=None):
+        """What the user typed while the assistant worked, as Claude Code records it: a queued_command attachment whose
+        prompt is a list of blocks (an image and its caption) instead of a string; the origin sits in the attachment."""
+        attachment = {"type": "queued_command", "prompt": blocks, "origin": origin or {"kind": "human"}}
+        self.entries.append(self.link({"type": "attachment", "timestamp": self.stamp(), "attachment": attachment}))
+
+    def assistant(self, text, message_id=None):
+        """An assistant text record; Claude Code writes one record per content block, all with the API message's id."""
+        entry = self.add("assistant", [{"type": "text", "text": text}])
+        if message_id:
+            entry["message"]["id"] = message_id
+        return entry
 
     def call(self, name, args, stamp=None):
         self.ids += 1
@@ -181,7 +197,7 @@ class AssistCase(unittest.TestCase):
         self.state = self.dir / "state"
         for target, name, value in (
             (ASSIST, "STATE_DIR", self.state), (ASSIST, "LOG_FILE", self.state / "log.jsonl"),
-            (REFLECT, "HOME_CLAUDE", self.home), (ASSIST, "now", lambda: NOW),
+            (REFLECT, "HOME_CLAUDE", self.home), (ASSIST, "now", lambda: NOW), (REFLECT, "WAKE_DIR", self.dir / "reflect-wake"),
         ):
             patcher = mock.patch.object(target, name, value)
             patcher.start()
@@ -252,7 +268,10 @@ class AssistCase(unittest.TestCase):
         ASSIST.save_count("s1", count, point)
 
     def logged(self):
-        return [json.loads(line) for line in (self.state / "log.jsonl").read_text(encoding="utf-8").splitlines()]
+        path = self.state / "log.jsonl"
+        if not path.exists():
+            return []
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
 
 class LegitStopTests(AssistCase):
@@ -493,6 +512,14 @@ class BackgroundLivenessTests(AssistCase):
         # session busy, so the stop is legitimate and no model call is made.
         log = self.session()
         listed = [{"id": "from-elsewhere", "type": "shell", "status": "running", "description": "tests"}]
+        self.assertIsNone(self.assess(log, background_tasks=listed))
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.logged()[-1]["decision"], "background")
+
+    def test_a_listed_pending_task_counts_as_live_like_a_running_one(self):
+        # A task that is queued but not yet started (status pending) still keeps the session busy.
+        log = self.session()
+        listed = [{"id": "q1", "type": "agent", "status": "pending", "description": "review"}]
         self.assertIsNone(self.assess(log, background_tasks=listed))
         self.assertEqual(self.calls, [])
         self.assertEqual(self.logged()[-1]["decision"], "background")
@@ -1132,6 +1159,24 @@ class WakeTests(AssistCase):
         self.assertEqual(self.logged()[-1]["decision"], "crashed")
         self.assertIn("boom", self.logged()[-1]["error"])
 
+    def test_a_crash_with_an_unwritable_log_still_never_holds_the_turn(self):
+        # The log directory sits under a regular file, so creating it fails: the crash path's own logging must be
+        # best-effort, or the hook would die with a traceback instead of letting the turn end.
+        log = self.session()
+        log.assistant("done")
+        transcript = self.dir / "session.jsonl"
+        log.write(transcript)
+        blocker = self.dir / "not-a-directory"
+        blocker.write_text("x", encoding="utf-8")
+        payload = {"transcript_path": str(transcript), "session_id": "s1", "cwd": str(self.project)}
+        with mock.patch.object(REFLECT, "ask", side_effect=RuntimeError("boom")), \
+                mock.patch.object(ASSIST, "assess", side_effect=RuntimeError("boom")), \
+                mock.patch.object(ASSIST, "STATE_DIR", blocker / "state"), \
+                mock.patch.object(ASSIST, "LOG_FILE", blocker / "state" / "log.jsonl"), \
+                mock.patch.object(ASSIST.sys, "stdin", io.StringIO(json.dumps(payload))), \
+                mock.patch.object(ASSIST.sys, "stdout", io.TextIOWrapper(io.BytesIO(), encoding="utf-8")):
+            ASSIST.main()
+
 
 class LoopGuardTests(AssistCase):
     """At most MAX_WAKES wakes in a row without a message of the user in between, counted in one small state file per
@@ -1489,6 +1534,60 @@ class MixedRecordTests(AssistCase):
         self.assess(log)
         self.assertEqual(len(self.calls), 1)
 
+    def test_an_image_only_message_of_the_user_resets_the_counter(self):
+        # No text event comes out of such a record, but it is the user's input all the same.
+        log = self.session()
+        self.seed(3, 1)
+        log.human_image()
+        self.assertIsNotNone(self.assess(log))
+        self.assertEqual(self.logged()[-1]["wakes"], 0)
+
+    def test_a_queued_prompt_with_an_image_and_a_caption_resets_the_counter_and_the_caption_reaches_the_model(self):
+        log = self.session()
+        self.seed(3, 1)
+        log.queued([dict(Transcript.IMAGE), {"type": "text", "text": "Look at this screenshot first"}])
+        self.calls.clear()
+        self.assertIsNotNone(self.assess(log))
+        self.assertEqual(self.logged()[-1]["wakes"], 0)
+        users = self.calls[0]["text"].split("USER'S LATEST MESSAGES\n", 1)[1].split("\n\n", 1)[0]
+        self.assertIn("Look at this screenshot first", users)
+
+    def test_a_queued_prompt_of_an_image_alone_resets_the_counter(self):
+        log = self.session()
+        self.seed(3, 1)
+        log.queued([dict(Transcript.IMAGE)])
+        self.assertIsNotNone(self.assess(log))
+        self.assertEqual(self.logged()[-1]["wakes"], 0)
+
+    def test_a_queued_prompt_of_text_blocks_from_telegram_resets_the_counter_but_one_of_the_hub_does_not(self):
+        origin = {"kind": "channel", "server": "plugin:telegram-hub:telegram-hub"}
+        log = self.session()
+        self.seed(3, 1)
+        log.queued([dict(Transcript.IMAGE), {"type": "text", "text": "Why did you stop?"}], origin=origin)
+        self.assertIsNotNone(self.assess(log))
+        self.assertEqual(self.logged()[-1]["wakes"], 0)
+        log = self.session()
+        self.seed(3, 1)
+        log.queued([{"type": "text", "text": "[SYSTEM NOTIFICATION] a hub notice"}], origin=origin)
+        self.assertIsNone(self.assess(log))
+        self.assertEqual(self.logged()[-1]["decision"], "wake-limit")
+
+    def test_a_queued_prompt_that_is_not_the_users_neither_resets_nor_reaches_the_model_as_the_users_words(self):
+        log = self.session()
+        self.seed(3, 1)
+        log.queued([{"type": "text", "text": "Stop hook feedback from a plugin"}], origin={"kind": "task-notification", "producer": "session-task"})
+        self.calls.clear()
+        self.assertIsNone(self.assess(log))
+        self.assertEqual(self.logged()[-1]["decision"], "wake-limit")
+        self.assertEqual(self.calls, [])
+
+    def test_a_human_record_holding_only_a_tool_result_does_not_reset_the_counter(self):
+        log = self.session()
+        self.seed(3, 1)
+        log.result(log.call("Bash", {"command": "ls"}), "a b c", origin={"kind": "human"})
+        self.assertIsNone(self.assess(log))
+        self.assertEqual(self.logged()[-1]["decision"], "wake-limit")
+
     def test_a_record_of_untracked_tool_results_only_keeps_the_count(self):
         log = self.session()
         self.seed(2)
@@ -1503,9 +1602,11 @@ class SupersededVerdictTests(AssistCase):
     and a doubt counts as stale: the hook stays silent and counts nothing. The check, the count and the emit happen
     under one lock."""
 
+    final_id = None  # the API message id of the stop's final message, when a test needs one
+
     def stopped(self, name="session.jsonl", **extra):
         log = self.session()
-        log.assistant("Step one is done.")
+        log.assistant("Step one is done.", message_id=self.final_id)
         return self.payload_for(log, "Step one is done.", name=name, **extra)
 
     def stale_by(self, grow, **extra):
@@ -1579,8 +1680,9 @@ class SupersededVerdictTests(AssistCase):
     def late_system(self, subtype, **extra):
         return {"type": "system", "subtype": subtype, "timestamp": "2026-01-01T11:00:00.000Z", **extra}
 
-    def late_assistant(self, content, **extra):
-        return {"type": "assistant", "timestamp": "2026-01-01T11:00:00.000Z", "message": {"role": "assistant", "content": content}, **extra}
+    def late_assistant(self, content, message_id=None, **extra):
+        message = {"role": "assistant", "content": content, **({"id": message_id} if message_id else {})}
+        return {"type": "assistant", "timestamp": "2026-01-01T11:00:00.000Z", "message": message, **extra}
 
     def test_a_late_text_that_is_not_the_final_message_discards_the_verdict(self):
         self.stale_by(self.late(lambda log: log.assistant("Now continuing with step two")))
@@ -1600,49 +1702,105 @@ class SupersededVerdictTests(AssistCase):
         # Real assistant records carry no promptId (only user records do), so its absence is no mismatch.
         self.fresh_by(self.late(lambda log: log.assistant("Step one is done.")), prompt_id="p-now")
 
-    def test_a_late_assistant_record_without_text_discards_the_verdict(self):
+    # The staleness rule is inverted: only growth that starts or belongs to a new turn supersedes the verdict. Claude Code
+    # 2.1.330 writes a data-flow-records record after turn_duration in 108 of 182 clean stops (sampled read-only from the
+    # 60 largest local transcripts), so an allowlist of known bookkeeping dropped real verdicts as "superseded".
+
+    def test_a_late_thinking_only_record_of_another_message_discards_the_verdict(self):
+        self.final_id = "msg_final"
+        late = self.late_assistant([{"type": "thinking", "thinking": "hm"}], message_id="msg_other")
+        self.stale_by(lambda: self.append(late))
+
+    def test_a_late_thinking_only_record_without_an_id_discards_the_verdict(self):
+        self.final_id = "msg_final"
         late = self.late_assistant([{"type": "thinking", "thinking": "hm"}])
         self.stale_by(lambda: self.append(late))
 
-    def test_attachments_that_may_start_a_new_turn_discard_the_verdict(self):
-        wake = ("<task-notification>\n<summary>Stop hook feedback</summary>\n</task-notification>\n<system-reminder>\n"
-                "Stop hook blocking error from command \"Stop\": [reflect-catchup] You ended your turn.\n</system-reminder>")
-        cases = {
-            "hook wake": self.attachment("queued_command", prompt=wake, commandMode="task-notification", origin={"kind": "task-notification", "producer": "session-task"}),
-            "hook context": self.attachment("hook_additional_context", content=["more"]),
-            "hook message": self.attachment("hook_system_message", content="msg"),
-            "reminder": self.attachment("silent_turn_reminder"),
-            "file": self.attachment("file", filename="a.txt"),
-            "edited file": self.attachment("edited_text_file", filename="a.txt"),
-            "task status": self.attachment("task_status", taskId="bz9k"),
-            "unknown": self.attachment("something_new_in_a_later_version"),
-            "no type": {"type": "attachment", "timestamp": "2026-01-01T11:00:00.000Z", "attachment": {}},
-            "no body": {"type": "attachment", "timestamp": "2026-01-01T11:00:00.000Z"},
-        }
-        for label, record in cases.items():
-            with self.subTest(label):
-                self.stale_by(lambda record=record: self.append(record))
+    def test_a_late_thinking_only_record_of_the_final_message_does_not_discard_the_verdict(self):
+        self.final_id = "msg_final"
+        late = self.late_assistant([{"type": "thinking", "thinking": "hm"}], message_id="msg_final")
+        self.fresh_by(lambda: self.append(late))
 
-    def test_attachments_that_are_only_hook_bookkeeping_do_not_discard_the_verdict(self):
-        for kind in ("hook_success", "hook_cancelled", "prompt_snapshot", "deferred_tools_record"):
+    def test_a_thinking_only_record_that_precedes_a_late_final_of_the_same_message_does_not_discard_the_verdict(self):
+        final = self.late_assistant([{"type": "text", "text": "Step one is done."}], message_id="msg_late")
+        thinking = self.late_assistant([{"type": "thinking", "thinking": "hm"}], message_id="msg_late")
+        self.fresh_by(lambda: self.append(thinking, final))
+
+    def test_a_data_flow_records_record_after_turn_duration_does_not_discard_the_verdict(self):
+        """The real shape: a top-level record, not an attachment."""
+        flow = {"type": "data-flow-records", "v": 1, "sessionId": "s1", "snapshot": True,
+                "records": [{"tool_name": "Edit", "event_id": "e1"}, {"tool_name": "Bash", "event_id": "e2"}]}
+        self.fresh_by(lambda: self.append(self.late_system("turn_duration", durationMs=5), flow))
+
+    def test_the_bookkeeping_that_follows_a_clean_stop_does_not_discard_the_verdict(self):
+        records = [
+            {"type": "last-prompt", "lastPrompt": "hi", "sessionId": "s1"},
+            {"type": "tools-used", "tools": ["Edit"], "sessionId": "s1"},
+            {"type": "file-history-snapshot", "messageId": "m1", "snapshot": {}, "isSnapshotUpdate": False},
+            {"type": "api-request", "sessionId": "s1"},
+            {"type": "custom-title", "customTitle": "t", "sessionId": "s1"},
+            {"type": "permission-mode", "permissionMode": "default", "sessionId": "s1"},
+            {"type": "cost-state", "sessionId": "s1"},
+        ]
+        for record in records:
+            with self.subTest(record["type"]):
+                self.fresh_by(lambda record=record: self.append(record))
+
+    def test_attachments_other_than_queued_input_do_not_discard_the_verdict(self):
+        kinds = ("hook_success", "hook_cancelled", "prompt_snapshot", "deferred_tools_record", "hook_additional_context",
+                 "hook_system_message", "silent_turn_reminder", "file", "edited_text_file", "task_status", "date",
+                 "environment", "total_tokens_reminder", "skill_listing", "deferred_tools_delta", "invoked_skills",
+                 "already_read_file", "directory", "model", "session_context", "thinking_drop")
+        for kind in kinds:
             with self.subTest(kind):
                 self.fresh_by(lambda kind=kind: self.append(self.attachment(kind)))
 
-    def test_system_records_that_may_start_a_new_turn_discard_the_verdict(self):
+    def test_a_hook_wake_that_lands_as_queued_input_discards_the_verdict(self):
+        wake = ("<task-notification>\n<summary>Stop hook feedback</summary>\n</task-notification>\n<system-reminder>\n"
+                "Stop hook blocking error from command \"Stop\": [reflect-catchup] You ended your turn.\n</system-reminder>")
+        record = self.attachment("queued_command", prompt=wake, commandMode="task-notification", origin={"kind": "task-notification", "producer": "session-task"})
+        self.stale_by(lambda: self.append(record))
+
+    def test_system_records_of_any_subtype_do_not_discard_the_verdict(self):
         cases = {
             "prevented": self.late_system("stop_hook_summary", hookCount=1, hookErrors=[], preventedContinuation=True),
             "hook error": self.late_system("stop_hook_summary", hookCount=1, hookErrors=["exit 2"], preventedContinuation=False),
             "compact": self.late_system("compact_boundary"),
-            "unknown": self.late_system("something_new_in_a_later_version"),
+            "api error": self.late_system("api_error"),
+            "informational": self.late_system("informational"),
+            "plain summary": self.late_system("stop_hook_summary", hookCount=2, hookInfos=[], hookErrors=[], preventedContinuation=False, hasOutput=False),
+            "turn duration": self.late_system("turn_duration", durationMs=5),
+        }
+        for label, record in cases.items():
+            with self.subTest(label):
+                self.fresh_by(lambda record=record: self.append(record))
+
+    def unknown_entries(self):
+        return [entry for entry in self.logged() if entry.get("decision") == "unknown-record"]
+
+    def test_an_unknown_record_kind_does_not_discard_the_verdict_and_is_logged_once(self):
+        cases = {
+            "type": {"type": "something-new", "sessionId": "s1"},
+            "attachment": self.attachment("another_new_attachment"),
+            "system": self.late_system("another_new_subtype"),
+            "no type": {"sessionId": "s1"},
+            "no attachment type": {"type": "attachment", "timestamp": "2026-01-01T11:00:00.000Z", "attachment": {}},
             "no subtype": {"type": "system", "timestamp": "2026-01-01T11:00:00.000Z"},
         }
         for label, record in cases.items():
             with self.subTest(label):
-                self.stale_by(lambda record=record: self.append(record))
+                before = len(self.unknown_entries())
+                self.fresh_by(lambda record=record: self.append(record))
+                self.assertEqual(len(self.unknown_entries()), before + 1)
+                self.fresh_by(lambda record=record: self.append(record))
+                self.assertEqual(len(self.unknown_entries()), before + 1)
 
-    def test_a_plain_stop_hook_summary_and_turn_duration_do_not_discard_the_verdict(self):
-        summary = self.late_system("stop_hook_summary", hookCount=2, hookInfos=[], hookErrors=[], preventedContinuation=False, hasOutput=False)
-        self.fresh_by(lambda: self.append(summary, self.late_system("turn_duration", durationMs=5)))
+    def test_a_known_record_kind_is_not_logged_as_unknown(self):
+        self.fresh_by(lambda: self.append(self.late_system("turn_duration", durationMs=5), {"type": "data-flow-records", "records": []}))
+        self.assertEqual(self.unknown_entries(), [])
+
+    def test_an_unknown_kind_next_to_a_new_turn_still_discards_the_verdict(self):
+        self.stale_by(lambda: self.append({"type": "something-new"}, self.late_assistant([{"type": "text", "text": "More work"}])))
 
     def test_a_transcript_that_ends_inside_a_line_is_not_identified_and_makes_no_model_call(self):
         payload = self.stopped()
@@ -1705,12 +1863,296 @@ class SupersededVerdictTests(AssistCase):
         self.assertEqual(emitted, [])
         self.assertEqual(self.logged()[-1]["decision"], "wake-limit")
 
+    def test_a_wake_of_reflection_for_the_same_stop_silences_the_assistant_and_keeps_its_stamp(self):
+        """Both hooks run on one stop; when reflection woke the session while the model was thinking, a second wake
+        would only be noise. The stamp is reflection's own (its next Stop clears it): it is read, never cleared."""
+        self.during_ask = lambda: REFLECT.arm_wake_guard({"session_id": "s1"})
+        emitted = []
+        self.assertIsNone(ASSIST.assess(self.stopped(), emitted.append))
+        self.assertEqual(emitted, [])
+        self.assertEqual(self.logged()[-1]["decision"], "reflection-woke")
+        self.assertFalse(ASSIST.counter_file("s1").exists())
+        self.assertTrue(REFLECT.wake_file({"session_id": "s1"}).is_file())
+
+    def test_an_old_stamp_of_reflection_does_not_silence_the_assistant(self):
+        REFLECT.WAKE_DIR.mkdir(parents=True)
+        REFLECT.wake_file({"session_id": "s1"}).write_text(str(time.time() - 100), encoding="utf-8")
+        emitted = []
+        text = ASSIST.assess(self.stopped(), emitted.append)
+        self.assertIsNotNone(text)
+        self.assertEqual(emitted, [text])
+        self.assertEqual(self.logged()[-1]["decision"], "idle")
+
+    def test_a_stamp_of_another_session_does_not_silence_the_assistant(self):
+        self.during_ask = lambda: REFLECT.arm_wake_guard({"session_id": "other"})
+        self.assertIsNotNone(ASSIST.assess(self.stopped(), lambda text: None))
+
+    def test_a_broken_stamp_does_not_silence_the_assistant(self):
+        def broken():
+            REFLECT.WAKE_DIR.mkdir(parents=True, exist_ok=True)
+            REFLECT.wake_file({"session_id": "s1"}).write_text("not a number", encoding="utf-8")
+        self.during_ask = broken
+        self.assertIsNotNone(ASSIST.assess(self.stopped(), lambda text: None))
+
     def test_the_lock_can_be_taken_again_after_it_is_released(self):
         with ASSIST.state_lock():
             pass
         with ASSIST.state_lock():
             pass
         self.assertTrue((self.state / "state.lock").exists())
+
+
+class ScanCacheTests(AssistCase):
+    """`scan(..., key=...)` continues where the last scan of the same session stopped, and what it returns is always
+    what a full scan of the same file returns: any doubt about the cache (another file, another code, another cwd, a
+    damaged cache file) means a full scan."""
+
+    REL = "docs/superpowers/plans/sub.md"
+
+    def setUp(self):
+        super().setUp()
+        self.path = self.dir / "scan.jsonl"
+        self.other = self.plan.parent / "other.md"
+        self.other.write_text("# Other\n- [ ] item\n", encoding="utf-8")
+        self.sub = self.project / "sub" / "docs" / "superpowers" / "plans" / "sub.md"
+        self.sub.parent.mkdir(parents=True)
+        self.sub.write_text("# Sub\n- [ ] item\n", encoding="utf-8")
+
+    def cached(self, key="k", cwd=None, **kwargs):
+        return ASSIST.scan(self.path, cwd or str(self.project), key=key, **kwargs)
+
+    def fresh(self, cwd=None, **kwargs):
+        return ASSIST.scan(self.path, cwd or str(self.project), **kwargs)
+
+    def counted(self, call):
+        """(the result, how many records the scan parsed)."""
+        with mock.patch.object(ASSIST, "parsed", wraps=ASSIST.parsed) as spy:
+            result = call()
+        return result, spy.call_count
+
+    def same(self, **kwargs):
+        """A cached scan, checked against a full scan of the file as it is now; returns (result, records parsed)."""
+        got, parsed = self.counted(lambda: self.cached(**kwargs))
+        self.assertEqual(got, self.fresh(**{k: v for k, v in kwargs.items() if k != "key"}))
+        return got, parsed
+
+    def cache_file(self, key="k"):
+        return self.state / f"scan-{key}.json"
+
+    def test_a_session_grown_step_by_step_scans_like_a_fresh_one_at_every_step(self):
+        log = Transcript()
+        steps = (
+            ("read", lambda: (log.human("Implement the plan"), log.read_plan(self.plan))),
+            ("edit", lambda: log.result(log.call("Edit", {"file_path": str(self.other)}), "ok")),
+            ("launch", lambda: log.background("bz9k")),
+            ("poll", lambda: setattr(self, "pending", log.call("AskUserQuestion", {"questions": []}))),
+            ("answer", lambda: log.result(self.pending, "the answer")),
+            ("notice", lambda: log.notify("bz9k")),
+            ("monitor", lambda: log.background("mon1", kind="Monitor")),
+            ("human", lambda: log.human("go on")),
+            ("cd", lambda: log.result(log.call("Bash", {"command": "cd sub"}), "ok")),
+            ("relative", lambda: log.result(log.call("Bash", {"command": f"cat {self.REL}"}), "ok")),
+            ("text", lambda: log.assistant("working")),
+        )
+        seen = {}
+        for name, step in steps:
+            step()
+            log.write(self.path)
+            with self.subTest(step=name):
+                seen[name] = self.same()[0]
+        self.assertEqual(seen["launch"]["background"][0][0], "bz9k")
+        self.assertTrue(seen["poll"]["poll"])
+        self.assertFalse(seen["answer"]["poll"])
+        self.assertEqual(seen["notice"]["background"], [])
+        self.assertEqual([task for task, _ in seen["monitor"]["background"]], ["mon1"])
+        self.assertGreater(seen["human"]["reset_at"], seen["monitor"]["reset_at"])
+        self.assertIn(self.sub, seen["relative"]["plans"])  # the directory of the earlier `cd` carried over
+        self.assertTrue(self.cache_file().is_file())
+
+    def test_the_next_scan_parses_only_the_records_added_since(self):
+        log = self.session()
+        log.write(self.path)
+        _, first = self.counted(self.cached)
+        self.assertEqual(first, 5)
+        log.assistant("more")
+        log.result(log.call("Read", {"file_path": str(self.other)}), "ok")
+        log.write(self.path)
+        result, second = self.same()
+        self.assertEqual(second, 3)
+        self.assertEqual(result["plans"][0], self.other)
+        self.assertEqual(self.counted(self.cached)[1], 0)
+
+    def test_two_sessions_do_not_share_a_cache(self):
+        log = self.session()
+        log.write(self.path)
+        self.cached(key="a")
+        self.assertEqual(self.counted(lambda: self.cached(key="b"))[1], 5)
+        self.assertEqual(self.counted(lambda: self.cached(key="a"))[1], 0)
+        self.assertTrue(self.cache_file("a").is_file() and self.cache_file("b").is_file())
+
+    def test_a_key_with_path_characters_stays_inside_the_state_folder(self):
+        log = self.session()
+        log.write(self.path)
+        self.cached(key="../../evil/..\\x")
+        self.assertEqual([p.parent for p in self.state.glob("scan-*.json")], [self.state])
+        self.assertFalse((self.dir.parent / "evil").exists())
+
+    def test_the_scan_goes_on_from_the_cached_point_up_to_a_new_limit(self):
+        log = self.session()
+        log.write(self.path)
+        half = self.path.stat().st_size
+        log.result(log.call("Read", {"file_path": str(self.other)}), "ok")
+        log.write(self.path)
+        _, parsed = self.counted(lambda: self.cached(limit=half))
+        self.assertEqual(parsed, 5)
+        result, parsed = self.same(limit=self.path.stat().st_size)
+        self.assertEqual(parsed, 2)
+        self.assertEqual(result["plans"][0], self.other)
+
+    def test_a_limit_below_the_cached_point_is_a_full_scan_up_to_the_limit(self):
+        log = self.session()
+        log.write(self.path)
+        short = self.path.stat().st_size
+        log.result(log.call("Read", {"file_path": str(self.other)}), "ok")
+        log.write(self.path)
+        self.cached()
+        result, parsed = self.same(limit=short)
+        self.assertEqual(parsed, 5)
+        self.assertNotIn(self.other, result["plans"])
+        self.assertEqual(self.same()[0]["plans"][0], self.other)
+
+    def test_a_different_file_under_the_same_key_is_scanned_in_full(self):
+        log = self.session()
+        log.write(self.path)
+        self.cached()
+        other = Transcript()
+        other.human("A different job with a longer first message, so the new file is bigger than the old one")
+        other.result(other.call("Edit", {"file_path": str(self.other)}), "ok")
+        other.assistant("x" * 400)
+        other.write(self.path)
+        result, parsed = self.same()
+        self.assertEqual(parsed, 4)
+        self.assertEqual(result["plans"], [self.other])
+
+    def test_a_file_cut_below_the_cached_point_is_scanned_in_full(self):
+        log = self.session()
+        log.write(self.path)
+        self.cached()
+        log.entries = log.entries[:2]
+        log.write(self.path)
+        result, parsed = self.same()
+        self.assertEqual(parsed, 2)
+        self.assertEqual(result["plans"], [self.plan])
+
+    def test_a_rewritten_tail_with_the_same_start_is_scanned_in_full(self):
+        # Long enough that the head check (the first 4096 bytes) cannot see the change: only the tail check can.
+        # The new path has the same length, so the file keeps its size and the saved point stays a line boundary:
+        # nothing but the bytes just before that point tells the file from the one that was cached.
+        twin = self.plan.parent / "another.md"
+        twin.write_text("# Another\n- [ ] item\n", encoding="utf-8")
+        self.assertEqual(len(twin.name), len(self.plan.name))
+        log = Transcript()
+        log.human("Implement the plan")
+        for _ in range(40):
+            log.assistant("filler " * 30)
+        log.read_plan(self.plan)
+        log.write(self.path)
+        self.assertGreater(self.path.stat().st_size, 2 * 4096)
+        self.cached()
+        text = self.path.read_text(encoding="utf-8")
+        head, _, tail = text.rpartition(str(self.plan).replace("\\", "\\\\"))
+        size = self.path.stat().st_size
+        self.path.write_text(head + str(twin).replace("\\", "\\\\") + tail, encoding="utf-8")
+        self.assertEqual(self.path.stat().st_size, size)
+        result, parsed = self.same()
+        self.assertGreater(parsed, 40)
+        self.assertEqual(result["plans"], [twin])
+
+    def test_a_cache_made_by_other_code_or_another_cwd_is_not_used(self):
+        log = self.session()
+        log.write(self.path)
+        self.cached()
+        with self.subTest("other code"), mock.patch.object(ASSIST, "code_stamp", return_value="changed"):
+            self.assertEqual(self.same()[1], 5)
+        with self.subTest("other cwd"):
+            elsewhere = self.dir / "elsewhere"
+            elsewhere.mkdir()
+            self.assertEqual(self.same(cwd=str(elsewhere))[1], 5)
+
+    def test_a_damaged_cache_file_gives_a_full_scan_and_is_rewritten(self):
+        log = self.session()
+        log.write(self.path)
+        self.cached()
+        good = json.loads(self.cache_file().read_text(encoding="utf-8"))
+        broken = {"garbage": "not json at all {", "a list": [], "a number": 5,
+                  "tasks of another shape": {**good, "tasks": {}}, "no tasks": {k: v for k, v in good.items() if k != "tasks"},
+                  "edited holds a number": {**good, "edited": [7]}, "an offset that is text": {**good, "offset": "x"},
+                  "a negative offset": {**good, "offset": -1}, "polls not a list": {**good, "polls": 3}}
+        for name, content in broken.items():
+            with self.subTest(name):
+                text = content if isinstance(content, str) else json.dumps(content)
+                self.cache_file().write_text(text, encoding="utf-8")
+                self.assertEqual(self.same()[1], 5)
+                self.assertEqual(self.counted(self.cached)[1], 0)  # the damaged file was replaced by a good one
+
+    def test_a_last_line_that_is_not_complete_yet_is_read_when_it_is(self):
+        log = self.session()
+        log.write(self.path)
+        record = json.dumps(log.add("assistant", [{"type": "tool_use", "id": "toolu_x", "name": "Edit",
+                                                  "input": {"file_path": str(self.other)}}]))
+        log.entries.pop()
+        for name, first, rest in (("cut in the middle", record[:len(record) // 2], record[len(record) // 2:] + "\n"),
+                                  ("complete but no newline yet", record, "\n")):
+            with self.subTest(name):
+                log.write(self.path)
+                with open(self.path, "a", encoding="utf-8") as handle:
+                    handle.write(first)
+                self.same()
+                with open(self.path, "a", encoding="utf-8") as handle:
+                    handle.write(rest)
+                result, _ = self.same()
+                self.assertEqual(result["plans"][0], self.other)
+
+    def test_a_cache_that_cannot_be_written_does_not_break_the_scan(self):
+        log = self.session()
+        log.write(self.path)
+        self.state.write_text("a file where the state folder should be", encoding="utf-8")
+        self.assertEqual(self.same()[0]["plans"], [self.plan])
+
+    def test_the_payload_task_list_is_used_on_every_scan_and_never_cached(self):
+        log = self.session()
+        log.background("bz9k")
+        log.write(self.path)
+        self.cached()
+        listed = [{"id": "from-payload", "status": "pending"}, {"id": "gone", "status": "completed"}]
+        got = self.same(background_tasks=listed)[0]
+        self.assertEqual([task for task, _ in got["background"]], ["from-payload"])
+        self.assertEqual([task for task, _ in self.same()[0]["background"]], ["bz9k"])
+
+    def test_old_cache_files_are_removed_when_a_new_one_is_written(self):
+        self.state.mkdir()
+        old, recent, other = (self.state / name for name in ("scan-old.json", "scan-recent.json", "log.jsonl"))
+        for file in (old, recent, other):
+            file.write_text("{}", encoding="utf-8")
+        long_ago = (NOW - timedelta(days=30)).timestamp()
+        os.utime(old, (long_ago, long_ago))
+        os.utime(other, (long_ago, long_ago))
+        log = self.session()
+        log.write(self.path)
+        self.cached()
+        self.assertFalse(old.exists())
+        self.assertTrue(recent.exists() and other.exists())
+
+    def test_the_stop_check_keeps_a_cache_per_session(self):
+        log = self.session()
+        self.assess(log)
+        self.assertTrue(self.cache_file("s1").is_file())
+        # The scan feeds every record it reads to the background-task reader; the model input is built from the tail apart from it.
+        feed = ASSIST.subagent_tasks.Tasks.feed
+        with mock.patch.object(ASSIST.subagent_tasks.Tasks, "feed", autospec=True, side_effect=feed) as spy:
+            ASSIST.assess({"transcript_path": str(self.dir / "session.jsonl"), "session_id": "s1", "cwd": str(self.project),
+                           "last_assistant_message": "Step one is done."})
+        self.assertEqual(spy.call_count, 0)
 
 
 class SharedAskTests(AssistCase):
@@ -1738,6 +2180,20 @@ class SharedAskTests(AssistCase):
         command = self.captured().args[0]
         self.assertEqual(command[command.index("--system-prompt-file") + 1], str(REFLECT.PROMPT_FILE))
         self.assertEqual(command[command.index("--json-schema") + 1], REFLECT.schema(["ok", "idle"]))
+
+    def test_the_model_deadline_is_derived_from_the_hook_timeout_in_feature_json(self):
+        manifest = json.loads((SCRIPT.parents[1] / "feature.json").read_text(encoding="utf-8"))
+        (hook,) = manifest["hooks"]
+        timeout = hook["timeout"]
+        self.assertEqual(ASSIST.MODEL_DEADLINE, timeout - ASSIST.LOCK_WAIT - ASSIST.MODEL_MARGIN)
+        self.assertGreater(ASSIST.MODEL_MARGIN, 0)
+        # Worst case: the last model call may start at DEADLINE - CALL_TIMEOUT and run CALL_TIMEOUT; the lock wait follows.
+        self.assertLess(ASSIST.MODEL_DEADLINE + ASSIST.LOCK_WAIT, timeout)
+        self.assertGreater(ASSIST.MODEL_DEADLINE, REFLECT.CALL_TIMEOUT)
+
+    def test_assess_asks_with_the_model_deadline(self):
+        self.assess(self.session())
+        self.assertEqual(self.calls[0]["kwargs"]["deadline"], ASSIST.MODEL_DEADLINE)
 
 
 ORIGINAL_ASK = REFLECT.ask

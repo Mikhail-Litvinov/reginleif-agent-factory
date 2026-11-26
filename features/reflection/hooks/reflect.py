@@ -79,7 +79,9 @@ WAKE_MARKER = "[reflect-catchup]"
 SERIOUS_KINDS = frozenset({1, 2, 3, 4, 5, 6})
 
 REMINDER = re.compile(r"<system-reminder>.*?</system-reminder>", re.DOTALL)
-EVENT_MARKS = ("<task-notification>", "[SYSTEM NOTIFICATION", "<agent-message", "Another Claude session sent a message")
+# The wake text of a sibling Stop hook (chief-assistant) arrives as a user-role message; it is an event, not the user's.
+SIBLING_WAKE_MARKS = ("[chief-assistant]",)
+EVENT_MARKS = ("<task-notification>", "[SYSTEM NOTIFICATION", "<agent-message", "Another Claude session sent a message", *SIBLING_WAKE_MARKS)
 # The user's words that arrive like events: a topic message that interrupted the work comes as a
 # peer message. And a channel message of telegram-hub itself (user="telegram-hub") is an event, not the user.
 USER_MARKS = ("telegram-hub: the user interrupted your work from Telegram",)
@@ -414,10 +416,11 @@ def prune_turns() -> None:
 
 
 def ask(model: str, verdicts: list[str], text: str, cwd: str, dirs: list[Path], started: float,
-        prompt_file: Path | None = None, schema_text: str | None = None) -> tuple[dict | None, float, str]:
+        prompt_file: Path | None = None, schema_text: str | None = None, deadline: float = DEADLINE) -> tuple[dict | None, float, str]:
     """One reviewer, with retries for a dropped network. Returns (answer, cost, error).
-    The chief-assistant hook shares this call and passes its own prompt file and answer schema;
-    reflection passes neither and keeps its own."""
+    The chief-assistant hook shares this call and passes its own prompt file, answer schema and deadline (the seconds
+    after `started` by which the last call must have ended; its hook timeout differs from reflection's);
+    reflection passes none of them and keeps its own."""
     claude = shutil.which("claude")
     if not claude:
         return None, 0.0, "claude not on PATH"
@@ -432,7 +435,7 @@ def ask(model: str, verdicts: list[str], text: str, cwd: str, dirs: list[Path], 
     env = dict(os.environ, **{CHILD_ENV: "1", "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"})
     cost, error = 0.0, ""
     for attempt in range(ATTEMPTS):
-        if time.monotonic() - started + CALL_TIMEOUT > DEADLINE:
+        if time.monotonic() - started + CALL_TIMEOUT > deadline:
             return None, cost, error or "no time left"
         if attempt:
             time.sleep(RETRY_PAUSE)
@@ -554,7 +557,8 @@ def started_by_wake(transcript: Path) -> bool:
     if not transcript.is_file():
         return False
     lines = tail_lines(transcript)
-    last_user = max((i for i, line in enumerate(lines) if any(k == "user" and WAKE_MARKER not in t for k, _, t in line_events([line]))), default=-1)
+    own = (WAKE_MARKER, *SIBLING_WAKE_MARKS)
+    last_user = max((i for i, line in enumerate(lines) if any(k == "user" and not any(m in t for m in own) for k, _, t in line_events([line]))), default=-1)
     return any(WAKE_MARKER in line and not re.search(r'"type"\s*:\s*"assistant"', line) for line in lines[last_user + 1:])
 
 

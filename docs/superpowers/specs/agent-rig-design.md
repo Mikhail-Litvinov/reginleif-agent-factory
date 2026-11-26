@@ -166,7 +166,7 @@ Sections are headings in `CLAUDE.md` and `~/.codex/AGENTS.md`.
 |---|---|---|---|---|---|
 | base | always | all | `hooks/project-tmp.sh`, `hooks/project-tmp-settings.ps1` (Windows only), `hooks/compact_history.py`, `hooks/no_ampersand.py`, `hooks/system-temp-guard.py`, `tools/patchlib.py`, `tools/account-allowlist.py`, `agents/explore.md`, `agents/general-purpose.md` | SessionStart and PreToolUse | see below |
 | `reflection` | yes | all | `hooks/reflect.py`, `hooks/reflect_prompt.md` | `Stop` | — |
-| `chief-assistant` | yes | all | `hooks/assist.py`, `hooks/assist_prompt.md` (depends on `reflection`: shares its transcript parsing, rules loading and model call) | `Stop` (asyncRewake) | — |
+| `chief-assistant` | yes | all | `hooks/assist.py`, `hooks/assist_prompt.md` (depends on `reflection`: shares its transcript parsing, rules loading and model call; and on `subagent-tasks-guard`: shares its reading of which background tasks are alive) | `Stop` (asyncRewake) | — |
 | `codex` | yes | all | `tools/codex-run.py`, `agents/codex.md`, plugin `codex@openai-codex` | `SessionStart`: `codex-run.py session-hint` | "Delegating to Codex" |
 | `telegram` | yes | all | plugin `telegram-hub` from the hub clone, the hub service, including `/bash` | plugin hooks | "Attention chime", the line about Telegram mode |
 | `rtk` | yes | all | the `rtk` program, `RTK.md` | `PreToolUse`: `rtk hook claude` | — |

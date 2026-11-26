@@ -19,15 +19,26 @@ The wake does not act by itself: it reaches the main session, which knows the wh
 its text tells the session to ignore the wake when the user has written since or work is running. So the hook
 does not try to make a wake exactly correct against a transcript that is written concurrently; it fails closed.
 The transcript size is taken when the hook starts (a last line without its newline means the stop cannot be
-identified: silent). The model takes up to a minute; before the wake is emitted, everything appended after that
-size must be the stop's own bookkeeping: system records, attachments that are not queued input, and at most one
-assistant record with text and no tool call (the final message landing late). Anything else, a half-written
-line included, means the verdict is superseded: silent.
+identified: silent). The model takes up to a few minutes (its deadline is derived from the hook timeout in
+feature.json); before the wake is emitted, what was appended after that size is checked: growth that starts or
+belongs to a new turn (a user message or queued input, an assistant record other than the final message landing
+late, a tool call or result) supersedes the verdict, and so does a half-written line or a doubt. Bookkeeping
+(system records, attachments that are not queued input, and the late final message itself) does not.
 
-The check, the wake counter and the emission are one step under a file lock. The counter is one small file per
-session (wakes-<session>.json: count and the transcript size at the last wake). At most MAX_WAKES wakes in a
-row; a message of the user newer than the last wake resets it. Only a record that names the user as its origin
-counts as the user's; a poll answer does not (nothing in its record says a human gave it).
+Under the file lock run exactly these steps, as one: that check of the appended growth, the look at reflection's wake
+stamp (reflection woke for this same stop: silent), the read of the wake counter, its update and the emission of
+the wake. The scan, the model call and the logging are outside it. That suffices because the wake does not act by
+itself (the main session judges it) and any new turn appended before the check supersedes it; the lock only makes
+two checks of the same session count and emit one after the other, so the counter never skips or doubles a wake.
+The counter is one small file per session (wakes-<session>.json: count and the transcript size at the last wake).
+At most MAX_WAKES wakes in a row; a message of the user newer than the last wake resets it. Only a record that
+names the user as its origin counts as the user's; a poll answer does not (nothing in its record says a human gave
+it).
+
+The scan of the transcript (hundreds of MB in a long session) is cached per session (scan-<session>.json: the byte
+offset reached, the plans, the background tasks and the shell directory so far, with hashes of the transcript's start
+and of the bytes before the offset). The next stop reads only what was appended; any doubt (another file, another
+code, a damaged cache) means a full scan, so the result never differs from a full one.
 
 Every decision goes to ~/.claude/chief-assistant/log.jsonl with its verdict, cost, time and reason; an idle
 verdict also carries idle_point (the open item, normalized), so repeats at one point can be counted.
@@ -36,6 +47,7 @@ Input: hook JSON on stdin. Output: exit 2 with the wake text on stderr, or exit 
 """
 
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -54,6 +66,9 @@ import subagent_tasks  # noqa: E402
 STATE_DIR = Path.home() / ".claude" / "chief-assistant"
 LOG_FILE = STATE_DIR / "log.jsonl"
 PROMPT_FILE = Path(__file__).with_name("assist_prompt.md")
+SCAN_VERSION = 1  # the layout of the saved scan state; a cache of another version is not used
+FINGERPRINT = 4096  # bytes hashed at the start of the transcript and just before the saved point
+SCAN_KEEP_DAYS = 7  # a session's scan cache unused for this long is removed when another is written
 MODEL = "haiku"
 VERDICTS = ["ok", "idle"]
 SCHEMA = json.dumps({
@@ -78,9 +93,34 @@ MAX_WAKES = 3
 PLAN_LIMIT = 12_000  # Characters of one plan sent to the model; a plan is a short working document.
 PLAN_BUDGET = 4 * PLAN_LIMIT  # All plans together: four full-size plans, so one active plan plus a few it read for reference.
 PLAN_DIR = "docs/superpowers/plans/"
-# Records a stop leaves behind that cannot start a new turn (seen in Claude Code 2.1.330 transcripts); all else is growth.
-BOOKKEEPING_ATTACHMENTS = frozenset({"hook_success", "hook_cancelled", "prompt_snapshot", "deferred_tools_record"})
-BOOKKEEPING_SYSTEM = frozenset({"stop_hook_summary", "turn_duration"})
+# Record kinds seen in Claude Code 2.1.330 transcripts (sampled read-only from the 60 largest local ones). A kind outside
+# these sets still counts as bookkeeping, but is written once to the decision log so the sets can be extended.
+KNOWN_TYPES = frozenset({
+    "assistant", "user", "attachment", "system", "api-request", "data-flow-records", "api-request-blob", "custom-title",
+    "last-prompt", "atis-latch", "agent-name", "bridge-session", "queue-operation", "relocated", "mode", "pr-link",
+    "file-history-delta", "file-history-snapshot", "session-owner", "frame-link", "permission-mode", "tools-used",
+    "api-request-shape", "cost-state", "artifact-autoreact-ledger", "artifact-comment-monitor", "derived-from",
+    "data-flow-incomplete",
+})
+KNOWN_ATTACHMENTS = frozenset({
+    "deferred_tools_record", "environment", "total_tokens_reminder", "queued_command", "silent_turn_reminder",
+    "edited_text_file", "hook_success", "prompt_snapshot", "deferred_tools_delta", "hook_additional_context", "date",
+    "file", "mcp_instructions_delta", "model", "session_context", "credential_org", "instructions",
+    "remote_session_change", "skill_listing", "agent_listing_delta", "auto_mode", "command_permissions",
+    "hook_cancelled", "compact_file_reference", "invoked_skills", "thinking_drop", "inlined_image_paths", "task_status",
+    "hook_system_message", "read_truncation_notice", "at_mention_reference", "directory", "already_read_file",
+    "data-flow-records",
+})
+KNOWN_SYSTEM = frozenset({"stop_hook_summary", "turn_duration", "api_error", "compact_boundary", "informational"})
+SEEN_KINDS_FILE = "seen-kinds.json"
+# The statuses of an entry of the Stop payload's background_tasks that mean the task is not finished: it runs, or it is
+# queued and about to run. Any other status (completed, failed, killed, ...) is an end state.
+LIVE_STATUSES = (subagent_tasks.RUNNING, "pending")
+# Both Stop hooks start together on one stop; a stamp of reflection counts as this stop's when it is not older than this
+# hook's start by more than the gap between the two process starts (a few seconds at most; an older wake of reflection
+# is cleared by its own next Stop long before, so a margin this size cannot meet one).
+STAMP_SKEW = 10.0
+TAIL_BYTES = 256 * 1024  # How far back from the stop's size the stop's own final message is looked for.
 PLAN_TOOLS_EDIT = ("Edit", "Write", "MultiEdit")
 SHELL_TOOLS = ("Bash", "PowerShell")  # the tools whose shell keeps its directory from one call to the next
 MENTION_DEPTH = 8  # How deep into a tool input (agent prompts, nested fields) plan names are searched.
@@ -103,8 +143,22 @@ NON_LITERAL_DIRECTORY = frozenset("~$%`*?")
 # Only these record types matter; every other line of a (possibly huge) transcript is skipped before parsing.
 RECORD = re.compile(r'"type"\s*:\s*"(?:user|assistant|attachment)"')
 LOCK_NAME = "state.lock"
-LOCK_WAIT = 30.0  # Seconds to wait for the state lock (the hook's own timeout is 330).
+LOCK_WAIT = 30.0  # Seconds to wait for the state lock.
 LOCK_RETRY = 0.02
+# The model phase must end early enough for the lock wait and the emission to fit the hook timeout of feature.json (the
+# one source of that number). reflect.ask stops starting calls once started + CALL_TIMEOUT would pass the deadline, so
+# the phase ends by the deadline; after it come the lock wait (LOCK_WAIT at most) and the final check and emission. The
+# margin covers what is not counted: the interpreter start and the stdin read before `started`, the re-read of the
+# transcript tail and the write of the wake (a chosen bound, a few seconds in practice).
+MODEL_MARGIN = 15.0
+
+
+def hook_timeout() -> float:
+    manifest = json.loads((Path(__file__).resolve().parents[1] / "feature.json").read_text(encoding="utf-8"))
+    return float(manifest["hooks"][0]["timeout"])
+
+
+MODEL_DEADLINE = hook_timeout() - LOCK_WAIT - MODEL_MARGIN
 THREAD_LOCK = threading.Lock()  # The file lock does not exclude threads of one process on every platform.
 
 
@@ -356,6 +410,58 @@ def from_user(record: dict, text: str) -> bool:
     return kind == "channel" and reflect.is_users(text)
 
 
+def prompt_blocks(record: dict) -> list[dict] | None:
+    """The content blocks a record carries as input of the turn: the message of a user record, or the prompt of a
+    queued_command attachment (what the user typed while the assistant worked). A string counts as one text block.
+    None for any other record."""
+    kind = record.get("type")
+    if kind == "user":
+        message = record.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+    elif kind == "attachment":
+        attachment = record.get("attachment")
+        content = attachment.get("prompt") if isinstance(attachment, dict) and attachment.get("type") == "queued_command" else None
+    else:
+        return None
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}]
+    return [b for b in content if isinstance(b, dict)] if isinstance(content, list) else None
+
+
+def block_texts(blocks: list[dict]) -> str:
+    """The text blocks joined, system reminders removed."""
+    texts = (reflect.REMINDER.sub("", b["text"]).strip() for b in blocks if b.get("type") == "text" and isinstance(b.get("text"), str))
+    return "\n".join(t for t in texts if t)
+
+
+def users_input(record: dict) -> bool:
+    """Whether a record is input of the user, judged on the record and not on the text events the shared parser makes
+    of it: an image-only message and a queued prompt of blocks yield no text event, and are still the user's words (see
+    `from_user`). A record needs text or a non-text block (an image) of its own: a tool result is output, not input."""
+    blocks = prompt_blocks(record)
+    if blocks is None:
+        return False
+    text = block_texts(blocks)
+    media = any(b.get("type") not in ("text", "tool_result", "tool_use") for b in blocks)
+    return (bool(text) or media) and from_user(record, text)
+
+
+def with_text_prompts(lines: list[str]) -> list[str]:
+    """The lines with every queued_command whose prompt is a list of blocks rewritten to a string prompt of its text
+    blocks: the shared parser (`reflect.line_events`) reads a queued prompt only when it is a string, and would drop
+    the caption of a pasted image."""
+    out = []
+    for line in lines:
+        if '"queued_command"' in line:
+            record = parsed(line)
+            attachment = record.get("attachment") if record is not None else None
+            if isinstance(attachment, dict) and attachment.get("type") == "queued_command" and isinstance(attachment.get("prompt"), list):
+                attachment["prompt"] = "\n".join(b["text"] for b in attachment["prompt"] if isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str))
+                line = json.dumps(record, ensure_ascii=False)
+        out.append(line)
+    return out
+
+
 def classify(line: str, text: str) -> str:
     """The event kind of a user-role text for `reflect.events_of`, from the record's origin (see `from_user`) instead of
     reflection's text classification: "user" for the user's words, "event" for everything else."""
@@ -363,7 +469,92 @@ def classify(line: str, text: str) -> str:
     return "user" if record is not None and from_user(record, text) else "event"
 
 
-def scan(transcript: Path, cwd: str, background_tasks: object = None, limit: int | None = None) -> dict:
+def safe_key(key: str) -> str:
+    return re.sub(r'[^A-Za-z0-9_.-]', '_', key)[:100]
+
+
+def code_stamp() -> str:
+    """A hash of the code a scan result depends on (this file and the two it uses), computed once per process: a cache
+    made by other code is not trusted."""
+    global _STAMP
+    if _STAMP is None:
+        digest = hashlib.sha1()
+        for source in (__file__, subagent_tasks.__file__, reflect.__file__):
+            try:
+                digest.update(Path(source).read_bytes())
+            except (OSError, TypeError):
+                digest.update(b"?")
+        _STAMP = digest.hexdigest()
+    return _STAMP
+
+
+_STAMP: str | None = None
+
+
+def scan_file(key: str) -> Path:
+    return STATE_DIR / f"scan-{safe_key(key)}.json"
+
+
+def fingerprints(f, offset: int) -> tuple[str, str]:
+    """Hashes of the first and of the last (up to) FINGERPRINT bytes before `offset`: a cache continues only a file
+    whose start and whose bytes just before the saved point are the ones it saw."""
+    f.seek(0)
+    head = f.read(min(offset, FINGERPRINT))
+    low = max(offset - FINGERPRINT, 0)
+    f.seek(low)
+    tail = f.read(offset - low)
+    return hashlib.sha1(head).hexdigest(), hashlib.sha1(tail).hexdigest()
+
+
+def load_scan(path: Path, f, cwd: str, limit: int | None) -> dict | None:
+    """The saved state of an earlier scan of this file, when it is safe to continue it: made by this code, for this
+    cwd, at a point of the file that is still there (and not past `limit`) with the same bytes around it, and of the
+    right shape throughout. None otherwise (a full scan then follows)."""
+    try:
+        saved = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(saved, dict) or saved["version"] != SCAN_VERSION or saved["stamp"] != code_stamp() or saved["cwd"] != cwd:
+            return None
+        offset = saved["offset"]
+        size = os.fstat(f.fileno()).st_size
+        if type(offset) is not int or offset < 0 or offset > size or (limit is not None and offset > limit):
+            return None
+        if [saved["head"], saved["tail"]] != list(fingerprints(f, offset)):
+            return None
+        for name in ("edited", "read", "polls"):
+            if not isinstance(saved[name], list) or not all(isinstance(item, str) for item in saved[name]):
+                return None
+        if not (saved["shell"] is None or isinstance(saved["shell"], str)) or type(saved["reset_at"]) is not int:
+            return None
+        return {"offset": offset, "edited": [Path(p) for p in saved["edited"]], "read": [Path(p) for p in saved["read"]],
+                "shell": saved["shell"], "reset_at": saved["reset_at"], "polls": saved["polls"],
+                "tasks": subagent_tasks.Tasks.from_state(saved["tasks"])}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
+
+
+def save_scan(path: Path, f, cwd: str, state: dict) -> None:
+    """Writes the scan state (temp file, then replace) and removes cache files unused for SCAN_KEEP_DAYS. Best effort:
+    a cache that cannot be written only means the next scan is a full one."""
+    try:
+        head, tail = fingerprints(f, state["offset"])
+        saved = {"version": SCAN_VERSION, "stamp": code_stamp(), "cwd": cwd, "head": head, "tail": tail, **state}
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp = path.with_name(f"{path.name}.tmp-{os.getpid()}-{threading.get_ident()}")
+        try:
+            temp.write_text(json.dumps(saved), encoding="utf-8")
+            os.replace(temp, path)
+        finally:
+            temp.unlink(missing_ok=True)
+        oldest = time.time() - SCAN_KEEP_DAYS * 86400
+        for old in path.parent.glob("scan-*"):
+            with contextlib.suppress(OSError):
+                if old.stat().st_mtime < oldest:
+                    old.unlink()
+    except (OSError, ValueError, TypeError):
+        pass
+
+
+def scan(transcript: Path, cwd: str, background_tasks: object = None, limit: int | None = None, key: str | None = None) -> dict:
     """One streaming pass over the transcript up to `limit` bytes (the stop point; the whole file when None). It can
     be hundreds of MB, so lines of other record types are skipped before parsing. Every record is judged block by
     block: a user record holding a tool result and the user's own text counts for both. Returns:
@@ -372,7 +563,42 @@ def scan(transcript: Path, cwd: str, background_tasks: object = None, limit: int
       poll        whether a poll is pending
       background  (id, info) of the background tasks that still run: every running entry of the Stop payload's own
                   list when it is given, else the tasks the session launched by the transcript
-    Subagent (sidechain) records are not the session's own and are skipped."""
+    Subagent (sidechain) records are not the session's own and are skipped.
+
+    With a `key` (the session) the state of the pass is saved (scan-<key>.json), and the next scan of the same file
+    goes on from the saved byte offset instead of reading the whole transcript again: the result is the same as that
+    of a full pass, and any doubt about the saved state (see `load_scan`) means a full pass. What is saved is only what
+    the records so far decide; the payload's task list and the check that the plan files exist are applied on every call.
+    Known limit: a plan the session mentioned before the file existed and created later is picked up on the next full
+    pass only (the existence check is not part of the saved state, the mention is).
+
+    Measured (Python 3.x, one machine, real session transcripts, `scan` with a key; cold = no saved state, warm = same
+    size again, +2 MB = saved state of a transcript 2 MB shorter, the cache file is the saved state):
+      644 MB  no cache 2.76 s   cold 4.41 s (first read from disk)   warm 0.020 s   +2 MB 0.035 s   cache file 276 kB
+      165 MB  no cache 1.09 s   cold 1.07 s                          warm 0.009 s   +2 MB 0.032 s   cache file  79 kB
+       50 MB  no cache 0.39 s   cold 0.40 s                          warm 0.008 s   +2 MB 0.027 s   cache file  37 kB
+    The cache file grows with the tasks the session started (about 0.4 kB per MB of transcript), so no pruning."""
+    if key is None:
+        return run_scan(transcript, cwd, background_tasks, limit, None, None)[0]
+    path = scan_file(key)
+    with transcript.open("rb") as f:
+        resume = load_scan(path, f, cwd, limit)
+        try:
+            found, state = run_scan(transcript, cwd, background_tasks, limit, resume, f)
+        except Exception:
+            if resume is None:
+                raise
+            found, state = run_scan(transcript, cwd, background_tasks, limit, None, f)  # a saved state that does not fit the code
+            resume = None
+        if resume is None or state["offset"] != resume["offset"]:
+            save_scan(path, f, cwd, state)
+    return found
+
+
+def run_scan(transcript: Path, cwd: str, background_tasks: object, limit: int | None, resume: dict | None, handle) -> tuple[dict, dict]:
+    """The pass of `scan`, from the saved state `resume` (a full pass when None). Returns the result and the state to
+    save: the byte offset it stands for is the end of the last complete line read (a last line without its newline
+    may still be growing, so it is read again next time), with everything the records before it decided."""
     edited: dict[Path, bool] = {}
     read: dict[Path, bool] = {}
     cache: dict = {}
@@ -381,12 +607,24 @@ def scan(transcript: Path, cwd: str, background_tasks: object = None, limit: int
     polls: set[str] = set()
     tasks = subagent_tasks.Tasks()
     point = 0
-    with transcript.open("rb") as f:
+    if resume is not None:
+        edited, read = dict.fromkeys(resume["edited"], True), dict.fromkeys(resume["read"], True)
+        shell["dir"], reset_at, polls, tasks, point = resume["shell"], resume["reset_at"], set(resume["polls"]), resume["tasks"], resume["offset"]
+    saved: dict | None = None
+
+    def snapshot(offset: int) -> dict:
+        return {"offset": offset, "edited": [str(p) for p in edited], "read": [str(p) for p in read], "shell": shell["dir"],
+                "reset_at": reset_at, "polls": sorted(polls), "tasks": json.loads(json.dumps(tasks.to_state()))}
+
+    with (transcript.open("rb") if handle is None else contextlib.nullcontext(handle)) as f:
+        f.seek(point)
         for raw in f:
             if limit is not None and point + len(raw) > limit:
                 break  # past the stop point: whatever is there is not part of what the verdict is about
             start = point
             point += len(raw)
+            if saved is None and handle is not None and not raw.endswith(b"\n"):
+                saved = snapshot(start)  # only the last line can lack its newline; the state before it is what is saved
             line = raw.decode("utf-8", errors="replace")
             if not RECORD.search(line):
                 continue
@@ -406,17 +644,17 @@ def scan(transcript: Path, cwd: str, background_tasks: object = None, limit: int
                     ident = data.get("tool_use_id", "")
                     # The result closes the poll but is no proof of a human answer (a hook can answer it too): no reset.
                     polls.discard(ident)
-                elif kind == "user":
-                    text = reflect.REMINDER.sub("", data).strip()
-                    if text and from_user(record, text):
-                        reset_at = start
-                        polls.clear()
+            if users_input(record):
+                reset_at = start
+                polls.clear()
+        if saved is None and handle is not None:
+            saved = snapshot(point)
     ordered = list(reversed(edited)) + [p for p in reversed(read) if p not in edited]
     if isinstance(background_tasks, list):
-        background = [(e.get("id"), e) for e in background_tasks if isinstance(e, dict) and e.get("status") == subagent_tasks.RUNNING]
+        background = [(e.get("id"), e) for e in background_tasks if isinstance(e, dict) and e.get("status") in LIVE_STATUSES]
     else:
         background = subagent_tasks.live_by_transcript(tasks)
-    return {"plans": [p for p in ordered if p.is_file()], "reset_at": reset_at, "poll": bool(polls), "background": background}
+    return {"plans": [p for p in ordered if p.is_file()], "reset_at": reset_at, "poll": bool(polls), "background": background}, saved
 
 
 def record_text(record: dict) -> tuple[str, bool]:
@@ -439,33 +677,98 @@ def ends_cleanly(transcript: Path, size: int) -> bool:
         return f.read(1) == b"\n"
 
 
-def late_record_is_bookkeeping(record: dict, final_text: str | None, prompt_id: str | None, seen_final: bool) -> bool:
-    """Whether one record that landed after the stop's size is only the stop's own bookkeeping. An allowlist: any record
-    kind, attachment type or system subtype not named here may start a new turn (a hook wake, a task notification, a
-    compaction, a file change) and so counts as growth. Claude Code 2.1.330 records: a stop writes `stop_hook_summary`
-    and `turn_duration` system records, `hook_success`/`hook_cancelled` attachments and the final assistant record;
-    `promptId` sits on user records only, so an assistant record may carry none (a mismatch is checked when it does)."""
+def message_id(record: dict) -> str | None:
+    """The API message id of an assistant record; Claude Code writes one record per content block, all with the id."""
+    message = record.get("message")
+    ident = message.get("id") if isinstance(message, dict) else None
+    return ident if isinstance(ident, str) and ident else None
+
+
+def is_final_text(record: dict, final_text: str | None) -> bool:
+    """Whether an assistant record is the stop's final message: text only, equal to the payload's last_assistant_message."""
+    if record.get("type") != "assistant" or not final_text:
+        return False
+    text, call = record_text(record)
+    return not call and text.strip() == final_text.strip()
+
+
+def final_message_ids(transcript: Path, size: int, final_text: str | None) -> set[str]:
+    """The message ids of the stop's final message among the last TAIL_BYTES of the first `size` bytes (the final
+    record is the last text record, so it sits at the very end)."""
+    if not final_text or size <= 0:
+        return set()
+    start = max(0, size - TAIL_BYTES)
+    with transcript.open("rb") as f:
+        f.seek(start)
+        data = f.read(size - start)
+    lines = data.splitlines()
+    if start:
+        lines = lines[1:]  # the first line of a tail read may be cut
+    for raw in reversed(lines):
+        record = parsed(raw.decode("utf-8", errors="replace"))
+        if record is not None and is_final_text(record, final_text):
+            ident = message_id(record)
+            return {ident} if ident else set()
+    return set()
+
+
+def has_tool_block(record: dict) -> bool:
+    """Whether the message of a record holds a tool_use or a tool_result block (only blocks: other fields may name tools)."""
+    message = record.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    return isinstance(content, list) and any(isinstance(b, dict) and b.get("type") in ("tool_use", "tool_result") for b in content)
+
+
+def unknown_kind(record: dict) -> str | None:
+    """The label of a record kind that is not in the known sets (a type, `attachment/<type>` or `system/<subtype>`;
+    a missing type or subtype is a kind of its own); None for a known one."""
     kind = record.get("type")
-    if kind == "assistant":
-        text, call = record_text(record)
-        if call or seen_final or not final_text or text.strip() != final_text.strip():
-            return False
-        return record.get("promptId") in (None, prompt_id)
+    if not isinstance(kind, str):
+        return "no-type"
     if kind == "attachment":
         attachment = record.get("attachment")
-        return isinstance(attachment, dict) and attachment.get("type") in BOOKKEEPING_ATTACHMENTS
+        inner = attachment.get("type") if isinstance(attachment, dict) else None
+        return None if inner in KNOWN_ATTACHMENTS else f"attachment/{inner or ''}"
     if kind == "system":
-        if record.get("subtype") not in BOOKKEEPING_SYSTEM:
-            return False
-        return not record.get("preventedContinuation") and not record.get("hookErrors")
+        subtype = record.get("subtype")
+        return None if subtype in KNOWN_SYSTEM else f"system/{subtype or ''}"
+    return None if kind in KNOWN_TYPES else kind
+
+
+def starts_new_turn(record: dict, final_text: str | None, prompt_id: str | None, final_ids: set[str], seen_final: bool) -> bool:
+    """Whether one record that landed after the stop's size starts, or belongs to, a new turn, so the verdict about
+    this stop is stale. Every other record kind is the stop's own bookkeeping (hooks, timing, snapshots, titles,
+    usage records, ...): Claude Code writes a dozen kinds after a clean stop (a `data-flow-records` record follows
+    `turn_duration` in 108 of 182 clean stops in 2.1.330), and a list of the harmless ones kept dropping real
+    verdicts. New turn: a user record of any origin; an assistant record that holds a tool call or text other than the
+    stop's final message (the final, with this prompt's id, counts once); an assistant record with neither text nor
+    tool call (thinking) unless it shares the final message's id; any tool_use or tool_result block; a queued_command
+    attachment (a hook wake or a notification waiting for the next turn); a queue-operation (input waiting).
+    `promptId` sits on user records only, so an assistant record may carry none (a mismatch is checked when it does)."""
+    kind = record.get("type")
+    if kind in ("user", "queue-operation") or has_tool_block(record):
+        return True
+    if kind == "attachment":
+        attachment = record.get("attachment")
+        return isinstance(attachment, dict) and attachment.get("type") == "queued_command"
+    if kind == "assistant":
+        text, call = record_text(record)
+        if call:
+            return True
+        if not text.strip():
+            ident = message_id(record)
+            return ident is None or ident not in final_ids
+        if seen_final or not is_final_text(record, final_text):
+            return True
+        return record.get("promptId") not in (None, prompt_id)
     return False
 
 
-def grew_beyond(transcript: Path, size: int, final_text: str | None = None, prompt_id: str | None = None) -> bool:
-    """Whether the transcript holds, after its first `size` bytes, anything but the stop's own bookkeeping (see
-    `late_record_is_bookkeeping`): the final message itself landing late (the payload's `last_assistant_message`, of the
-    payload's prompt) is allowed once. Anything else, a user record, a tool call, another text, an unknown record or
-    a line that is not complete JSON, means the verdict may be stale, and a doubt counts as stale."""
+def grew_beyond(transcript: Path, size: int, final_text: str | None = None, prompt_id: str | None = None,
+                unknown: set[str] | None = None) -> bool:
+    """Whether the transcript holds, after its first `size` bytes, growth that starts or belongs to a new turn (see
+    `starts_new_turn`) or a line that is not complete JSON: a half-written line means a record is being written, and a
+    doubt counts as stale. Kinds of record outside the known sets are added to `unknown` when it is given."""
     with transcript.open("rb") as f:
         f.seek(size)
         data = f.read()
@@ -473,13 +776,22 @@ def grew_beyond(transcript: Path, size: int, final_text: str | None = None, prom
         return False
     if not data.endswith(b"\n"):
         return True
+    records = [parsed(raw.decode("utf-8", errors="replace")) for raw in data.splitlines()]
+    if any(record is None for record in records):
+        return True
+    final_ids = final_message_ids(transcript, size, final_text)
+    # A thinking-only record of the final message may precede its late text record, so the late ids come first.
+    final_ids |= {ident for record in records if is_final_text(record, final_text) and (ident := message_id(record))}
+    grew = False
     seen_final = False
-    for raw in data.splitlines():
-        record = parsed(raw.decode("utf-8", errors="replace"))
-        if record is None or not late_record_is_bookkeeping(record, final_text, prompt_id, seen_final):
-            return True
-        seen_final = seen_final or record.get("type") == "assistant"
-    return False
+    for record in records:
+        label = unknown_kind(record)
+        if label is not None and unknown is not None:
+            unknown.add(label)
+        if starts_new_turn(record, final_text, prompt_id, final_ids, seen_final):
+            grew = True
+        seen_final = seen_final or is_final_text(record, final_text)
+    return grew
 
 
 def normalized(item: str) -> str:
@@ -595,7 +907,7 @@ def state_lock():
 
 
 def counter_file(key: str) -> Path:
-    return STATE_DIR / f"wakes-{re.sub(r'[^A-Za-z0-9_.-]', '_', key)[:100]}.json"
+    return STATE_DIR / f"wakes-{safe_key(key)}.json"
 
 
 def read_count(key: str, found: dict) -> int:
@@ -620,10 +932,37 @@ def save_count(key: str, count: int, point: int) -> None:
         temp.unlink(missing_ok=True)
 
 
+def unseen_kinds(kinds: set[str]) -> list[str]:
+    """The record kinds of `kinds` not yet written to the decision log; remembers them. Best effort, called under the
+    state lock: a broken or unwritable file only means a kind is logged again."""
+    try:
+        try:
+            seen = set(json.loads((STATE_DIR / SEEN_KINDS_FILE).read_text(encoding="utf-8")))
+        except (OSError, ValueError, TypeError):
+            seen = set()
+        fresh = sorted(kinds - seen)
+        if fresh:
+            (STATE_DIR / SEEN_KINDS_FILE).write_text(json.dumps(sorted(seen | kinds)), encoding="utf-8")
+        return fresh
+    except (OSError, ValueError, TypeError):
+        return sorted(kinds)
+
+
+def reflection_woke(payload: dict, since: float) -> bool:
+    """Whether reflection (a sibling Stop hook, run on the same stop at the same time) woke the session at or after
+    `since`. Its stamp (`reflect.wake_file`, the wall-clock time of its wake) is only read: reflection's own next
+    Stop clears it. A missing or broken stamp reads as no wake."""
+    try:
+        return float(reflect.wake_file(payload).read_text(encoding="utf-8")) >= since
+    except (OSError, ValueError):
+        return False
+
+
 def assess(payload: dict, emit=None) -> str | None:
     """The wake text when the session stopped with agreed work left, else None. `emit` gets the text inside the locked
     step that validated the verdict and counted the wake. Logs every decision."""
     started = time.monotonic()
+    started_wall = time.time()  # the stop's boundary on the wall clock: reflection's stamp is a wall-clock time
     session = payload.get("session_id")
     transcript = reflect.resolve_transcript(payload.get("transcript_path"), session)
     if not transcript.is_file():
@@ -635,7 +974,7 @@ def assess(payload: dict, emit=None) -> str | None:
     if not ends_cleanly(transcript, size):
         log({"session": key, "decision": "unidentified", "reason": "the transcript ends inside a line"})
         return None
-    found = scan(transcript, cwd, payload.get("background_tasks"), limit=size)
+    found = scan(transcript, cwd, payload.get("background_tasks"), limit=size, key=key)
     wakes = read_count(key, found)
     entry = {"session": key, "cwd": cwd, "wakes": wakes}
 
@@ -655,12 +994,12 @@ def assess(payload: dict, emit=None) -> str | None:
     if wakes >= MAX_WAKES:
         settle("wake-limit", f"{wakes} wakes in a row without a message of the user")
         return None
-    lines = reflect.tail_lines(transcript, classify=classify)  # the window is counted by the same origin judgement
+    lines = with_text_prompts(reflect.tail_lines(transcript, classify=classify))  # the window is counted by the same origin judgement
     # A poll answer is shown as a plain tool result (answers=False): nothing in its record says a human gave it.
     events = reflect.events_of(lines, classify=classify, answers=False)
     text = model_text(payload, transcript, found, events, wakes)
     dirs = list(dict.fromkeys(p.parent for p in found["plans"]))
-    answer, cost, error = reflect.ask(MODEL, VERDICTS, text, cwd, dirs, started, prompt_file=PROMPT_FILE, schema_text=SCHEMA)
+    answer, cost, error = reflect.ask(MODEL, VERDICTS, text, cwd, dirs, started, prompt_file=PROMPT_FILE, schema_text=SCHEMA, deadline=MODEL_DEADLINE)
     seconds = round(time.monotonic() - started, 2)
     if answer is None:
         log({**entry, "decision": "failed", "cost": cost, "seconds": seconds, "reason": "", "error": error})
@@ -668,9 +1007,16 @@ def assess(payload: dict, emit=None) -> str | None:
     if answer.get("verdict") != "idle":
         log({**entry, "decision": "ok", "verdict": "ok", "cost": cost, "seconds": seconds, "reason": answer.get("evidence", "")})
         return None
+    unknown: set[str] = set()
+    fresh: list[str] = []
     with state_lock():
-        if grew_beyond(transcript, size, payload.get("last_assistant_message"), payload.get("prompt_id")):
+        grew = grew_beyond(transcript, size, payload.get("last_assistant_message"), payload.get("prompt_id"), unknown)
+        if unknown:
+            fresh = unseen_kinds(unknown)
+        if grew:
             outcome, before, wake = "superseded", wakes, None
+        elif reflection_woke(payload, started_wall - STAMP_SKEW):
+            outcome, before, wake = "reflection-woke", wakes, None
         else:
             before = read_count(key, found)
             outcome = "wake-limit" if before >= MAX_WAKES else "wake"
@@ -680,8 +1026,11 @@ def assess(payload: dict, emit=None) -> str | None:
                 if emit:
                     emit(wake)
     seconds = round(time.monotonic() - started, 2)
+    if fresh:
+        log({**entry, "decision": "unknown-record", "kinds": fresh, "reason": "record kinds outside the known sets, counted as bookkeeping"})
     if wake is None:
-        reasons = {"superseded": "the transcript grew while the model was thinking", "wake-limit": f"{before} wakes in a row without a message of the user"}
+        reasons = {"superseded": "the transcript grew while the model was thinking", "wake-limit": f"{before} wakes in a row without a message of the user",
+                   "reflection-woke": "reflection woke the session for this same stop"}
         log({**entry, "wakes": before, "decision": outcome, "cost": cost, "seconds": seconds, "reason": reasons[outcome]})
         return None
     point = normalized(answer.get("item") or answer.get("next") or "")
@@ -703,7 +1052,10 @@ def main() -> None:
     try:
         text = assess(payload, write_wake)
     except Exception as e:  # a broken assistant must never hold the turn
-        log({"session": payload.get("session_id"), "decision": "crashed", "error": f"{type(e).__name__}: {str(e)[:300]}"})
+        try:
+            log({"session": payload.get("session_id"), "decision": "crashed", "error": f"{type(e).__name__}: {str(e)[:300]}"})
+        except Exception:  # the log is best-effort here: an unwritable log must not turn a crash into a traceback
+            pass
         return
     if text:
         sys.exit(WAKE_EXIT)

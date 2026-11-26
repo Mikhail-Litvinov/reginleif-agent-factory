@@ -129,6 +129,29 @@ class AskCommandTests(ProjectCase):
             self.assertNotIn("budget", arg.lower(), f"budget in argument {arg!r}")
 
 
+class AskDeadlineTests(ProjectCase):
+    """The time budget of ask() is a parameter: the default stays reflection's, a caller with a shorter hook timeout
+    passes its own."""
+
+    def ask_after(self, spent, **kwargs):
+        envelope = json.dumps({"structured_output": {"verdict": "ok"}, "total_cost_usd": 0})
+        completed = subprocess.CompletedProcess(args=[], returncode=0, stdout=envelope, stderr="")
+        with mock.patch.object(REFLECT.shutil, "which", return_value="claude"), \
+                mock.patch.object(REFLECT.subprocess, "run", return_value=completed) as run:
+            answer, _, error = REFLECT.ask("haiku", ["ok"], "text", str(self.project), [], time.monotonic() - spent, **kwargs)
+        return answer, error, run.call_count
+
+    def test_the_default_deadline_still_allows_a_call_that_fits(self):
+        spent = REFLECT.DEADLINE - REFLECT.CALL_TIMEOUT - 20
+        answer, _, calls = self.ask_after(spent)
+        self.assertEqual((answer, calls), ({"verdict": "ok"}, 1))
+
+    def test_a_shorter_deadline_stops_a_call_that_no_longer_fits(self):
+        spent = REFLECT.DEADLINE - REFLECT.CALL_TIMEOUT - 20
+        answer, error, calls = self.ask_after(spent, deadline=spent + REFLECT.CALL_TIMEOUT - 10)
+        self.assertEqual((answer, error, calls), (None, "no time left", 0))
+
+
 ESTIMATE_KIND = 6  # check 6 of reflect_prompt.md: an estimate without the analysis file
 
 
@@ -157,6 +180,31 @@ class TranscriptLookupTests(ProjectCase):
         named = config / "projects" / "C--work-project-plugin" / "probe.jsonl"
         self.assertEqual(REFLECT.resolve_transcript(str(named), "probe"), real)
         self.assertTrue(REFLECT.skipped({"transcript_path": str(named), "session_id": "probe"}))
+
+
+class SiblingWakeTests(ProjectCase):
+    """The wake text of the chief-assistant hook (a sibling Stop hook) arrives as a user-role message but is not the user's."""
+
+    ASSISTANT_WAKE = "[chief-assistant] You ended your turn, but agreed work seems to be still open (the plan): evidence."
+
+    def test_a_wake_of_the_chief_assistant_is_not_the_users_words(self):
+        self.assertFalse(REFLECT.is_users(self.ASSISTANT_WAKE))
+        self.assertTrue(REFLECT.is_users("Please continue with the plan."))
+
+    def test_a_wake_of_the_chief_assistant_does_not_hide_that_a_turn_began_with_a_wake_of_reflection(self):
+        entries = [text_entry("user", 0, "Please continue with the plan."), text_entry("assistant", 1, "Done."),
+                   text_entry("user", 2, REFLECT.WAKE_MARKER + " review"), text_entry("assistant", 3, "Fixed."),
+                   text_entry("user", 4, self.ASSISTANT_WAKE)]
+        path = self.dir / "chain.jsonl"
+        path.write_text("".join(json.dumps(e) + "\n" for e in entries), encoding="utf-8")
+        self.assertTrue(REFLECT.started_by_wake(path))
+
+    def test_a_real_user_message_after_a_wake_of_reflection_still_ends_the_wake_turn(self):
+        entries = [text_entry("user", 0, REFLECT.WAKE_MARKER + " review"), text_entry("assistant", 1, "Fixed."),
+                   text_entry("user", 2, "Thanks, next one.")]
+        path = self.dir / "after.jsonl"
+        path.write_text("".join(json.dumps(e) + "\n" for e in entries), encoding="utf-8")
+        self.assertFalse(REFLECT.started_by_wake(path))
 
 
 @unittest.skipUnless(os.environ.get("REFLECT_LIVE_PROBE") == "1", "set REFLECT_LIVE_PROBE=1 to run the real reviewer probe")
