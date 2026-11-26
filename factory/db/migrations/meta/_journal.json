@@ -15,6 +15,13 @@
       "when": 1795707336490,
       "tag": "0002_tasks",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1795707336491,
+      "tag": "0003_decisions",
+      "breakpoints": true
     }
   ]
 }
