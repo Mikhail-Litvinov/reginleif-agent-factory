@@ -3,14 +3,14 @@
 // account can do there what it could do before. Also: the restore always makes a new, generated project, refuses a taken
 // name, a damaged backup and a manifest that is not the completion marker, and the old stack is never touched.
 import assert from "node:assert/strict";
-import { copyFile, mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { copyFile } from "node:fs/promises";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { backup, type BackupResult } from "../deploy/backup/backup.ts";
 import { restore } from "../deploy/backup/restore.ts";
 import { freePort, findContainer, psql, run, tryPsql } from "../deploy/lib.ts";
 import { Cleanups, createTestStack, leftovers, trackedProject, type TestStack } from "./helpers.ts";
+import { disposeScratch, makeScratch } from "./scratch.ts";
 
 const ROLES = ["af_migrator", "af_api", "af_control", "af_backup", "af_reader"] as const;
 
@@ -50,10 +50,9 @@ describe("recovery into a new project", () => {
 	const cleanups = new Cleanups();
 
 	before(async () => {
-		cleanups.add(async () => {
-			if (work) await rm(work, { recursive: true, force: true });
-		});
-		work = await mkdtemp(join(tmpdir(), "af-test-recovery-"));
+		const scratchDir = await makeScratch("af-test-recovery-");
+		cleanups.add(() => disposeScratch(scratchDir));
+		work = scratchDir.path;
 		old = await createTestStack();
 		const c = old.container;
 		await psql(c, "af_migrator", [

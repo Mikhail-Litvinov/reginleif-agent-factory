@@ -3,14 +3,13 @@
 // from the project's own network (pg_hba "samenet").
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { backup } from "../deploy/backup/backup.ts";
 import { PsqlSession, psql, run, runChecked } from "../deploy/lib.ts";
 import { SECRET_NAMES } from "../deploy/setup-secrets.ts";
 import { Cleanups, createTestStack, type TestStack } from "./helpers.ts";
+import { disposeScratch, makeScratch } from "./scratch.ts";
 
 // Prints every process's command line and environment in the container, as the given user.
 const SCAN = "for p in /proc/[0-9]*; do tr '\\0' ' ' < $p/cmdline 2>/dev/null; echo; tr '\\0' '\\n' < $p/environ 2>/dev/null; done";
@@ -21,10 +20,9 @@ describe("hardening", () => {
 	const cleanups = new Cleanups();
 
 	before(async () => {
-		cleanups.add(async () => {
-			if (work) await rm(work, { recursive: true, force: true });
-		});
-		work = await mkdtemp(join(tmpdir(), "af-test-hardening-"));
+		const scratchDir = await makeScratch("af-test-hardening-");
+		cleanups.add(() => disposeScratch(scratchDir));
+		work = scratchDir.path;
 		stack = await createTestStack();
 	});
 	after(async () => {
@@ -77,8 +75,9 @@ describe("hardening", () => {
 			await assertNone("docker inspect", (await run("docker", ["inspect", stack.container])).stdout);
 			const logs = await run("docker", ["logs", stack.container]);
 			await assertNone("container logs", logs.stdout + logs.stderr);
-			// The final server process (pid 1) holds no password variable either.
-			const env = await runChecked("docker", ["exec", "-u", "postgres", stack.container, "sh", "-c", "tr '\\0' '\\n' < /proc/1/environ"]);
+			// The final server process holds no password variable either. It is pid 1 after a restart, but a child of the
+			// entrypoint wrapper (pid 1, root) after the first start, so it is found by the pid in its own postmaster.pid.
+			const env = await runChecked("docker", ["exec", "-u", "postgres", stack.container, "sh", "-c", "tr '\\0' '\\n' < /proc/$(head -n 1 /var/lib/postgresql/data/postmaster.pid)/environ"]);
 			assert.equal(/PASSWORD/i.test(env), false, "PGPASSWORD or POSTGRES_PASSWORD in the server environment");
 		} finally {
 			await holder.close();
@@ -86,10 +85,12 @@ describe("hardening", () => {
 		}
 	});
 
-	it("the healthcheck is a TCP pg_isready that carries no password", async () => {
+	it("the healthcheck is a TCP pg_isready plus the init marker and a login, and carries no password", async () => {
 		const health = (await runChecked("docker", ["inspect", "--format", "{{json .Config.Healthcheck.Test}}", stack.container])).trim();
 		assert.match(health, /pg_isready/);
 		assert.match(health, /127\.0\.0\.1/);
+		assert.match(health, /\.af-init-complete/);
+		assert.match(health, /\bpsql\b/);
 		assert.equal(/PGPASSWORD|PASSWORD/i.test(health), false);
 	});
 
@@ -102,14 +103,16 @@ describe("hardening", () => {
 			(imageName ??= runChecked("docker", ["inspect", "--format", "{{.Config.Image}}", stack.container]).then((text) => text.trim()));
 
 		// Runs a short-lived client container on `network`; it reads the password from the read-only secrets mount into a
-		// passfile (never an environment variable). It carries the stack's run label, so the checked removal of that label
-		// (stack.dispose) removes it should --rm not have, and a docker failure there fails the run.
+		// passfile (never an environment variable). It carries the stack's run label and is removed by the checked removal of
+		// that label (stack.dispose), not by `--rm`: `--rm` also deletes the container's anonymous volumes, objects the
+		// run never selected. The server image declares VOLUME /var/lib/postgresql/data, so docker would make an anonymous
+		// volume for it; a tmpfs mount at that path takes its place and leaves nothing behind.
 		const client = async (network: string, host: string, role: string, extra = ""): Promise<{ code: number; text: string }> => {
 			const name = `af-test-client-${randomBytes(4).toString("hex")}`;
 			const script = `umask 077; f=$(mktemp); printf '*:*:*:${role}:%s\\n' "$(cat /s/${role})" > "$f"; ` +
 				`PGPASSFILE="$f" PGCONNECT_TIMEOUT=3 psql -w -h ${host} -U ${role} -d agent_factory ${extra} -Atc 'select 42'`;
 			const result = await run("docker", [
-				"run", "--rm", "--name", name, "--label", `af.run=${stack.runId}`, "--network", network,
+				"run", "--name", name, "--label", `af.run=${stack.runId}`, "--network", network, "--tmpfs", "/var/lib/postgresql/data",
 				"--mount", `type=bind,source=${stack.secretsDir},target=/s,readonly`,
 				"--entrypoint", "sh", await image(), "-c", script,
 			]);

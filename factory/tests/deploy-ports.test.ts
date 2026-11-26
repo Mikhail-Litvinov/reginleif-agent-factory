@@ -1,11 +1,13 @@
 // Every published port of every service binds to the loopback address only.
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { composeFilePath, run, runChecked } from "../deploy/lib.ts";
+import type { OwnedDir } from "../deploy/owned.ts";
 import { sharedStack } from "./helpers.ts";
+import { disposeScratch, makeScratch } from "./scratch.ts";
 
 interface PortSpec {
 	host_ip?: string;
@@ -31,12 +33,14 @@ const configOf = async (file: string): Promise<ComposeConfig> =>
 	JSON.parse(await runChecked("docker", ["compose", "-f", file, "config", "--format", "json"], { env: { AF_SECRETS_DIR: tmpdir() } })) as ComposeConfig;
 
 describe("published ports", () => {
+	let scratch: OwnedDir | undefined;
 	let work: string;
 	before(async () => {
-		work = await mkdtemp(join(tmpdir(), "af-test-ports-"));
+		scratch = await makeScratch("af-test-ports-");
+		work = scratch.path;
 	});
 	after(async () => {
-		await rm(work, { recursive: true, force: true });
+		await disposeScratch(scratch);
 	});
 
 	it("the compose file publishes at least one port and all of them bind to 127.0.0.1", async () => {

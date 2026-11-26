@@ -7,8 +7,8 @@ line, run them one after the other). How to read them:
 - Every command runs from the repository root, in one PowerShell window, and can be pasted as it stands once the
   placeholders below are filled in. `node factory/...` and `docker compose ... -f factory/deploy/compose.yml` need the
   root because the paths are relative to it.
-- The package scripts run from the root too, as `npm --prefix factory run <script> -- <arguments>`; `npm --prefix`
-  makes npm work inside `factory/`, so no `cd` is needed. The script then runs with `factory/` as its working
+- The package scripts run from the root too, as `npm --prefix factory run` followed by the script name, `--` and its
+  arguments; `npm --prefix` makes npm work inside `factory/`, so no `cd` is needed. The script then runs with `factory/` as its working
   directory, so a path given to it must be absolute.
 - A placeholder in angle brackets is written once, into a PowerShell variable, as a quoted string: replace the whole
   `<...>` with the value and keep the single quotes, which also make a path with spaces safe. Paths are absolute and
@@ -17,6 +17,9 @@ line, run them one after the other). How to read them:
   `$secrets = '<secrets dir>'` (the secrets directory of Install step 2)
 
   `$backups = '<backups dir>'` (the directory that holds the backups)
+
+  `$project = '<project>'` (the project name of the server to dump: `agent-factory`, or the restored project after a
+  switch-over; used by the backup command only)
 
 - An optional argument is a separate command, never an `[optional]` part of one.
 
@@ -61,7 +64,7 @@ Nothing else on the machine is touched: the stack neither uses nor removes other
 
    The first start creates the roles and the `agent_factory` database (`factory/deploy/postgres/init/10-roles.sh`). The
    server restarts once at the end of init, so for a minute the container reports `starting`. Wait for it, by running
-   this line again until it prints `healthy`:
+   this line again until it prints `healthy` (if the container stops instead, see "A start that refuses"):
 
    `docker inspect --format '{{.State.Health.Status}}' agent-factory-postgres-1`
 
@@ -112,6 +115,10 @@ document; the earlier test sent `kill -QUIT 1` inside the container and it resta
 and `docker kill` counts as a manual stop. A machine reboot and a restart of Docker Desktop were not tested here (the
 Docker daemon was not to be restarted); with `unless-stopped` Docker starts the container with its daemon.
 
+A restart never turns a half-made first start into a served database: a data directory that holds a database but no
+record of a completed initialisation is refused (see "A start that refuses" below), so the restart that
+`unless-stopped` performs after an interrupted first start ends in a stopped container, not in a healthy one.
+
 ## Accounts
 
 The six accounts and their rights are in `database.md` "Accounts and rights". Only the application database is reachable
@@ -133,20 +140,85 @@ is not used as it is. The container starts through a wrapper (`factory/deploy/po
 `bash /etc/agent-factory/entrypoint.sh`, since a Windows bind mount has no exec bit):
 
 - `initdb` gets the password as a file, `--pwfile=/run/secrets/af_bootstrap`, set in `POSTGRES_INITDB_ARGS`.
-- The tools of init (`psql`) read a passfile in `/dev/shm` (`pgpass.*`, mode 0600, owned by the postgres user); the
-  wrapper exports only its path as `PGPASSFILE`, and a path is not a secret.
+- The tools of init (`psql`) read a passfile (`pgpass.*`, mode 0600, owned by the postgres user) in one private
+  directory in tmpfs, `/dev/shm/af-init.*`, which the wrapper makes; it exports only the passfile's path as `PGPASSFILE`
+  (a path is not a secret) and the directory as `AF_INIT_DIR`. Every passfile of init is made in that directory and
+  nowhere else. During the first start the wrapper stays the parent of the image's entrypoint (and forwards signals to
+  it), so its exit trap removes the directory, and with it every passfile, on every way out: success, a failing init
+  script, a signal, a crash. Only a SIGKILL of the wrapper skips the trap; the files are in tmpfs, which the stop of the
+  container discards.
 - `POSTGRES_HOST_AUTH_METHOD=trust` is set only to satisfy the image's check that some password rule exists. The server
   does not read the `pg_hba.conf` of the data directory at all but the mounted `/etc/agent-factory/pg_hba.conf`
   (`-c hba_file=...`), so no trust rule is ever active for the network.
 - `init/99-finish.sh` is the last init script: it removes the passfile, rewrites the trust rule of the data directory to
-  `scram-sha-256`, and fails the init when any trust rule is left.
+  `scram-sha-256`, fails the init when any trust rule is left, and only then creates the marker `.af-init-complete`
+  (see "A start that refuses"). When the initialisation does not complete, the wrapper's trap closes the trust rule
+  itself, so no failure path leaves a trust rule in the volume.
 
-The healthcheck is a TCP `pg_isready -h 127.0.0.1`, which needs no login: the init server of the image has no TCP
-listener, so a TCP answer means the final server is up, which is exactly what must be known. Checked by tests:
+The healthcheck proves a usable database, in three steps that must all hold: a TCP `pg_isready -h 127.0.0.1` (the init
+server of the image has no TCP listener, so a TCP answer means the final server is up), the marker `.af-init-complete`
+in the data directory, and a real login as `af_backup` with `select 1`. The login reads the password from the secret
+file into a passfile in tmpfs (mode 0600, removed by a trap), so no password is in a command line or an environment.
+Checked by tests:
 `factory/tests/first-start.test.ts` samples the environment and the command line of every process in the container
 continuously through the whole first start, as root and as the postgres user, and looks for the passwords and for a
 leftover passfile; `factory/tests/hardening.test.ts` scans inspect output, logs and the command lines and environments
 of all processes during a running dump.
+
+## A start that refuses
+
+The image skips its whole initialisation when the data directory already holds a database (`PG_VERSION`). A first start
+that was cut off (a stop, a crash, a failing init script) leaves such a directory with part of the roles missing, and a
+plain restart would then serve it as if it were complete. So the last step of a successful initialisation
+(`init/99-finish.sh`) creates the marker file `.af-init-complete` in the data directory, and the wrapper
+(`factory/deploy/postgres/entrypoint.sh`) starts the server only when the marker is there, or when the directory is empty
+(a first start).
+
+A data directory with `PG_VERSION` and without the marker is refused: the container stops with a non-zero exit code and
+prints `refusing to start` and a pointer to this section on its error output, and it never reports `healthy`. The
+refusal also closes the trust rule that the image may have left in the directory's `pg_hba.conf`, so a refused volume
+does not stay open. Read the reason:
+
+`docker logs agent-factory-postgres-1`
+
+Under `unless-stopped` Docker tries again, and each attempt ends the same way, which is the intended result: a refused
+volume is never served. Stop it with `docker compose -p agent-factory -f factory/deploy/compose.yml stop`.
+
+An interrupted first start, on a volume that holds nothing worth keeping (the first start of a new install or of a
+scratch project): stop the stack, delete the volume with the exact name that `docker volume ls` shows for the project,
+and start again from Install step 3. Never do this on a volume with real data: the deletion cannot be undone.
+
+A database made before the marker existed (a legacy database) is refused too, although it is complete. The wrapper does
+not mark it by itself, because it cannot tell a complete database from a half-made one without logging in to a server
+that is not running. The owner marks it once, after checking it, ideally before the stack is updated, while the previous
+version still runs and answers. The check is read-only and has three parts, all must hold:
+
+- the five application roles and the bootstrap role exist: open a session as `af_backup` (it asks for the password,
+  which is in the `af_backup` secret file; nothing goes into a command line)
+
+  `docker exec -it agent-factory-postgres-1 psql -h 127.0.0.1 -U af_backup -d agent_factory`
+
+  and run `select count(*) from pg_roles where rolname like 'af\_%';`, which must print 6, then `\q`. The login
+  itself also proves that the database `agent_factory` exists;
+- the trust rule is closed: this command must print 0 (the variable holds the pattern, so that PowerShell does not
+  read it):
+
+  `$rule = '^(local|host).*trust'`
+
+  `docker exec -u postgres agent-factory-postgres-1 grep -Ec $rule /var/lib/postgresql/data/pg_hba.conf`
+
+- the first start was not cut off: the roles count and the login above are the proof, because the roles are created
+  by the init script before the step that makes the marker.
+
+When all hold, create the marker. The variable holds the container name, so the command is the same for another
+project name:
+
+`$container = 'agent-factory-postgres-1'`
+
+`docker exec -u postgres $container touch /var/lib/postgresql/data/.af-init-complete`
+
+Then start (or wait for the next automatic attempt) and wait for `healthy` as in Install step 3. If a check fails,
+do not create the marker: the database is half-made, and the recovery is a restore from a backup (`recovery.md`).
 
 ## Backup
 
@@ -157,7 +229,7 @@ Reads through `af_backup` (select only), inside the container. From the reposito
 The server dumped is the project `agent-factory`. After a switch-over to a restored project, name it (see
 `recovery.md`):
 
-`node factory/deploy/backup/backup.ts --target $backups --project <project>`
+`node factory/deploy/backup/backup.ts --target $backups --project $project`
 
 The command needs no `AF_SECRETS_DIR`: the password is read inside the container. The target directory is created when
 missing.
@@ -180,7 +252,7 @@ Proves a backup restores and equals what was backed up, without touching the rea
 `node factory/deploy/backup/restore-check.ts --manifest $manifest`
 
 The manifest file name must be exactly `af-<UTC stamp>-<8 hex>.manifest.json` (a `.partial` file or an older name
-without the hex part is refused). The scratch project is named `af-restore-check-<hex>`; `--prefix <name>` replaces the
+without the hex part is refused). The scratch project is named `af-restore-check-<hex>`; the `--prefix` argument followed by a name replaces the
 `af-restore-check` part, as a separate run of the same command with that argument added. The command verifies the manifest, the dump and the checksum file by content, starts
 a scratch server (own project `af-restore-check-<hex>`, own throw-away secrets in a temporary directory, a free
 loopback port), restores into it, compares major version, row counts and foreign keys, and removes the scratch server
@@ -198,7 +270,7 @@ root, with `$manifest` set as above:
 
 `npm --prefix factory run restore -- --manifest $manifest --secrets $secrets`
 
-It picks a free loopback port itself; to choose one, run the same command with `--port <port>` added at the end. The
+It picks a free loopback port itself; to choose one, run the same command with `--port` and a port number added at the end. The
 whole procedure, including the manual switch-over, is in `recovery.md`.
 
 ## Tests

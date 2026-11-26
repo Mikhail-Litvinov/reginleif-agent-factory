@@ -11,13 +11,13 @@
 // the final server, the psql calls) were really read and every secret was loaded, so the test cannot pass by sampling
 // nothing.
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { findContainer, freePort, ownedComposeArgs, ownedResources, run, runChecked, stackEnv, waitHealthy } from "../deploy/lib.ts";
 import { SECRET_NAMES } from "../deploy/setup-secrets.ts";
 import { Cleanups, newSecretsDir, trackedProject } from "./helpers.ts";
+import { disposeScratch, makeScratch } from "./scratch.ts";
 
 const STOP = "/tmp/af-sampler.stop";
 const outFile = (user: string): string => `/tmp/af-sampler.${user}.out`;
@@ -69,8 +69,9 @@ describe("first start", () => {
 	const reports = new Map<string, string[]>();
 
 	before(async () => {
-		const scratch = await mkdtemp(join(tmpdir(), "af-test-sampler-"));
-		cleanups.add(() => rm(scratch, { recursive: true, force: true }));
+		const scratchDir = await makeScratch("af-test-sampler-");
+		cleanups.add(() => disposeScratch(scratchDir));
+		const scratch = scratchDir.path;
 		const secretsDir = await newSecretsDir(cleanups);
 		const port = await freePort();
 		const { project, runId } = trackedProject(cleanups);

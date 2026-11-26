@@ -6,10 +6,11 @@
 // even halfway through creating a resource, still removes everything that may exist. Removal is idempotent: removing a
 // project that was never created is a no-op, so registering early is safe.
 import { randomBytes } from "node:crypto";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import type { OwnedDir } from "../deploy/owned.ts";
 import { createSecrets } from "../deploy/setup-secrets.ts";
+import { disposeScratch, makeScratch } from "./scratch.ts";
 import { findContainer, freePort, newRunId, ownedResources, removeOwned, run, stackArgs, stackEnv, startStack, waitHealthy, type RunResult } from "../deploy/lib.ts";
 
 // A stack of undo actions, run last-registered first; one failing action does not stop the rest.
@@ -47,13 +48,11 @@ export const newProject = (): string => `af-test-${randomBytes(4).toString("hex"
 
 // A secrets directory that cleanups removes (registered first, then created).
 export const newSecretsDir = async (cleanups: Cleanups): Promise<string> => {
-	let dir = "";
-	cleanups.add(async () => {
-		if (dir) await rm(dir, { recursive: true, force: true });
-	});
-	dir = await mkdtemp(join(tmpdir(), "af-test-secrets-"));
-	createSecrets(dir);
-	return dir;
+	let dir: OwnedDir | undefined;
+	cleanups.add(() => disposeScratch(dir));
+	dir = await makeScratch("af-test-secrets-");
+	createSecrets(dir.path);
+	return dir.path;
 };
 
 // Registers the removal of everything that carries a new run id, then returns the project and the id; nothing exists yet,

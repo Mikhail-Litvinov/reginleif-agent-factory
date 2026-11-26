@@ -3,22 +3,25 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdtemp, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Readable, Writable } from "node:stream";
 import { after, before, describe, it } from "node:test";
 import { MANIFEST_FORMAT, captureDump, streamDump } from "../deploy/backup/backup.ts";
 import { manifestProblems, verifyBackupFiles } from "../deploy/backup/restore-check.ts";
 import { waitHealthy, type Clock, type RunResult } from "../deploy/lib.ts";
+import type { OwnedDir } from "../deploy/owned.ts";
+import { disposeScratch, makeScratch } from "./scratch.ts";
 
 describe("streams", () => {
+	let scratch: OwnedDir | undefined;
 	let work: string;
 	before(async () => {
-		work = await mkdtemp(join(tmpdir(), "af-test-streams-"));
+		scratch = await makeScratch("af-test-streams-");
+		work = scratch.path;
 	});
 	after(async () => {
-		await rm(work, { recursive: true, force: true });
+		await disposeScratch(scratch);
 	});
 
 	// A child process that writes `text` to its standard output and exits with `code` (stands in for pg_dump).
@@ -162,6 +165,7 @@ describe("waitHealthy with a fake clock", () => {
 });
 
 describe("backup files are validated by content", () => {
+	let scratch: OwnedDir | undefined;
 	let work: string;
 	const dumpBytes = Buffer.from("PGDMP fake dump content");
 	const sum = createHash("sha256").update(dumpBytes).digest("hex");
@@ -178,19 +182,19 @@ describe("backup files are validated by content", () => {
 	});
 
 	before(async () => {
-		work = await mkdtemp(join(tmpdir(), "af-test-validate-"));
+		scratch = await makeScratch("af-test-validate-");
+		work = scratch.path;
 	});
 	after(async () => {
-		await rm(work, { recursive: true, force: true });
+		await disposeScratch(scratch);
 	});
 
 	// Writes a complete backup of the given pieces into its own directory and returns the manifest path.
 	const make = async (name: string, parts: { manifest?: object; dump?: Buffer; sidecar?: string | null } = {}): Promise<string> => {
-		const dir = join(work, name);
-		await rm(dir, { recursive: true, force: true });
+		// A fresh private directory per call (exclusive mkdtemp), so nothing of an earlier call needs removing here.
+		const dir = await mkdtemp(join(work, `${name}-`));
 		const manifest = parts.manifest ?? goodManifest();
 		const file = (manifest as { dump: { file: string } }).dump.file;
-		await import("node:fs/promises").then((fs) => fs.mkdir(dir, { recursive: true }));
 		await writeFile(join(dir, file), parts.dump ?? dumpBytes);
 		if (parts.sidecar !== null) await writeFile(join(dir, `${file}.sha256`), parts.sidecar ?? `${sum}  ${file}\n`);
 		const manifestPath = join(dir, file.replace(/\.dump$/, ".manifest.json"));

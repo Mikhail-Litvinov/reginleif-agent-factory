@@ -285,13 +285,18 @@ export const ownedResources = async (runId: string): Promise<OwnedResources> => 
 	};
 };
 
-// Removes exactly what carries this run's label (containers with their anonymous volumes, then networks, then volumes).
-// Every command's exit code is checked; failures are collected and thrown together, after all steps were tried.
+// Removes exactly what carries this run's label: its containers, then its networks, then its volumes, each kind selected
+// by the label on that very object. A container is removed WITHOUT `-v`: that flag also removes the container's anonymous
+// volumes, which carry no label of this run, so it would reach objects the run never selected (an anonymous volume may
+// have been taken over from, or be shared with, another container). The volumes of a stack are the labelled ones, removed
+// by their own label in the last step. Every command's exit code is checked; failures are collected and thrown together,
+// after all steps were tried.
 //
-// This is the only place of the package that removes docker resources (tests/removal-guard.test.ts fails when any other
-// file does): a removal is always selected by the run's own label, never by a project name or a name pattern, so it
-// cannot reach anything this run did not create. `keepVolumes` leaves the labelled volumes in place (a stack that is taken
-// down and brought up again on the same data); the final check then ignores them.
+// This function and removeRecordedVolumes below are the only places of the package that remove docker resources
+// (tests/removal-guard.test.ts fails when anything else does): a removal is always selected by identity (the run's own
+// label, or a name the run recorded at creation and re-verified), never by a project name, a name pattern or a flag that
+// cascades to other objects. `keepVolumes` leaves the labelled volumes in place (a stack that is taken down and brought
+// up again on the same data); the final check then ignores them.
 export const removeOwned = async (runId: string, options: { keepVolumes?: boolean } = {}): Promise<void> => {
 	const found = await ownedResources(runId);
 	const errors: string[] = [];
@@ -300,13 +305,44 @@ export const removeOwned = async (runId: string, options: { keepVolumes?: boolea
 		const result = await run("docker", [...args, ...ids]);
 		if (result.code !== 0) errors.push(`docker ${args.join(" ")} failed (exit ${result.code}): ${result.stderr.trim() || result.stdout.trim()}`);
 	};
-	await step(["rm", "-f", "-v"], found.containers);
+	await step(["rm", "-f"], found.containers);
 	await step(["network", "rm"], found.networks);
 	if (!options.keepVolumes) await step(["volume", "rm"], found.volumes);
 	if (errors.length > 0) throw new Error(errors.join("; "));
 	const left = await ownedResources(runId);
 	const count = left.containers.length + left.networks.length + (options.keepVolumes ? 0 : left.volumes.length);
 	if (count > 0) throw new Error(`${count} resource(s) with label ${RUN_LABEL}=${runId} remain after removal`);
+};
+
+// The names of the volumes a container of this run has mounted, read from the container itself (docker inspect). A test
+// that deliberately makes an anonymous volume (which cannot carry a label) records its name here, at creation, so that it
+// can remove exactly that volume later (removeRecordedVolumes).
+export const recordVolumes = async (container: string): Promise<string[]> => {
+	const mounts = JSON.parse(await runChecked("docker", ["inspect", "--format", "{{json .Mounts}}", container])) as Array<{ Type: string; Name?: string }>;
+	return mounts.filter((m) => m.Type === "volume" && m.Name).map((m) => m.Name as string);
+};
+
+// Removes volumes by the names a run recorded at creation, each re-verified at removal: a volume that is not anonymous
+// (docker marks those with the label com.docker.volume.anonymous) or that is still used by a container is not removed
+// and is reported. Without `-f`: a volume in use is refused by docker. Failures are collected and thrown together.
+export const removeRecordedVolumes = async (names: string[]): Promise<void> => {
+	const errors: string[] = [];
+	for (const name of names) {
+		const inspected = await run("docker", ["volume", "inspect", "--format", "{{json .Labels}}", name]);
+		if (inspected.code !== 0) {
+			if (/no such volume/i.test(inspected.stderr)) continue; // already gone
+			errors.push(`docker volume inspect ${name} failed: ${inspected.stderr.trim()}`);
+			continue;
+		}
+		const labels = (JSON.parse(inspected.stdout.trim() || "null") ?? {}) as Record<string, string>;
+		if (!("com.docker.volume.anonymous" in labels)) {
+			errors.push(`volume ${name} is not anonymous; not removed`);
+			continue;
+		}
+		const removed = await run("docker", ["volume", "rm", name]);
+		if (removed.code !== 0) errors.push(`docker volume rm ${name} failed: ${removed.stderr.trim()}`);
+	}
+	if (errors.length > 0) throw new Error(errors.join("; "));
 };
 
 // Removes what a run created for its stack (by label, nothing else).

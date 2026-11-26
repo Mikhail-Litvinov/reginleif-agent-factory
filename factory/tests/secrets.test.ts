@@ -1,24 +1,27 @@
 // Secrets: created once and never overwritten, kept out of the container's inspect data, required to start the stack.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, renameSync, statSync, writeFileSync, type BigIntStats } from "node:fs";
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { ownedComposeArgs, run } from "../deploy/lib.ts";
-import { SECRET_NAMES, SID_ADMINISTRATORS, SID_SYSTEM, aclSids, createSecrets, verifySecretsAccess } from "../deploy/setup-secrets.ts";
+import type { OwnedDir } from "../deploy/owned.ts";
+import { SECRET_NAMES, SID_ADMINISTRATORS, SID_SYSTEM, aclSids, createSecrets, removeIfSame, verifySecretsAccess } from "../deploy/setup-secrets.ts";
 import { Cleanups, leftovers, sharedStack, trackedProject, type TestStack } from "./helpers.ts";
+import { disposeScratch, makeScratch } from "./scratch.ts";
 
 const SETUP_CLI = new URL("../deploy/setup-secrets.ts", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
 
 describe("secrets", () => {
+	let scratch: OwnedDir | undefined;
 	let work: string;
 	before(async () => {
-		work = await mkdtemp(join(tmpdir(), "af-test-secrets-setup-"));
+		scratch = await makeScratch("af-test-secrets-setup-");
+		work = scratch.path;
 	});
 	after(async () => {
-		await rm(work, { recursive: true, force: true });
+		await disposeScratch(scratch);
 	});
 
 	it("creates one random file per account, then never overwrites an existing one", async () => {
@@ -133,6 +136,78 @@ describe("secrets", () => {
 		else chmodSync(dir, 0o755);
 		assert.throws(() => createSecrets(dir, { lock: () => {} }), /not restricted as required/);
 		assert.deepEqual(await readdir(dir), []);
+	});
+
+	// The protection of the file itself is verified before any secret byte goes into it: the file is created empty and
+	// exclusively, its own effective access is checked, and only then is the content written. A failing check removes the
+	// empty file.
+	it("a secret file is created empty, its own access is verified, and nothing is written when that fails", async () => {
+		const dir = await mkdtemp(join(work, "file-check-"));
+		const seen: string[] = [];
+		assert.throws(
+			() =>
+				createSecrets(dir, {
+					verifyFile: (path) => {
+						seen.push(path);
+						assert.equal(statSync(path).size, 0, "the file must still be empty when its access is verified");
+						return ["injected problem"];
+					},
+				}),
+			/injected problem/,
+		);
+		assert.equal(seen.length, 1, "the first failing file stops the run");
+		assert.deepEqual(await readdir(dir), [], "the empty file is removed and no file holds a secret");
+	});
+
+	// The failure path removes only the file this run created, identified by what it recorded at creation; a different file
+	// that took the path meanwhile is left alone.
+	it("a failed check never removes a different file that took the path of the one this run created", async () => {
+		const dir = await mkdtemp(join(work, "file-swap-"));
+		const first = SECRET_NAMES[0];
+		const moved = join(dir, "moved-away");
+		assert.throws(
+			() =>
+				createSecrets(dir, {
+					verifyFile: (path) => {
+						renameSync(path, moved);
+						writeFileSync(path, "someone else's file");
+						return ["injected problem"];
+					},
+				}),
+			/injected problem/,
+		);
+		assert.equal(await readFile(join(dir, first), "utf8"), "someone else's file");
+	});
+
+	// "Same file" needs a proven identity. An unreadable inode (reported as 0, which a filesystem or a failed query can
+	// give for any file) or a different creation time is not proof, and the file is left: a leftover empty file is
+	// harmless and is found by the next run, a removed foreign file is not.
+	it("removeIfSame leaves a file whose identity is not proven the same", async () => {
+		const dir = await mkdtemp(join(work, "same-"));
+		const file = join(dir, "f");
+		const stat = (path: string): BigIntStats => lstatSync(path, { bigint: true });
+		writeFileSync(file, "x");
+		const real = stat(file);
+		const unknown = { ...real, ino: 0n } as BigIntStats;
+		removeIfSame(file, unknown, () => unknown);
+		assert.ok(existsSync(file), "an unknown inode (0 on both sides) is not an identity");
+		removeIfSame(file, { ...real, birthtimeNs: real.birthtimeNs + 1n } as BigIntStats);
+		assert.ok(existsSync(file), "a different creation time is a different file");
+		removeIfSame(file, real);
+		assert.equal(existsSync(file), false, "the file with the recorded identity is removed");
+	});
+
+	it("every secret file is verified on its own before its content is written", async () => {
+		const dir = await mkdtemp(join(work, "file-check-all-"));
+		const sizes: number[] = [];
+		createSecrets(dir, {
+			verifyFile: (path) => {
+				sizes.push(statSync(path).size);
+				return [];
+			},
+		});
+		assert.deepEqual(sizes, SECRET_NAMES.map(() => 0));
+		for (const name of SECRET_NAMES) assert.ok(statSync(join(dir, name)).size > 0, name);
 	});
 
 	it("the stack refuses to start without AF_SECRETS_DIR", async () => {

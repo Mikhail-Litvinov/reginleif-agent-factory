@@ -13,13 +13,14 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { createSecrets } from "../setup-secrets.ts";
 import { MANIFEST_FORMAT, streamDump, type Manifest } from "./backup.ts";
 import { DATABASE, FOREIGN_KEYS_SQL, ROW_COUNTS_SQL, execArgs, freePort, newRunId, psql, removeOwned, startStack, type ForeignKey } from "../lib.ts";
+import { OwnedDir } from "../owned.ts";
 
 // The names a finished backup has (backup.ts): <stamp>-<8 hex>. Only the final manifest counts; a `.partial` is not one.
 export const MANIFEST_NAME = /^af-\d{8}T\d{6}Z-[0-9a-f]{8}\.manifest\.json$/;
@@ -283,17 +284,29 @@ export interface ScratchServer {
 export const startScratch = async (prefix: string): Promise<ScratchServer> => {
 	const runId = newRunId();
 	const project = `${prefix}-${runId}`;
-	const secretsDir = await mkdtemp(join(tmpdir(), `${prefix}-secrets-`));
+	// A private directory (mkdtemp) whose identity is recorded; the secret files createSecrets writes into it are recorded
+	// right after it ran, and cleanup removes exactly those, each by identity, never the whole tree by path.
+	const secrets = await OwnedDir.make(tmpdir(), `${prefix}-secrets-`);
+	const secretsDir = secrets.path;
 	let dirty = false;
+	let recorded = false;
 	const close = async (): Promise<void> => {
+		let failure: unknown;
 		try {
 			await removeOwned(runId);
-		} finally {
-			await rm(secretsDir, { recursive: true, force: true });
+		} catch (error) {
+			failure = error;
 		}
+		// createSecrets failed halfway: what it wrote so far is still only this run's, in this private directory.
+		if (!recorded) await secrets.adoptChildren();
+		const problems = await secrets.remove();
+		if (failure !== undefined) throw failure;
+		if (problems.length > 0) throw new Error(`secrets directory cleanup left: ${problems.join("; ")}`);
 	};
 	try {
 		createSecrets(secretsDir);
+		await secrets.adoptChildren();
+		recorded = true;
 		const container = await startStack({ project, secretsDir, port: await freePort(), runId });
 		return {
 			container,

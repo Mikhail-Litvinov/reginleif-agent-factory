@@ -1,12 +1,13 @@
 // Backup and restore check: the good path and every way a backup can be broken.
 import assert from "node:assert/strict";
-import { copyFile, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { backup, type Manifest } from "../deploy/backup/backup.ts";
 import { restoreCheck, startScratch, type ScratchServer } from "../deploy/backup/restore-check.ts";
 import { psql, run } from "../deploy/lib.ts";
+import { OwnedDir } from "../deploy/owned.ts";
 import { createTestStack, leftovers, type TestStack } from "./helpers.ts";
 import { createHash } from "node:crypto";
 
@@ -15,6 +16,7 @@ const CHECK_CLI = new URL("../deploy/backup/restore-check.ts", import.meta.url).
 
 describe("backup and restore check", () => {
 	let stack: TestStack;
+	let workDir: OwnedDir;
 	let work: string;
 	let good: { manifestPath: string; dumpPath: string; manifest: Manifest };
 
@@ -39,7 +41,8 @@ describe("backup and restore check", () => {
 	};
 
 	before(async () => {
-		work = await mkdtemp(join(tmpdir(), "af-test-backup-"));
+		workDir = await OwnedDir.make(tmpdir(), "af-test-backup-");
+		work = workDir.path;
 		// The shared scratch server does not depend on the stack: it starts at the same time (its removal is in after()).
 		scratchStarting = startScratch("af-test-rc");
 		scratchStarting.catch(() => {});
@@ -71,7 +74,15 @@ describe("backup and restore check", () => {
 		} catch (error) {
 			errors.push(error);
 		}
-		await rm(work, { recursive: true, force: true });
+		// The directory is private (mkdtemp) and everything in it was written by this test or the code it ran; it is
+		// recorded now that nothing writes any more, and removed by identity, bottom-up, without a recursive delete.
+		try {
+			await workDir.adoptChildren();
+			const problems = await workDir.remove();
+			if (problems.length > 0) errors.push(new Error(problems.join("; ")));
+		} catch (error) {
+			errors.push(error);
+		}
 		if (errors.length > 0) throw new AggregateError(errors, "cleanup failed");
 	});
 
@@ -105,10 +116,10 @@ describe("backup and restore check", () => {
 
 	it("a file that already holds one of the run's names is never overwritten or removed, and the run fails", async () => {
 		const name = "af-20260101T000000Z-0badf00d";
-		const target = join(work, "collide");
-		for (const suffix of [".dump.partial", ".dump", ".dump.sha256", ".manifest.json.partial", ".manifest.json"]) {
-			await rm(target, { recursive: true, force: true });
-			await run("node", ["-e", `require("fs").mkdirSync(${JSON.stringify(target)})`]);
+		let n = 0;
+		for (const suffix of [".dump", ".dump.sha256", ".manifest.json"]) {
+			const target = join(work, `collide-${n++}`);
+			await mkdir(target);
 			const taken = join(target, `${name}${suffix}`);
 			await writeFile(taken, "someone else's data");
 			await assert.rejects(backup({ project: stack.project, target, nameFor: () => name }), /EEXIST/, suffix);
@@ -117,10 +128,9 @@ describe("backup and restore check", () => {
 		}
 	});
 
-	it("a failed run never removes a path it already removed itself and another run created since", async () => {
+	it("a failed run removes its own published files and leaves the foreign file that made it fail", async () => {
 		const name = "af-20260101T000000Z-0badf00d";
-		const target = join(work, "stale-owner");
-		const partial = join(target, `${name}.dump.partial`);
+		const target = join(work, "foreign-later");
 		const sums = join(target, `${name}.dump.sha256`);
 		await assert.rejects(
 			backup({
@@ -128,17 +138,63 @@ describe("backup and restore check", () => {
 				target,
 				nameFor: () => name,
 				hooks: {
-					afterPartialRemoved: async () => {
-						await writeFile(partial, "the other run's partial"); // another run with the same name
+					afterDumpPublished: async () => {
+						await writeFile(sums, "forces this run to fail"); // another run holds the checksum name
+					},
+				},
+			}),
+			/EEXIST/,
+		);
+		assert.equal(await readFile(sums, "utf8"), "forces this run to fail");
+		assert.deepEqual(await readdir(target), [`${name}.dump.sha256`], "the run's own dump was removed, nothing else is left");
+	});
+
+	it("a failed run never removes a file that replaced one of its published names", async () => {
+		const name = "af-20260101T000000Z-0badf00d";
+		const target = join(work, "replaced");
+		const dump = join(target, `${name}.dump`);
+		const sums = join(target, `${name}.dump.sha256`);
+		await assert.rejects(
+			backup({
+				project: stack.project,
+				target,
+				nameFor: () => name,
+				hooks: {
+					afterDumpPublished: async () => {
+						await rm(dump); // the run's own published dump goes away ...
+						await writeFile(dump, "another run's dump, same name"); // ... and another file takes the name
 						await writeFile(sums, "forces this run to fail"); // this run fails at its checksum file
 					},
 				},
 			}),
 			/EEXIST/,
 		);
-		assert.equal(await readFile(partial, "utf8"), "the other run's partial");
+		assert.equal(await readFile(dump, "utf8"), "another run's dump, same name");
 		assert.equal(await readFile(sums, "utf8"), "forces this run to fail");
-		assert.deepEqual((await readdir(target)).sort(), [`${name}.dump.partial`, `${name}.dump.sha256`]);
+		assert.deepEqual((await readdir(target)).sort(), [`${name}.dump`, `${name}.dump.sha256`]);
+	});
+
+	it("a failed run keeps its staging directory when something it did not create is in it, and says so", async () => {
+		const name = "af-20260101T000000Z-0badf00d";
+		const target = join(work, "foreign-staging");
+		let foreign = "";
+		await assert.rejects(
+			backup({
+				project: stack.project,
+				target,
+				nameFor: () => name,
+				hooks: {
+					afterDumpPublished: async (staging) => {
+						foreign = join(staging, "not-mine");
+						await writeFile(foreign, "someone else's file inside the private directory");
+						await writeFile(join(target, `${name}.dump.sha256`), "forces this run to fail");
+					},
+				},
+			}),
+			/EEXIST[\s\S]*cleanup left[\s\S]*not empty/,
+		);
+		assert.equal(await readFile(foreign, "utf8"), "someone else's file inside the private directory");
+		assert.deepEqual((await readdir(target)).filter((entry) => !entry.endsWith(".dump.sha256")).length, 1, "only the kept staging directory remains");
 	});
 
 	it("never puts a password into the files or the manifest", async () => {

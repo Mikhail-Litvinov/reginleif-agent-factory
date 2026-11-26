@@ -15,7 +15,9 @@ services:
     restart: unless-stopped
     stop_grace_period: 30s
     # The wrapper (deploy/postgres/entrypoint.sh) hands the image's entrypoint the bootstrap password without any
-    # variable or argument: see it and docs/agent-factory/deployment.md "No password in any environment".
+    # variable or argument, and serves a data directory only after a recorded complete initialisation (it refuses one
+    # that holds PG_VERSION but no marker): see it and docs/agent-factory/deployment.md "No password in any environment"
+    # and "A start that refuses".
     entrypoint: ["bash", "/etc/agent-factory/entrypoint.sh"]
     command: ["postgres", "-c", "hba_file=/etc/agent-factory/pg_hba.conf"]
     environment:
@@ -48,11 +50,25 @@ services:
       - af_backup
       - af_reader
     healthcheck:
-      # pg_isready over TCP needs no password (so none sits in a command line or an environment). It is enough: the
-      # entrypoint's temporary init server listens on the unix socket only, so a TCP answer comes only from the final
-      # server, which starts after the init script created the roles and the database. "healthy" therefore means
-      # init finished and the server accepts connections; logins are proved by the tests, not by the healthcheck.
-      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U af_backup -d agent_factory -q"]
+      # "healthy" means a usable database, not only a server that answers. Three things, in this order, all must hold:
+      #  1. pg_isready over TCP (the entrypoint's temporary init server listens on the unix socket only, so a TCP answer
+      #     comes from the final server);
+      #  2. the marker .af-init-complete of the data directory, the record that the initialisation finished (see
+      #     deploy/postgres/entrypoint.sh and init/99-finish.sh);
+      #  3. a real login as af_backup to the application database and a trivial query, which proves that the roles exist
+      #     and their passwords are the ones in the secret files.
+      # The password reaches psql through a passfile of mode 0600 in tmpfs, made from the secret file with `cat` inside the
+      # command (so none sits in a command line or an environment) and removed by a trap on every way out. `$$` is
+      # compose's escape for a literal `$`.
+      test:
+        - CMD-SHELL
+        - >-
+          pg_isready -h 127.0.0.1 -U af_backup -d agent_factory -q
+          && test -e /var/lib/postgresql/data/.af-init-complete
+          && { f=$$(umask 077; mktemp /dev/shm/pgpass.XXXXXX)
+          && trap 'rm -f "$$f"' EXIT
+          && printf '*:*:*:af_backup:%s\n' "$$(cat /run/secrets/af_backup)" > "$$f"
+          && PGPASSFILE="$$f" PGCONNECT_TIMEOUT=3 psql -w -h 127.0.0.1 -U af_backup -d agent_factory -Atc 'select 1' >/dev/null; }
       interval: 10s
       timeout: 5s
       retries: 5

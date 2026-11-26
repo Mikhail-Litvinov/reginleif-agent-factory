@@ -49,7 +49,7 @@ uses a passfile that exists only while the command runs.
 
    The project name is generated, `agent-factory-restored-<hex>` (12 random hex digits); it cannot be chosen, so it
    never names an existing project, and the command refuses when any container, volume or network of that name
-   exists. The loopback port is a free one; to choose it, run the same command with `--port <port>` added at the end.
+   exists. The loopback port is a free one; to choose it, run the same command with `--port` and a port number added at the end.
    The paths must be absolute, because npm runs the script inside `factory/`. The command verifies the checksum file and the
    manifest by content, starts the new project from an empty volume (init creates the roles and an empty database),
    restores the dump with `pg_restore --exit-on-error` (an object that already exists stops it), re-applies the
@@ -119,7 +119,9 @@ new-project procedure and the switch-over were not run on the real stack with ta
   `docker start agent-factory-postgres-1`
 
   `docker inspect --format '{{.State.Status}}' agent-factory-postgres-1` must print `running`.
-- Container crashed: the restart policy restarts it; look at `docker logs agent-factory-postgres-1` if it loops.
+- Container crashed: the restart policy restarts it; look at `docker logs agent-factory-postgres-1` if it loops. When
+  the log says `refusing to start`, the data directory has no record of a completed initialisation: see `deployment.md`
+  "A start that refuses" (it is not a crash, and a restart will not change it).
 - Data volume intact but the server refuses to start: do not delete the volume. Stop the container (it must not write
   while copied) and wait for the stop, then copy the volume read-only into an existing directory, written once as
   `$copy = '<volume copy dir>'`:

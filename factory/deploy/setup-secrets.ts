@@ -4,7 +4,9 @@
 //   node deploy/setup-secrets.ts --check <directory>  verify only (changes nothing)
 //
 // A file that exists is never overwritten (a changed password would lock the running database out). Passwords are
-// never printed.
+// never printed. A new secret file is created EMPTY and exclusively, its own effective access (what it inherited from
+// the directory included) is read back, and only then is the password written; a file that fails that check is removed
+// empty, so no secret byte is ever written into a file whose protection was not verified.
 //
 // Access: on Windows the directory is restricted by ACL to the current user, SYSTEM and Administrators (well-known SIDs,
 // so a localized system does not matter), and the ACL is READ BACK by SID for the directory and for every secret file;
@@ -16,8 +18,8 @@
 // fails, nothing is written.
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { chmodSync, closeSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, statSync, unlinkSync, writeSync, type BigIntStats } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 
 // One secret per account; the first is the bootstrap superuser of the server (init and recovery only).
 export const SECRET_NAMES = ["af_bootstrap", "af_migrator", "af_api", "af_control", "af_backup", "af_reader"] as const;
@@ -63,17 +65,22 @@ const secretFiles = (directory: string): string[] => SECRET_NAMES.map((n) => joi
 // Read-only: it changes nothing.
 export const verifySecretsAccess = (directory: string): string[] => {
 	const target = resolve(directory);
-	const problems: string[] = [];
 	if (!existsSync(target)) return [`${target} does not exist`];
-	const paths = [target, ...secretFiles(target)];
+	return pathsAccessProblems([target, ...secretFiles(target)]);
+};
+
+// The access of exactly these paths, read back (the effective ACL, inherited entries included, on Windows).
+const pathsAccessProblems = (paths: string[]): string[] => {
+	const problems: string[] = [];
 	if (process.platform === "win32") {
-		const allowed = new Set([currentUserSid(), SID_SYSTEM, SID_ADMINISTRATORS]);
+		const user = currentUserSid();
+		const allowed = new Set([user, SID_SYSTEM, SID_ADMINISTRATORS]);
 		for (const path of paths) {
 			const sids = aclSids(path);
 			for (const sid of new Set(sids)) {
 				if (!allowed.has(sid)) problems.push(`${path}: access entry for ${sid}, which is not the current user, SYSTEM or Administrators`);
 			}
-			if (!sids.includes(currentUserSid())) problems.push(`${path}: the current user has no access entry`);
+			if (!sids.includes(user)) problems.push(`${path}: the current user has no access entry`);
 		}
 	} else {
 		for (const path of paths) {
@@ -83,6 +90,10 @@ export const verifySecretsAccess = (directory: string): string[] => {
 	}
 	return problems;
 };
+
+// The access of one secret file that was just created, before any secret byte is in it: the file's own effective
+// ACL (what it inherited from the directory included) and the directory it sits in.
+export const verifyFileAccess = (file: string): string[] => pathsAccessProblems([dirname(file), file]);
 
 // Sets the access of a directory that holds no secret yet, explicitly and not by what it happens to carry: inheritance
 // off, the three allowed holders granted, and every other entry the directory already had (a grant or a deny, inherited
@@ -113,11 +124,32 @@ const refuse = (target: string, problems: string[]): Error =>
 			"\nRemove those entries yourself (for example icacls <path> /remove:g *<sid>) and run the command again.",
 	);
 
+// Removes `file` only while it is still the file with the recorded identity: device, inode and creation time all equal,
+// and the inode known (0 means the filesystem or the query gave none, so two zeros prove nothing). A path that now holds
+// something else, or nothing, or whose identity is not proven, is left as it is: a leftover empty file is harmless and
+// is seen by the next run, a removed foreign file is not. Residual window: between this check and the unlink (same as
+// owned.ts). `stat` is replaceable for the test that proves the rule on identities a real filesystem will not give.
+export const removeIfSame = (file: string, made: BigIntStats, stat: (path: string) => BigIntStats = (p) => lstatSync(p, { bigint: true })): void => {
+	let now: BigIntStats;
+	try {
+		now = stat(file);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+		throw error;
+	}
+	if (made.ino === 0n || now.dev !== made.dev || now.ino !== made.ino || now.birthtimeNs !== made.birthtimeNs) return;
+	try {
+		unlinkSync(file);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+	}
+};
+
 // The order is the rule: no secret byte is written to a place whose protection was not verified first. A directory that
 // holds secrets is verified and refused when it is too open; one that holds none is locked, then READ BACK, and only a
 // verified directory gets files (they inherit its access, and are verified again after). `options.lock` replaces the
 // locking step, for the test that proves nothing is written when the verification fails.
-export const createSecrets = (directory: string, options: { lock?: Lock } = {}): SecretsResult => {
+export const createSecrets = (directory: string, options: { lock?: Lock; verifyFile?: (file: string) => string[] } = {}): SecretsResult => {
 	const target = resolve(directory);
 	const reused = existsSync(target) && secretFiles(target).length > 0;
 	if (reused) {
@@ -137,8 +169,26 @@ export const createSecrets = (directory: string, options: { lock?: Lock } = {}):
 			kept.push(name);
 			continue;
 		}
-		// "wx" fails when the file appeared meanwhile, so a race cannot overwrite either.
-		writeFileSync(file, randomBytes(PASSWORD_BYTES).toString("base64url"), { flag: "wx", mode: 0o600 });
+		// The file is created empty ("wx" fails when it appeared meanwhile, so a race cannot overwrite either), its own
+		// effective access is verified, and only then does the secret go in. A file that fails the check is removed empty.
+		const fd = openSync(file, "wx", 0o600);
+		// The identity of the file this run created: only it is removed on failure, never whatever holds the path later.
+		const made = fstatSync(fd, { bigint: true });
+		try {
+			const fileProblems = (options.verifyFile ?? verifyFileAccess)(file);
+			if (fileProblems.length > 0) throw new Error(`the secret file ${file} is not restricted as required; nothing was written to it:\n${fileProblems.map((p) => `  - ${p}`).join("\n")}`);
+			writeSync(fd, randomBytes(PASSWORD_BYTES).toString("base64url"));
+		} catch (error) {
+			closeSync(fd);
+			try {
+				removeIfSame(file, made);
+			} catch (removal) {
+				// The original failure stays the one reported; the file that could not be removed is named in it.
+				throw new Error(`${error instanceof Error ? error.message : String(error)}\n(the empty file ${file} could not be removed: ${removal instanceof Error ? removal.message : String(removal)})`);
+			}
+			throw error;
+		}
+		closeSync(fd);
 		created.push(name);
 	}
 	// What counts is the access that results, read back, not that a command was run.
