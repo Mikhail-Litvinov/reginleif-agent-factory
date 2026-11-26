@@ -10,4 +10,4 @@ export const apiTokens = pgTable("api_tokens", {
 	expiresAt: timestamp("expires_at", { withTimezone: true }), lastUsedAt: timestamp("last_used_at", { withTimezone: true }), revokedAt: timestamp("revoked_at", { withTimezone: true }),
 	replacesTokenId: uuid("replaces_token_id"), validUntil: timestamp("valid_until", { withTimezone: true }),
 	updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(), rowVersion: bigint("row_version", { mode: "bigint" }).notNull().default(sql`1`),
-}, (t) => [check("api_tokens_role", sql`${t.role} IN ('owner','worker','relay','reader')`), check("api_tokens_owner_binding", sql`${t.role} <> 'owner' OR ${t.ownerId} IS NOT NULL`), check("api_tokens_worker_binding", sql`${t.role} <> 'worker' OR ${t.workerId} IS NOT NULL`)]);
+}, (t) => [check("api_tokens_role", sql`${t.role} IN ('owner','worker','relay','reader','hub')`), check("api_tokens_owner_binding", sql`${t.role} <> 'owner' OR ${t.ownerId} IS NOT NULL`), check("api_tokens_worker_binding", sql`${t.role} <> 'worker' OR ${t.workerId} IS NOT NULL`)]);
