@@ -10,6 +10,8 @@ export interface DatabaseBench {
 	readonly runId: string;
 	readonly migratorUrl: string;
 	readonly apiUrl: string;
+	readonly controlUrl: string;
+	readonly backupUrl: string;
 	readonly clock: Clock;
 	dispose(): Promise<void>;
 }
@@ -42,12 +44,12 @@ export const createDatabaseBench = async (testFileUrl: string): Promise<Database
 	const dropDatabase = () => psql(stack.container, "af_bootstrap", `DROP DATABASE IF EXISTS ${quotedDatabase} WITH (FORCE);`, { database: "postgres" });
 
 	try {
-		const [migratorPassword, apiPassword] = await Promise.all([stack.secret("af_migrator"), stack.secret("af_api")]);
+		const [migratorPassword, apiPassword, controlPassword, backupPassword] = await Promise.all([stack.secret("af_migrator"), stack.secret("af_api"), stack.secret("af_control"), stack.secret("af_backup")]);
 		await psql(stack.container, "af_bootstrap", [
 			`CREATE DATABASE ${quotedDatabase} WITH TEMPLATE template0 OWNER af_migrator;`,
-			`GRANT CONNECT ON DATABASE ${quotedDatabase} TO af_api;`,
+			`GRANT CONNECT ON DATABASE ${quotedDatabase} TO af_api, af_control, af_backup;`,
 		].join("\n"), { database: "postgres" });
-		return makeBench(database, stack, migratorPassword, apiPassword, dropDatabase);
+		return makeBench(database, stack, migratorPassword, apiPassword, controlPassword, backupPassword, dropDatabase);
 	} catch (error) {
 		const cleanupErrors: unknown[] = [];
 		await dropDatabase().catch((cleanupError) => cleanupErrors.push(cleanupError));
@@ -57,13 +59,15 @@ export const createDatabaseBench = async (testFileUrl: string): Promise<Database
 	}
 };
 
-const makeBench = (database: string, stack: Awaited<ReturnType<typeof benchStack>>, migratorPassword: string, apiPassword: string, dropDatabase: () => Promise<string>): DatabaseBench => {
+const makeBench = (database: string, stack: Awaited<ReturnType<typeof benchStack>>, migratorPassword: string, apiPassword: string, controlPassword: string, backupPassword: string, dropDatabase: () => Promise<string>): DatabaseBench => {
 	let disposed = false;
 	const bench: DatabaseBench = {
 		database,
 		runId: stack.runId,
 		migratorUrl: connectionUrl("af_migrator", migratorPassword.trim(), stack.port, database),
 		apiUrl: connectionUrl("af_api", apiPassword.trim(), stack.port, database),
+		controlUrl: connectionUrl("af_control", controlPassword.trim(), stack.port, database),
+		backupUrl: connectionUrl("af_backup", backupPassword.trim(), stack.port, database),
 		clock: fakeClock(),
 		dispose: async () => {
 			if (disposed) return;
