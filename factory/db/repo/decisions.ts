@@ -2,6 +2,7 @@ import { and, asc, eq, exists, gt, isNull, or, sql } from "drizzle-orm";
 import type { PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import { deviceSessions } from "../schema/device-sessions.ts";
 import { confirmations, idempotencyKeys, outboxEvents, taskDecisions } from "../schema/decisions.ts";
+import { taskEvents } from "../schema/runs.ts";
 
 type DecisionInsert = typeof taskDecisions.$inferInsert;
 type Decision = typeof taskDecisions.$inferSelect;
@@ -70,3 +71,15 @@ export const idempotencyKeyRepo = (db: PostgresJsDatabase<any>) => ({
 });
 
 export type DecisionRepository = ReturnType<typeof decisionRepo>;
+
+export const taskEventRepo = (db: PostgresJsDatabase<any>) => ({
+	stream: async ({ below, after, limit, taskId, runId, type }: { below: string; after?: { commitXid: string; seq: bigint }; limit?: number; taskId?: string; runId?: string; type?: string }) => {
+		const conditions = [sql`${taskEvents.commitXid} < ${below}::xid8`];
+		if (after) conditions.push(or(gt(taskEvents.commitXid, sql`${after.commitXid}::xid8`), and(eq(taskEvents.commitXid, sql`${after.commitXid}::xid8`), gt(taskEvents.seq, after.seq)))!);
+		if (taskId !== undefined) conditions.push(eq(taskEvents.taskId, taskId));
+		if (runId !== undefined) conditions.push(eq(taskEvents.runId, runId));
+		if (type !== undefined) conditions.push(eq(taskEvents.eventType, type));
+		const query = db.select().from(taskEvents).where(and(...conditions)).orderBy(asc(taskEvents.commitXid), asc(taskEvents.seq));
+		return limit === undefined ? query : query.limit(limit);
+	},
+});

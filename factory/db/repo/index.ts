@@ -1,7 +1,7 @@
 import type { PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import { agentRepo } from "./agents.ts";
 import { auditRepo } from "./audit.ts";
-import { confirmationRepo, decisionRepo, idempotencyKeyRepo, outboxRepo } from "./decisions.ts";
+import { confirmationRepo, decisionRepo, idempotencyKeyRepo, outboxRepo, taskEventRepo } from "./decisions.ts";
 import { conversationRepo, deviceRepo, deviceSessionRepo, messageRepo, notificationRepo, pollAnswerRequestRepo, pollRepo } from "./client.ts";
 import { ownerRepo } from "./owners.ts";
 import { policyRepo } from "./policies.ts";
@@ -24,6 +24,7 @@ type RepoParts = {
 	owners: ReturnType<typeof ownerRepo>;
 	tasks: ReturnType<typeof taskRepo>;
 	decisions: ReturnType<typeof decisionRepo>;
+	taskEvents: ReturnType<typeof taskEventRepo>;
 	outbox: ReturnType<typeof outboxRepo>;
 	confirmations: ReturnType<typeof confirmationRepo>;
 	idempotencyKeys: ReturnType<typeof idempotencyKeyRepo>;
@@ -50,6 +51,7 @@ export const createRepo = (db: PostgresJsDatabase<any>): Repo => ({
 	owners: ownerRepo(db),
 	tasks: taskRepo(db),
 	decisions: decisionRepo(db),
+	taskEvents: taskEventRepo(db),
 	outbox: outboxRepo(db),
 	confirmations: confirmationRepo(db),
 	idempotencyKeys: idempotencyKeyRepo(db),

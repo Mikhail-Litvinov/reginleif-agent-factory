@@ -21,8 +21,8 @@ type PollAnswerRequestInsert = typeof pollAnswerRequests.$inferInsert;
 type PollAnswerRequest = typeof pollAnswerRequests.$inferSelect;
 type StreamAfter = { commitXid: string; seq: bigint };
 
-const streamWhere = (commitXid: typeof notifications.commitXid | typeof messages.commitXid, seq: typeof notifications.seq | typeof messages.seq, after?: StreamAfter): SQL[] => {
-	const conditions: SQL[] = [sql`${commitXid} < pg_snapshot_xmin(pg_current_snapshot())`];
+const streamWhere = (commitXid: typeof notifications.commitXid | typeof messages.commitXid, seq: typeof notifications.seq | typeof messages.seq, after?: StreamAfter, below?: string): SQL[] => {
+	const conditions: SQL[] = [below === undefined ? sql`${commitXid} < pg_snapshot_xmin(pg_current_snapshot())` : sql`${commitXid} < ${below}::xid8`];
 	if (after) conditions.push(or(gt(commitXid, sql`${after.commitXid}::xid8`), and(eq(commitXid, sql`${after.commitXid}::xid8`), gt(seq, after.seq)))!);
 	return conditions;
 };
@@ -56,8 +56,8 @@ export const notificationRepo = (db: PostgresJsDatabase<any>) => ({
 		const query = db.select().from(notifications).where(and(...conditions)).orderBy(desc(notifications.seq));
 		return limit === undefined ? query : query.limit(limit);
 	},
-	stream: async ({ after, limit }: { after?: StreamAfter; limit?: number } = {}): Promise<Notification[]> => {
-		const query = db.select().from(notifications).where(and(...streamWhere(notifications.commitXid, notifications.seq, after))).orderBy(asc(notifications.commitXid), asc(notifications.seq));
+	stream: async ({ after, limit, below }: { after?: StreamAfter; limit?: number; below?: string } = {}): Promise<Notification[]> => {
+		const query = db.select().from(notifications).where(and(...streamWhere(notifications.commitXid, notifications.seq, after, below))).orderBy(asc(notifications.commitXid), asc(notifications.seq));
 		return limit === undefined ? query : query.limit(limit);
 	},
 	markDelivered: async (id: string, now = new Date()): Promise<Notification | null> =>
@@ -93,8 +93,8 @@ export const messageRepo = (db: PostgresJsDatabase<any>) => ({
 		const query = db.select().from(messages).where(eq(messages.conversationId, conversationId)).orderBy(asc(messages.seq));
 		return limit === undefined ? query : query.limit(limit);
 	},
-	stream: async ({ conversationId, after, limit }: { conversationId?: string; after?: StreamAfter; limit?: number } = {}): Promise<Message[]> => {
-		const conditions = streamWhere(messages.commitXid, messages.seq, after);
+	stream: async ({ conversationId, after, limit, below }: { conversationId?: string; after?: StreamAfter; limit?: number; below?: string } = {}): Promise<Message[]> => {
+		const conditions = streamWhere(messages.commitXid, messages.seq, after, below);
 		if (conversationId !== undefined) conditions.push(eq(messages.conversationId, conversationId));
 		const query = db.select().from(messages).where(and(...conditions)).orderBy(asc(messages.commitXid), asc(messages.seq));
 		return limit === undefined ? query : query.limit(limit);
