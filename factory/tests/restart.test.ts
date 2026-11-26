@@ -50,6 +50,9 @@ describe("restart", () => {
 		await writeRow();
 		const name = stack.container;
 		await runChecked("docker", ["kill", name]);
+		// `kill` returns before the daemon records the exit; a `start` in that window is silently ignored and the
+		// container then stays exited (measured on stop then start: 11 of 12 cycles; deployment.md "Stop and start").
+		await runChecked("docker", ["wait", name]);
 		await runChecked("docker", ["start", name]);
 		await waitHealthy(name);
 		assert.equal(await rows(), expected());

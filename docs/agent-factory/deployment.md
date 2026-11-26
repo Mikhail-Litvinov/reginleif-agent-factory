@@ -60,9 +60,13 @@ Nothing else on the machine is touched: the stack neither uses nor removes other
 All lines run from the repository root and need `AF_SECRETS_DIR` set (compose refuses to read the file without it):
 
 - Stop, keep the data: `$env:AF_SECRETS_DIR='<secrets dir>'; docker compose -p agent-factory -f factory/deploy/compose.yml stop`
+- Wait until the daemon has recorded the stop: `docker wait agent-factory-postgres-1` (it returns at once when the
+  container is already exited). `compose stop` returns when the stop request is done, about a quarter of a second
+  before the daemon marks the container exited; a `start` or `up -d` issued in that window is silently ignored (the
+  daemon still sees a running container) and the container then ends up exited. On a scratch project this lost 11 of
+  12 immediate starts; with `docker wait` in between, 0 of 12.
 - Start again: the same line with `start`, or `up -d`. Check the result: `docker inspect --format '{{.State.Status}}' agent-factory-postgres-1`
-  must print `running` (then wait for `healthy`). A `start` issued immediately after `stop` was seen to do nothing
-  and leave the container exited (cause not found); if the state is `exited`, run the line again.
+  must print `running` (then wait for `healthy`). If it prints `exited`, run the start line again.
 - Remove the container, keep the data volume: the same line with `down`.
 - Never add `-v` to `down` unless the data is to be destroyed: it deletes the volume `agent-factory_pgdata`.
 
