@@ -117,6 +117,7 @@ CREATE TABLE "routing_rules" (
 	"match" jsonb,
 	"preferred_agent_ids" uuid[],
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
+	"deleted_at" timestamp with time zone,
 	"row_version" bigint DEFAULT 1 NOT NULL
 );
 --> statement-breakpoint

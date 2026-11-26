@@ -80,6 +80,11 @@ describe("migration 0001 repositories", () => {
 		const rule = await repo.routingRules.create({ id: id(6), projectId: id(1), position: 0, match: {}, preferredAgentIds: [id(2)] });
 		assert.equal((await repo.routingRules.list(id(1)))[0]?.id, rule.id);
 		assert.equal((await repo.routingRules.list(null)).length, 0);
+		const deletedRule = await repo.routingRules.delete(rule.id);
+		assert.equal(deletedRule?.id, rule.id);
+		assert.ok(deletedRule?.deletedAt instanceof Date);
+		assert.deepEqual(await repo.routingRules.list(id(1)), []);
+		assert.deepEqual((await repo.routingRules.list(id(1), { includeDeleted: true })).map((row) => row.id), [rule.id]);
 	});
 
 	it("stores only token hashes, finds tokens by hash, rotates and revokes", async () => {
