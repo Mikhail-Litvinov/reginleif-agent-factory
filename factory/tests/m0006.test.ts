@@ -33,9 +33,9 @@ it("checks vector size, search indexes, audit and immutability", async () => {
   await assert.rejects(sql`UPDATE registry_records SET problem = 'changed' WHERE id = ${record}`, /immutable/i);
   await assert.rejects(sql`DELETE FROM registry_embeddings WHERE record_id = ${record}`, /immutable/i);
   await sql`UPDATE registry_inquiries SET poll_question = 'question' WHERE id = ${inquiry}`;
-  await assert.rejects(sql`UPDATE registry_inquiries SET poll_question = 'changed' WHERE id = ${inquiry}`, /immutable|once/i);
+  await assert.rejects(sql`UPDATE registry_inquiries SET poll_question = 'changed' WHERE id = ${inquiry}`, /immutable|once|cannot change twice/i);
   await sql`UPDATE registry_inquiry_results SET verdict = 'applies' WHERE id = ${result}`;
-  await assert.rejects(sql`UPDATE registry_inquiry_results SET verdict = 'outdated', difference = 'changed' WHERE id = ${result}`, /immutable|once/i);
+  await assert.rejects(sql`UPDATE registry_inquiry_results SET verdict = 'outdated', difference = 'changed' WHERE id = ${result}`, /immutable|once|cannot change twice/i);
  } finally { await sql.end(); }
 });
 
@@ -44,7 +44,7 @@ it("activates, replaces and revokes regulation rules atomically", async () => {
  const first = randomUUID(), second = randomUUID(), v1 = randomUUID(), v2 = randomUUID(), invalid = randomUUID();
  try {
   await sql`INSERT INTO registry_records (id, kind, status, scope_type) VALUES (${first}, 'rule', 'draft', 'global'), (${second}, 'rule', 'draft', 'global')`;
-  await sql`INSERT INTO regulation_versions (id, status, clauses, clauses_bytes) VALUES (${v1}, 'draft', ${JSON.stringify([first])}::jsonb, 2), (${v2}, 'draft', ${JSON.stringify([{ record_id: second }])}::jsonb, 2), (${invalid}, 'draft', ${JSON.stringify([randomUUID()])}::jsonb, 2)`;
+  await sql`INSERT INTO regulation_versions (id, status, clauses, clauses_bytes) VALUES (${v1}, 'draft', ${sql.json([first])}, 2), (${v2}, 'draft', ${sql.json([{ record_id: second }])}, 2), (${invalid}, 'draft', ${sql.json([randomUUID()])}, 2)`;
   await sql`INSERT INTO settings (key, value) VALUES ('registry.clauseMaxBytes', '1'::jsonb) ON CONFLICT (key) DO UPDATE SET value = excluded.value`;
   await assert.rejects(sql`UPDATE regulation_versions SET status = 'active' WHERE id = ${v1}`, /clauseMaxBytes/i);
   await sql`UPDATE settings SET value = '2'::jsonb WHERE key = 'registry.clauseMaxBytes'`;
