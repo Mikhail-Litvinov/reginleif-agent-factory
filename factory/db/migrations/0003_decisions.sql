@@ -122,7 +122,7 @@ ALTER TABLE "task_decisions" ADD CONSTRAINT "task_decisions_task_id_tasks_id_fk"
 ALTER TABLE "task_decisions" ADD CONSTRAINT "task_decisions_actor_id_owners_id_fk" FOREIGN KEY ("actor_id") REFERENCES "owners"("id") ON DELETE restrict;
 ALTER TABLE "task_decisions" ADD CONSTRAINT "task_decisions_device_session_id_device_sessions_id_fk" FOREIGN KEY ("device_session_id") REFERENCES "device_sessions"("id") ON DELETE restrict;
 ALTER TABLE "task_decisions" ADD CONSTRAINT "task_decisions_confirmation_id_confirmations_id_fk" FOREIGN KEY ("confirmation_id") REFERENCES "confirmations"("id") ON DELETE restrict;
-ALTER TABLE "task_decisions" ADD CONSTRAINT "task_decisions_outbox_id_outbox_events_id_fk" FOREIGN KEY ("outbox_id") REFERENCES "outbox_events"("id") ON DELETE restrict DEFERRABLE INITIALLY DEFERRED;
+ALTER TABLE "task_decisions" ADD CONSTRAINT "task_decisions_outbox_id_outbox_events_id_fk" FOREIGN KEY ("outbox_id") REFERENCES "outbox_events"("id") ON DELETE restrict;
 ALTER TABLE "outbox_events" ADD COLUMN "decision_id" uuid;
 ALTER TABLE "outbox_events" ADD CONSTRAINT "outbox_events_decision_id_task_decisions_id_fk" FOREIGN KEY ("decision_id") REFERENCES "task_decisions"("id") ON DELETE restrict DEFERRABLE INITIALLY DEFERRED;
 ALTER TABLE "confirmations" ADD COLUMN "decision_id" uuid;

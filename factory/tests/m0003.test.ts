@@ -51,10 +51,10 @@ it("enforces the deferred outbox and decision references", async () => {
 			await tx`INSERT INTO task_decisions (id, actor_id, outbox_id) VALUES (${decision}, ${actor}, ${outbox})`;
 		});
 		const reverseOutbox = randomUUID(), reverseDecision = randomUUID();
-		await sql.begin(async (tx) => {
+		await assert.rejects(sql.begin(async (tx) => {
 			await tx`INSERT INTO task_decisions (id, actor_id, outbox_id) VALUES (${reverseDecision}, ${actor}, ${reverseOutbox})`;
 			await tx`INSERT INTO outbox_events (id, decision_id) VALUES (${reverseOutbox}, ${reverseDecision})`;
-		});
+		}), /foreign key/i);
 		await assert.rejects(sql.begin(async (tx) => {
 			await tx`INSERT INTO outbox_events (id, decision_id) VALUES (${randomUUID()}, ${randomUUID()})`;
 		}), /foreign key|pair/i);
