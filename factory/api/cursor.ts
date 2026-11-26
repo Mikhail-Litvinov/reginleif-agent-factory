@@ -36,9 +36,10 @@ export type StreamSource<T extends StreamRow> = {
 	list(bounds: { below: string; after?: StreamPosition; limit: number }): Promise<T[]>;
 };
 
-export async function readStreamPage<T extends StreamRow>(stream: Stream, source: StreamSource<T>, options: { cursor?: string; limit: number }): Promise<{ items: T[]; next_cursor: string | null }> {
+export async function readStreamPage<T extends StreamRow>(stream: Stream, source: StreamSource<T>, options: { cursor?: string; limit: number; horizon?: () => Promise<string> }): Promise<{ items: T[]; next_cursor: string | null }> {
 	const after = options.cursor === undefined ? undefined : decodeCursor(stream, options.cursor);
-	const below = await source.snapshotXmin();
+	// Production reads the cluster-wide horizon once per page; a caller may inject the horizon it controls instead.
+	const below = await (options.horizon ? options.horizon() : source.snapshotXmin());
 	const items = await source.list({ below, after, limit: options.limit });
 	const last = items.at(-1);
 	return { items, next_cursor: last ? encodeCursor(stream, last) : options.cursor ?? null };

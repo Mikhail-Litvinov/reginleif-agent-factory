@@ -47,25 +47,25 @@ for (const scenario of ["event-cursor", "client-resume"] as const) {
 				try {
 					await early.unsafe("BEGIN");
 					await early.unsafe(`INSERT INTO ${stream} (id) VALUES ($1)`, [ids[0]!]);
+					const earlyXid = (await early.unsafe<{ xid: string }[]>("SELECT pg_current_xact_id()::text AS xid"))[0]!.xid;
 					await late.unsafe("BEGIN");
 					await late.unsafe(`INSERT INTO ${stream} (id) VALUES ($1)`, [ids[1]!]);
 					await late.unsafe("COMMIT");
 					const source = streamSource(repo, stream);
-					const held = await readStreamPage(stream, source, { limit: 1 });
+					// The horizon is injected rather than read: pg_snapshot_xmin is cluster-wide, so open transactions in other test databases can hold it back.
+					let horizon = "";
+					const readAt = (cursor?: string) => readStreamPage(stream, source, { limit: 1, cursor, horizon: async () => horizon });
+					// While early is open its xid is the horizon (what pg_snapshot_xmin reports then), so the committed row above it is held back.
+					horizon = earlyXid;
+					const held = await readAt();
 					assert.deepEqual(held.items, []);
 					await early.unsafe("COMMIT");
-					// pg_snapshot_xmin is cluster-wide: transactions open in other test databases can hold the horizon below rows committed here, so a page is retried until the horizon has passed them.
-						const readReady = async (cursor?: string) => {
-							for (let attempt = 0; attempt < 500; attempt++) {
-								const page = await readStreamPage(stream, source, { limit: 1, cursor });
-								if (page.items.length > 0) return page;
-								await new Promise(resolve => setTimeout(resolve, 10));
-							}
-							throw new Error("snapshot horizon did not pass committed rows");
-						};
-						const first = await readReady();
-					const second = await readReady(first.next_cursor!);
-					const end = await readStreamPage(stream, source, { limit: 1, cursor: second.next_cursor! });
+					// Once early commits, the horizon moves past both committed rows; it is read back from the rows, not guessed.
+					const committed = await client.unsafe<{ commit_xid: string }[]>(`SELECT commit_xid::text AS commit_xid FROM ${stream} WHERE id IN ($1, $2)`, [ids[0]!, ids[1]!]);
+					horizon = String(committed.reduce((max, row) => (BigInt(row.commit_xid) > max ? BigInt(row.commit_xid) : max), 0n) + 1n);
+					const first = await readAt();
+					const second = await readAt(first.next_cursor!);
+					const end = await readAt(second.next_cursor!);
 					assert.deepEqual([...first.items, ...second.items].map(row => (row as { id: string }).id), ids);
 					assert.deepEqual(end.items, []);
 				} finally {
