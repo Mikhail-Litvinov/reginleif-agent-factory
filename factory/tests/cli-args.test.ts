@@ -3,8 +3,11 @@
 // the table proves each command is wired to it (an unknown flag, a missing, empty or flag-like value, a repeated flag and a
 // missing required flag in every command), so one command cannot keep a laxer parser of its own.
 import assert from "node:assert/strict";
+import { OwnedDir } from "../deploy/owned.ts";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, it } from "node:test";
+import { after, before, describe, it } from "node:test";
 import { UsageError, integerValue, parseCliArgs, type CliSpec } from "../deploy/cli-args.ts";
 import { run } from "../deploy/lib.ts";
 
@@ -56,7 +59,6 @@ describe("parseCliArgs", () => {
 });
 
 const cli = (relative: string): string => fileURLToPath(new URL(`../deploy/${relative}`, import.meta.url));
-const FACTORY_DIR = fileURLToPath(new URL("..", import.meta.url));
 
 // Every command with its wrong command lines. No row can reach docker or write anything: the parser stops each one first,
 // and the paths in the rows exist nowhere. Each row has a message that names the problem.
@@ -147,10 +149,24 @@ const TABLE: Array<{ command: string; script: string; usage: RegExp; wrong: Arra
 ];
 
 describe("every command refuses a wrong command line with exit status 2 and its usage", () => {
+	// The rows use relative paths ("b", "t"). Run in a disposable cwd, so a command that wrongly accepted a row (a parser
+	// regression) would write there and not into the worktree (a real backup once landed in factory/b that way).
+	let dir: OwnedDir;
+	let cwd = "";
+	before(async () => {
+		dir = await OwnedDir.make(tmpdir(), "af-test-cli-args-");
+		cwd = dir.path;
+	});
+	after(async () => {
+		// Removed by identity, bottom-up, like the other tests' work directories.
+		await dir.adoptChildren();
+		const problems = await dir.remove();
+		if (problems.length > 0) throw new Error(problems.join("; "));
+	});
 	for (const { command, script, usage, wrong } of TABLE) {
 		for (const [name, argv, message] of wrong) {
 			it(`${command}: ${name}`, async () => {
-				const result = await run("node", [cli(script), ...argv], { cwd: FACTORY_DIR });
+				const result = await run("node", [cli(script), ...argv], { cwd });
 				assert.equal(result.code, 2, `exit status; stderr: ${result.stderr}`);
 				assert.match(result.stderr, message);
 				assert.match(result.stderr, usage);

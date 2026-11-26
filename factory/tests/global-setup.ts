@@ -10,9 +10,11 @@
 // test file, and globalTeardown ran after a failing test).
 import { freePort, newRunId, removeOwned, runChecked, stackArgs, stackEnv } from "../deploy/lib.ts";
 import { sweepStale } from "./dead-owners.ts";
+import { newPaths, snapshotUntracked, worktreeGuardMessage } from "./worktree-guard.ts";
 import { Cleanups, newProject, newSecretsDir, SHARED_STACK_ENV, type SharedStackInfo } from "./helpers.ts";
 
 const cleanups = new Cleanups();
+let untrackedAtStart: string[] | undefined;
 
 // Stacks of earlier runs of this worktree whose process was killed (see dead-owners.ts for why this removes only those).
 // A failure here must not block the run that is starting, but it is never silent.
@@ -22,6 +24,7 @@ const sweep = async (): Promise<void> => {
 };
 
 export const globalSetup = async (): Promise<void> => {
+	untrackedAtStart = await snapshotUntracked();
 	await sweep().catch((error) => console.error(error instanceof Error ? error.message : error));
 	try {
 		const secretsDir = await newSecretsDir(cleanups);
@@ -49,5 +52,15 @@ export const globalTeardown = async (): Promise<void> => {
 	const errors: unknown[] = [];
 	await cleanups.runAll().catch((error) => errors.push(error));
 	await sweep().catch((error) => errors.push(error));
+	if (untrackedAtStart) {
+		const start = untrackedAtStart;
+		const now = await snapshotUntracked().catch((error) => (console.error(error), (process.exitCode = 1), start));
+		const created = newPaths(start, now);
+		// Not thrown: a throwing global teardown makes the node runner loop forever.
+		if (created.length > 0) {
+			console.error(worktreeGuardMessage(created));
+			process.exitCode = 1;
+		}
+	}
 	if (errors.length > 0) throw new AggregateError(errors, "teardown of the test run failed");
 };
