@@ -1,6 +1,7 @@
 import { and, asc, desc, eq, gte, inArray, isNull, lte, sql, type SQL } from "drizzle-orm";
 import type { PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import { canTransition, type BlockKind, type TaskState } from "../../contracts/states.ts";
+import { refusing } from "./errors.ts";
 import { taskDependencies } from "../schema/task-dependencies.ts";
 import { taskRevisions } from "../schema/decisions.ts";
 import { tasks } from "../schema/tasks.ts";
@@ -38,16 +39,6 @@ export class TaskDeleteRefusedError extends Error {
 	readonly reason: string;
 	constructor(reason: string) { super(reason); this.reason = reason; }
 }
-
-const dbReason = (error: unknown): string | undefined => {
-	if (typeof error !== "object" || error === null || !("message" in error)) return undefined;
-	const message = String(error.message);
-	if ("code" in error && error.code === "P0001") return message;
-	return [
-		"illegal task transition", "invalid blocked target", "invalid block handler change", "block kind and handler require BLOCKED", "task cannot be deleted",
-		"dependency crosses projects", "dependency_cycle", "immutable dependency fields cannot be changed",
-	].find((reason) => message.includes(reason));
-};
 
 export const TransitionGuard = {
 	allows: (from: TaskState, to: TaskState, blockKind?: BlockKind): boolean => canTransition(from, to, blockKind),
@@ -92,25 +83,14 @@ export const taskRepo = (db: PostgresJsDatabase<any>) => ({
 		if (!TransitionGuard.allows(current[0].status as TaskState, to, (current[0].blockKind ?? undefined) as BlockKind | undefined)) throw new TransitionRefusedError("illegal task transition");
 		const clearBlock = current[0].status === "BLOCKED" && to !== "BLOCKED" ? { blockKind: null, blockHandler: null } : {};
 		const clearPause = current[0].status === "PAUSED" && to !== "PAUSED" ? { resumeTo: null } : {};
-		try {
-			return (await db.update(tasks).set({ ...clearBlock, ...clearPause, ...patch, status: to, updatedAt: new Date(), rowVersion: expectedVersion + 1n })
-				.where(and(eq(tasks.id, id), eq(tasks.rowVersion, expectedVersion), isNull(tasks.deletedAt))).returning())[0] ?? null;
-		} catch (error) {
-			const reason = dbReason(error);
-			if (reason) throw new TransitionRefusedError(reason);
-			throw error;
-		}
+		return refusing((reason) => new TransitionRefusedError(reason), async () =>
+			(await db.update(tasks).set({ ...clearBlock, ...clearPause, ...patch, status: to, updatedAt: new Date(), rowVersion: expectedVersion + 1n })
+				.where(and(eq(tasks.id, id), eq(tasks.rowVersion, expectedVersion), isNull(tasks.deletedAt))).returning())[0] ?? null);
 	},
-	softDelete: async (id: string, expectedVersion: bigint): Promise<Task | null> => {
-		try {
-			return (await db.update(tasks).set({ deletedAt: new Date(), updatedAt: new Date(), rowVersion: expectedVersion + 1n })
-				.where(and(eq(tasks.id, id), eq(tasks.rowVersion, expectedVersion), isNull(tasks.deletedAt))).returning())[0] ?? null;
-		} catch (error) {
-			const reason = dbReason(error);
-			if (reason) throw new TaskDeleteRefusedError(reason);
-			throw error;
-		}
-	},
+	softDelete: async (id: string, expectedVersion: bigint): Promise<Task | null> =>
+		refusing((reason) => new TaskDeleteRefusedError(reason), async () =>
+			(await db.update(tasks).set({ deletedAt: new Date(), updatedAt: new Date(), rowVersion: expectedVersion + 1n })
+				.where(and(eq(tasks.id, id), eq(tasks.rowVersion, expectedVersion), isNull(tasks.deletedAt))).returning())[0] ?? null),
 	revisions: async (taskId: string): Promise<Revision[]> =>
 		db.select().from(taskRevisions).where(eq(taskRevisions.taskId, taskId)).orderBy(asc(taskRevisions.revisionNumber)),
 	getRevision: async (taskId: string, revisionNumber: number): Promise<Revision | undefined> =>
@@ -126,25 +106,13 @@ export const taskRepo = (db: PostgresJsDatabase<any>) => ({
 	dependencies: async (taskId: string, { includeRemoved = false }: { includeRemoved?: boolean } = {}): Promise<Dependency[]> =>
 		db.select().from(taskDependencies).where(and(eq(taskDependencies.taskId, taskId), ...(includeRemoved ? [] : [isNull(taskDependencies.removedAt)])))
 			.orderBy(asc(taskDependencies.createdAt), asc(taskDependencies.dependsOnTaskId)),
-	addDependency: async (taskId: string, dependsOnTaskId: string, dependencyType: "requires_accepted"): Promise<Dependency> => {
-		try {
-			return (await db.insert(taskDependencies).values({ taskId, dependsOnTaskId, dependencyType }).returning())[0]!;
-		} catch (error) {
-			const reason = dbReason(error);
-			if (reason) throw new DependencyRefusedError(reason);
-			throw error;
-		}
-	},
-	removeDependency: async (taskId: string, dependsOnTaskId: string, expectedVersion: bigint, removedBy?: string): Promise<Dependency | null> => {
-		try {
-			return (await db.update(taskDependencies).set({ removedAt: new Date(), removedBy, updatedAt: new Date(), rowVersion: expectedVersion + 1n })
-				.where(and(eq(taskDependencies.taskId, taskId), eq(taskDependencies.dependsOnTaskId, dependsOnTaskId), eq(taskDependencies.rowVersion, expectedVersion), isNull(taskDependencies.removedAt))).returning())[0] ?? null;
-		} catch (error) {
-			const reason = dbReason(error);
-			if (reason) throw new DependencyRefusedError(reason);
-			throw error;
-		}
-	},
+	addDependency: async (taskId: string, dependsOnTaskId: string, dependencyType: "requires_accepted"): Promise<Dependency> =>
+		refusing((reason) => new DependencyRefusedError(reason), async () =>
+			(await db.insert(taskDependencies).values({ taskId, dependsOnTaskId, dependencyType }).returning())[0]!),
+	removeDependency: async (taskId: string, dependsOnTaskId: string, expectedVersion: bigint, removedBy?: string): Promise<Dependency | null> =>
+		refusing((reason) => new DependencyRefusedError(reason), async () =>
+			(await db.update(taskDependencies).set({ removedAt: new Date(), removedBy, updatedAt: new Date(), rowVersion: expectedVersion + 1n })
+				.where(and(eq(taskDependencies.taskId, taskId), eq(taskDependencies.dependsOnTaskId, dependsOnTaskId), eq(taskDependencies.rowVersion, expectedVersion), isNull(taskDependencies.removedAt))).returning())[0] ?? null),
 });
 
 export type TaskRepository = ReturnType<typeof taskRepo>;

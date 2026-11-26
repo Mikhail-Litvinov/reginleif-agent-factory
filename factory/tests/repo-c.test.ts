@@ -6,6 +6,7 @@ import { after, before, describe, it } from "node:test";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { migrate } from "../db/migrate.ts";
+import { databaseRefusal } from "../db/repo/errors.ts";
 import { createRepo } from "../db/repo/index.ts";
 import { connectBench, databaseBench } from "./database-bench.ts";
 
@@ -21,6 +22,12 @@ before(async () => {
 	repo = createRepo(db);
 });
 after(async () => { await client?.end(); });
+
+// A horizon above everything this connection has committed. repo.audit.snapshotXmin() is cluster-wide, so while other
+// test files hold open transactions in the shared cluster it can sit below rows committed here; these tests exercise
+// the stream bounds, not the horizon source (production callers use snapshotXmin, covered by cursor.test.ts).
+const horizonAboveCommitted = async (): Promise<string> =>
+	String((await client`SELECT (pg_current_xact_id()::text::bigint + 1)::text AS horizon`)[0]!.horizon);
 
 const id = (n: number) => `10000000-0000-7000-8000-${String(n).padStart(12, "0")}`;
 
@@ -38,14 +45,18 @@ describe("migration 0003 repositories", () => {
 		assert.equal((await repo.decisions.byActorKey(id(1), "cancel-1"))?.id, id(3));
 		assert.equal((await repo.decisions.listForTask(id(2))).length, 1);
 		assert.equal((await repo.decisions.updateDelivery(id(3), { deliveryState: "applied", deliveredAt: new Date() }))?.deliveryState, "applied");
-		await db.insert((await import("../db/schema/decisions.ts")).taskDecisions).values({ id: id(52), kind: "physical_decision", engineerRunId: id(53), channel: "api", idempotencyKey: "engineer-1", deliveryState: "applied" });
-		assert.equal((await repo.decisions.byEngineerKey(id(53), "engineer-1"))?.id, id(52));
+		// An engineer decision needs a chief_engineer run of its task; none exists here, so the database refuses it with the trigger's reason.
+		await assert.rejects(
+			db.insert((await import("../db/schema/decisions.ts")).taskDecisions).values({ id: id(52), taskId: id(2), kind: "physical_decision", engineerRunId: id(53), channel: "api", idempotencyKey: "engineer-1", deliveryState: "applied" }),
+			(error) => databaseRefusal(error)?.reason === "engineer decision requires chief engineer run of task" && databaseRefusal(error)?.sqlstate === "P0001",
+		);
+		assert.equal(await repo.decisions.byEngineerKey(id(53), "engineer-1"), undefined);
 		assert.equal((await repo.outbox.get(id(4)))?.id, id(4));
 		assert.equal((await repo.outbox.listPending()).some((row) => row.id === id(4)), true);
 		await assert.rejects(db.transaction(async (tx) => {
 			await tx.insert((await import("../db/schema/decisions.ts")).outboxEvents).values({ id: id(6), kind: "deliver_decision", taskId: id(2), state: "pending", attempts: 0 });
 			await tx.insert((await import("../db/schema/decisions.ts")).taskDecisions).values({ id: id(5), taskId: id(2), kind: "pause", actorId: id(1), channel: "client", idempotencyKey: "pause-1", requestHash: "hash", deliveryState: "recorded", outboxId: id(6) });
-		}), /pair/i);
+		}), (error) => databaseRefusal(error)?.reason === "outbox decision pair does not match" && databaseRefusal(error)?.sqlstate === "P0001");
 	});
 
 	it("replays idempotency response data, and applies first poll answer only once", async () => {
@@ -75,9 +86,10 @@ describe("migration 0003 repositories", () => {
 		await db.insert((await import("../db/schema/chat.ts")).conversations).values({ id: id(20), source: "factory", state: "active" });
 		await repo.messages.append({ id: id(21), conversationId: id(20), kind: "text", author: "system", body: "stream-a" });
 		await repo.messages.append({ id: id(22), conversationId: id(20), kind: "text", author: "system", body: "stream-b" });
-		const first = (await repo.messages.stream({ limit: 10 })).find((row) => row.id === id(21));
+		const below = await horizonAboveCommitted();
+		const first = (await repo.messages.stream({ limit: 10, below })).find((row) => row.id === id(21));
 		assert.ok(first);
-		const later = await repo.messages.stream({ after: { commitXid: first.commitXid, seq: first.seq }, limit: 10 });
+		const later = await repo.messages.stream({ after: { commitXid: first.commitXid, seq: first.seq }, limit: 10, below });
 		assert.equal(later.some((row) => row.id === id(21)), false);
 		assert.equal(later.some((row) => row.id === id(22)), true);
 	});
@@ -115,7 +127,7 @@ describe("migration 0003 repositories", () => {
 		assert.equal((await repo.messages.listForConversation(convo.id)).length, 1);
 		assert.ok(await repo.notifications.create({ id: id(35), eventType: "task_blocked", dedupKey: "task:blocked", state: "open", occurrences: 1 }));
 		assert.equal((await repo.notifications.list({ state: "open", eventType: "task_blocked" })).length, 1);
-		assert.equal((await repo.notifications.stream({ limit: 10 })).some((row) => row.id === id(35)), true);
+		assert.equal((await repo.notifications.stream({ limit: 10, below: await horizonAboveCommitted() })).some((row) => row.id === id(35)), true);
 		assert.equal((await repo.notifications.markDelivered(id(35)))?.deliveredAt instanceof Date, true);
 
 		await repo.polls.create({ id: id(13), conversationId: convo.id, options: [{ key: "yes", label: "Yes" }], arbiter: "hub", state: "open" });

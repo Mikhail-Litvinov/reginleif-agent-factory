@@ -4,6 +4,7 @@ import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { migrate } from "../db/migrate.ts";
+import { databaseRefusal } from "../db/repo/errors.ts";
 import { createRepo } from "../db/repo/index.ts";
 import { DependencyRefusedError, TaskDeleteRefusedError, TransitionRefusedError } from "../db/repo/tasks.ts";
 import { taskRevisions } from "../db/schema/decisions.ts";
@@ -97,6 +98,7 @@ describe("migration 0002 and 0003 repositories", () => {
 		assert.equal(next?.revisionNumber, 2);
 		assert.equal((await repo.tasks.getRevision(task.id, 2))?.requirements, "changed");
 		assert.deepEqual((await repo.tasks.revisions(task.id)).map((revision) => revision.revisionNumber), [1, 2]);
-		await assert.rejects(db.update(taskRevisions).set({ requirements: "mutated" }).where(eq(taskRevisions.taskId, task.id)), /immutable/i);
+		await assert.rejects(db.update(taskRevisions).set({ requirements: "mutated" }).where(eq(taskRevisions.taskId, task.id)),
+			(error) => databaseRefusal(error)?.reason === "immutable row cannot be changed" && databaseRefusal(error)?.sqlstate === "P0001");
 	});
 });

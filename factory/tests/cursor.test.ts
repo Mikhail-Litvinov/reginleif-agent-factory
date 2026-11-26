@@ -54,8 +54,17 @@ for (const scenario of ["event-cursor", "client-resume"] as const) {
 					const held = await readStreamPage(stream, source, { limit: 1 });
 					assert.deepEqual(held.items, []);
 					await early.unsafe("COMMIT");
-					const first = await readStreamPage(stream, source, { limit: 1 });
-					const second = await readStreamPage(stream, source, { limit: 1, cursor: first.next_cursor! });
+					// pg_snapshot_xmin is cluster-wide: transactions open in other test databases can hold the horizon below rows committed here, so a page is retried until the horizon has passed them.
+						const readReady = async (cursor?: string) => {
+							for (let attempt = 0; attempt < 500; attempt++) {
+								const page = await readStreamPage(stream, source, { limit: 1, cursor });
+								if (page.items.length > 0) return page;
+								await new Promise(resolve => setTimeout(resolve, 10));
+							}
+							throw new Error("snapshot horizon did not pass committed rows");
+						};
+						const first = await readReady();
+					const second = await readReady(first.next_cursor!);
 					const end = await readStreamPage(stream, source, { limit: 1, cursor: second.next_cursor! });
 					assert.deepEqual([...first.items, ...second.items].map(row => (row as { id: string }).id), ids);
 					assert.deepEqual(end.items, []);

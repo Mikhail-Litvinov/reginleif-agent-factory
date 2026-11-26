@@ -21,8 +21,8 @@ type PollAnswerRequestInsert = typeof pollAnswerRequests.$inferInsert;
 type PollAnswerRequest = typeof pollAnswerRequests.$inferSelect;
 type StreamAfter = { commitXid: string; seq: bigint };
 
-const streamWhere = (commitXid: typeof notifications.commitXid | typeof messages.commitXid, seq: typeof notifications.seq | typeof messages.seq, after?: StreamAfter, below?: string): SQL[] => {
-	const conditions: SQL[] = [below === undefined ? sql`${commitXid} < pg_snapshot_xmin(pg_current_snapshot())` : sql`${commitXid} < ${below}::xid8`];
+const streamWhere = (commitXid: typeof notifications.commitXid | typeof messages.commitXid, seq: typeof notifications.seq | typeof messages.seq, after: StreamAfter | undefined, below: string): SQL[] => {
+	const conditions: SQL[] = [sql`${commitXid} < ${below}::xid8`];
 	if (after) conditions.push(or(gt(commitXid, sql`${after.commitXid}::xid8`), and(eq(commitXid, sql`${after.commitXid}::xid8`), gt(seq, after.seq)))!);
 	return conditions;
 };
@@ -56,7 +56,7 @@ export const notificationRepo = (db: PostgresJsDatabase<any>) => ({
 		const query = db.select().from(notifications).where(and(...conditions)).orderBy(desc(notifications.seq));
 		return limit === undefined ? query : query.limit(limit);
 	},
-	stream: async ({ after, limit, below }: { after?: StreamAfter; limit?: number; below?: string } = {}): Promise<Notification[]> => {
+	stream: async ({ after, limit, below }: { after?: StreamAfter; limit?: number; below: string }): Promise<Notification[]> => {
 		const query = db.select().from(notifications).where(and(...streamWhere(notifications.commitXid, notifications.seq, after, below))).orderBy(asc(notifications.commitXid), asc(notifications.seq));
 		return limit === undefined ? query : query.limit(limit);
 	},
@@ -93,7 +93,7 @@ export const messageRepo = (db: PostgresJsDatabase<any>) => ({
 		const query = db.select().from(messages).where(eq(messages.conversationId, conversationId)).orderBy(asc(messages.seq));
 		return limit === undefined ? query : query.limit(limit);
 	},
-	stream: async ({ conversationId, after, limit, below }: { conversationId?: string; after?: StreamAfter; limit?: number; below?: string } = {}): Promise<Message[]> => {
+	stream: async ({ conversationId, after, limit, below }: { conversationId?: string; after?: StreamAfter; limit?: number; below: string }): Promise<Message[]> => {
 		const conditions = streamWhere(messages.commitXid, messages.seq, after, below);
 		if (conversationId !== undefined) conditions.push(eq(messages.conversationId, conversationId));
 		const query = db.select().from(messages).where(and(...conditions)).orderBy(asc(messages.commitXid), asc(messages.seq));
@@ -126,7 +126,7 @@ export const pollRepo = (db: PostgresJsDatabase<any>) => ({
 
 export const pollAnswerRequestRepo = (db: PostgresJsDatabase<any>) => ({
 	create: async (input: PollAnswerRequestInsert): Promise<PollAnswerRequest> => {
-		const inserted = await db.insert(pollAnswerRequests).values(input).onConflictDoNothing({ target: [pollAnswerRequests.deviceSessionId, pollAnswerRequests.idempotencyKey] }).returning();
+		const inserted = await db.insert(pollAnswerRequests).values({ ...input, state: "pending" }).onConflictDoNothing({ target: [pollAnswerRequests.deviceSessionId, pollAnswerRequests.idempotencyKey] }).returning();
 		if (inserted[0]) return inserted[0];
 		return (await db.select().from(pollAnswerRequests).where(and(eq(pollAnswerRequests.deviceSessionId, input.deviceSessionId!), eq(pollAnswerRequests.idempotencyKey, input.idempotencyKey!))).limit(1))[0]!;
 	},
