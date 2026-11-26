@@ -49,39 +49,48 @@ export const runChecked = async (command: string, args: readonly string[], optio
 // The shell script that runs `program` with a passfile of `role`. printf is a shell builtin, so the password is in no
 // argument list; the program runs as a child (not exec) so that the trap can remove the passfile afterwards, and the
 // script ends with the program's exit status.
-export const passfileScript = (role: string, program: string): string => {
+//
+// With `wrongPassword` the passfile holds a password that is no secret of any role instead of the secret file's content:
+// the way to prove that a server really asks for the password (a login with it must be refused).
+export const WRONG_PASSWORD = "not-the-password-of-any-secret-file";
+export const passfileScript = (role: string, program: string, wrongPassword = false): string => {
 	if (!ROLE_NAME.test(role)) throw new Error(`bad role name: ${role}`);
+	const password = wrongPassword ? `'${WRONG_PASSWORD}'` : `"$(cat /run/secrets/${role})"`;
 	return [
 		"umask 077",
 		"f=$(mktemp /dev/shm/pgpass.XXXXXX) || exit 1",
 		`trap 'rm -f "$f"' EXIT`,
 		"trap 'exit 1' INT TERM",
-		`printf '*:*:*:${role}:%s\\n' "$(cat /run/secrets/${role})" > "$f"`,
+		`printf '*:*:*:${role}:%s\\n' ${password} > "$f"`,
 		`PGPASSFILE="$f" ${program}`,
 	].join("; ");
 };
 
 // The argument list that runs `program` inside the container with the role's password taken from its secret file.
-export const execArgs = (container: string, role: string, program: string): string[] => [
-	"exec", "-i", container, "sh", "-c", passfileScript(role, program),
+export const execArgs = (container: string, role: string, program: string, wrongPassword = false): string[] => [
+	"exec", "-i", container, "sh", "-c", passfileScript(role, program, wrongPassword),
 ];
 
 export interface PsqlOptions {
 	readonly database?: string;
 	// Connect over TCP (127.0.0.1 inside the container) instead of the unix socket.
 	readonly tcp?: boolean;
+	// The port of the server (default: the one of the stack).
+	readonly port?: number;
+	// Log in with a password that is not the one of the secret file.
+	readonly wrongPassword?: boolean;
 }
 
 const psqlProgram = (role: string, options: PsqlOptions): string =>
-	`psql -X -q -At -w -v ON_ERROR_STOP=1 ${options.tcp ? "-h 127.0.0.1 " : ""}-U ${role} -d ${options.database ?? DATABASE}`;
+	`psql -X -q -At -w -v ON_ERROR_STOP=1 ${options.tcp ? "-h 127.0.0.1 " : ""}${options.port === undefined ? "" : `-p ${Number(options.port)} `}-U ${role} -d ${options.database ?? DATABASE}`;
 
 // Runs SQL (from standard input) as `role`; resolves with the result, rejects on an error.
 export const psql = async (container: string, role: string, sql: string, options: PsqlOptions = {}): Promise<string> =>
-	(await runChecked("docker", execArgs(container, role, psqlProgram(role, options)), { input: sql })).trim();
+	(await runChecked("docker", execArgs(container, role, psqlProgram(role, options), options.wrongPassword), { input: sql })).trim();
 
 // Same, but returns the result without throwing, for tests that expect a refusal.
 export const tryPsql = (container: string, role: string, sql: string, options: PsqlOptions = {}): Promise<RunResult> =>
-	run("docker", execArgs(container, role, psqlProgram(role, options)), { input: sql });
+	run("docker", execArgs(container, role, psqlProgram(role, options), options.wrongPassword), { input: sql });
 
 // A psql session that stays open: statements go in one at a time, each answering with exactly one line.
 export class PsqlSession {
@@ -94,7 +103,7 @@ export class PsqlSession {
 	private readonly exited: Promise<number | null>;
 
 	constructor(container: string, role: string, options: PsqlOptions = {}) {
-		this.child = spawn("docker", execArgs(container, role, psqlProgram(role, options)), { stdio: ["pipe", "pipe", "pipe"] });
+		this.child = spawn("docker", execArgs(container, role, psqlProgram(role, options), options.wrongPassword),{ stdio: ["pipe", "pipe", "pipe"] });
 		this.child.stdin.on("error", () => {});
 		this.child.stdout.on("data", (chunk: Buffer) => {
 			this.pending += chunk.toString("utf8");

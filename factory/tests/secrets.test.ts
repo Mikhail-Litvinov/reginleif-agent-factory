@@ -50,6 +50,39 @@ describe("secrets", () => {
 		assert.equal(await readFile(join(dir, "af_api"), "utf8"), "kept-value");
 	});
 
+	// A kill between the exclusive create and the write leaves an empty file; reporting it as "kept" would start the
+	// stack with a role that has no password. The same for a file with content the init script would refuse.
+	for (const [label, content] of [
+		["empty", ""],
+		["only a newline", "\n"],
+		["with a character outside A-Z a-z 0-9 _ -", "bad value!"],
+	] as const) {
+		it(`an existing secret file that is ${label} is refused with its name and the recovery step, and is not changed or filled in`, async () => {
+			const dir = join(work, `invalid-${label.replace(/\W+/g, "-")}`);
+			createSecrets(dir);
+			await writeFile(join(dir, "af_control"), content);
+			const others = await Promise.all(SECRET_NAMES.filter((n) => n !== "af_control").map((n) => readFile(join(dir, n), "utf8")));
+			assert.throws(() => createSecrets(dir), (error: Error) => /af_control/.test(error.message) && /remove that one file, then run (the command|it) again/.test(error.message));
+			assert.equal(await readFile(join(dir, "af_control"), "utf8"), content, "the file must not be overwritten");
+			const after = await Promise.all(SECRET_NAMES.filter((n) => n !== "af_control").map((n) => readFile(join(dir, n), "utf8")));
+			assert.deepEqual(after, others);
+			const cli = await run("node", [SETUP_CLI, dir]);
+			assert.equal(cli.code, 1);
+			assert.match(cli.stderr, /af_control/);
+			assert.doesNotMatch(cli.stdout, /kept/);
+			const check = await run("node", [SETUP_CLI, "--check", dir]);
+			assert.equal(check.code, 1, "--check reports it too");
+			assert.match(check.stderr, /af_control/);
+		});
+	}
+
+	it("a secret file with a trailing newline (as the init script reads it) is kept", async () => {
+		const dir = join(work, "newline-kept");
+		createSecrets(dir);
+		await writeFile(join(dir, "af_api"), "kept-value\n");
+		assert.ok(createSecrets(dir).kept.includes("af_api"));
+	});
+
 	it("the command prints no password and exits 0 on a repeat run", async () => {
 		const dir = join(work, "cli");
 		const one = await run("node", [SETUP_CLI, dir]);

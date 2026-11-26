@@ -4,6 +4,7 @@ import { copyFile, mkdir, readFile, readdir, rename, writeFile } from "node:fs/p
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
+import { restrictDirectory } from "../deploy/acl.ts";
 import { backup, type Manifest } from "../deploy/backup/backup.ts";
 import { restoreCheck, startScratch, type ScratchServer } from "../deploy/backup/restore-check.ts";
 import { psql, run } from "../deploy/lib.ts";
@@ -120,6 +121,7 @@ describe("backup and restore check", () => {
 		for (const suffix of [".dump", ".dump.sha256", ".manifest.json"]) {
 			const target = join(work, `collide-${n++}`);
 			await mkdir(target);
+			restrictDirectory(target, "test directory"); // a pre-made target must already be protected; backup refuses an open one
 			const taken = join(target, `${name}${suffix}`);
 			await writeFile(taken, "someone else's data");
 			await assert.rejects(backup({ project: stack.project, target, nameFor: () => name }), /EEXIST/, suffix);

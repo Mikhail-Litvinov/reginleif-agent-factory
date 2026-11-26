@@ -3,8 +3,9 @@
 //   node deploy/setup-secrets.ts <directory>          create what is missing, then verify the access
 //   node deploy/setup-secrets.ts --check <directory>  verify only (changes nothing)
 //
-// A file that exists is never overwritten (a changed password would lock the running database out). Passwords are
-// never printed. A new secret file is created EMPTY and exclusively, its own effective access (what it inherited from
+// A file that exists is never overwritten (a changed password would lock the running database out). An existing file that
+// holds no password the init script accepts (empty, or with other characters) is not "kept" either: the command refuses and
+// names the file, and the owner removes that one file and runs the command again. Passwords are never printed. A new secret file is created EMPTY and exclusively, its own effective access (what it inherited from
 // the directory included) is read back, and only then is the password written; a file that fails that check is removed
 // empty, so no secret byte is ever written into a file whose protection was not verified.
 //
@@ -17,10 +18,10 @@
 // (for example one just made by mkdtemp) has nothing to protect yet, so its access is set explicitly (inheritance off,
 // every entry other than the three removed) and READ BACK before the first secret is written; when that verification
 // fails, nothing is written.
-import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { chmodSync, closeSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, statSync, unlinkSync, writeSync, type BigIntStats } from "node:fs";
+import { closeSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, unlinkSync, writeSync, type BigIntStats } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { SID_ADMINISTRATORS, SID_SYSTEM, aclSids, pathsAccessProblems, restrictDirectory } from "./acl.ts";
 import { idOfStats, sameId } from "./identity.ts";
 
 // One secret per account; the first is the bootstrap superuser of the server (init and recovery only).
@@ -29,8 +30,7 @@ export const SECRET_NAMES = ["af_bootstrap", "af_migrator", "af_api", "af_contro
 // 32 random bytes = 256 bits, base64url so that the text holds only A-Z a-z 0-9 _ - (the init script checks it).
 const PASSWORD_BYTES = 32;
 
-export const SID_SYSTEM = "S-1-5-18";
-export const SID_ADMINISTRATORS = "S-1-5-32-544";
+export { SID_ADMINISTRATORS, SID_SYSTEM, aclSids };
 
 export interface SecretsResult {
 	readonly directory: string;
@@ -38,30 +38,26 @@ export interface SecretsResult {
 	readonly kept: string[];
 }
 
-const currentUserSid = (): string => {
-	const result = spawnSync("whoami", ["/user", "/fo", "csv", "/nh"], { encoding: "utf8" });
-	const sid = /"(S-1-\d+(?:-\d+)+)"/.exec(result.stdout ?? "")?.[1];
-	if (result.status !== 0 || !sid) throw new Error(`could not read the current user's SID: ${result.stderr || result.stdout}`);
-	return sid;
-};
-
-// The SIDs that have an access entry on a path, read back from the system (icacls /sid prints SIDs, not names).
-export const aclSids = (path: string): string[] => {
-	// Get-Acl asked for SecurityIdentifier objects: the SID is never translated to a (localized) name.
-	const script =
-		"$a = Get-Acl -LiteralPath $env:AF_ACL_PATH; " +
-		"$a.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) | ForEach-Object { $_.IdentityReference.Value }";
-	// The path goes through the environment: with -Command, extra arguments are joined into the command text, so a path
-	// with a space reached Get-Acl cut at the first space and the read-back came back empty.
-	const result = spawnSync("powershell", ["-NoProfile", "-NonInteractive", "-Command", script], {
-		encoding: "utf8",
-		env: { ...process.env, AF_ACL_PATH: path },
-	});
-	if (result.status !== 0) throw new Error(`could not read the ACL of ${path}: ${result.stderr || result.stdout}`);
-	return result.stdout.split(/\r?\n/).map((l) => l.trim()).filter((l) => /^S-1-\d+(?:-\d+)*$/.test(l));
-};
-
 const secretFiles = (directory: string): string[] => SECRET_NAMES.map((n) => join(directory, n)).filter((f) => existsSync(f));
+
+// What the init script accepts as a password (init/10-roles.sh: the file's text without trailing newlines, non-empty,
+// only A-Z a-z 0-9 _ -). A file that fails it would start a role with no usable password.
+const VALID_PASSWORD = /^[A-Za-z0-9_-]+$/;
+
+// The secret files that exist but hold no password the init script would accept (an empty file left by a kill between the
+// exclusive create and the write, or a file with other content). The content is read and tested, never printed.
+export const invalidSecretFiles = (directory: string): string[] => {
+	const problems: string[] = [];
+	for (const file of secretFiles(resolve(directory))) {
+		const text = readFileSync(file, "utf8").replace(/[\r\n]+$/, "");
+		if (!VALID_PASSWORD.test(text)) {
+			problems.push(
+				`${file} is ${text === "" ? "empty" : "not a valid password (only A-Z a-z 0-9 _ - are allowed)"}; it was not changed; to recover, remove that one file, then run the command again: it creates a new password for that account only.`,
+			);
+		}
+	}
+	return problems;
+};
 
 // The access of the directory and of each secret file that exists; an empty list means exactly the allowed holders.
 // Read-only: it changes nothing.
@@ -71,51 +67,11 @@ export const verifySecretsAccess = (directory: string): string[] => {
 	return pathsAccessProblems([target, ...secretFiles(target)]);
 };
 
-// The access of exactly these paths, read back (the effective ACL, inherited entries included, on Windows).
-const pathsAccessProblems = (paths: string[]): string[] => {
-	const problems: string[] = [];
-	if (process.platform === "win32") {
-		const user = currentUserSid();
-		const allowed = new Set([user, SID_SYSTEM, SID_ADMINISTRATORS]);
-		for (const path of paths) {
-			const sids = aclSids(path);
-			for (const sid of new Set(sids)) {
-				if (!allowed.has(sid)) problems.push(`${path}: access entry for ${sid}, which is not the current user, SYSTEM or Administrators`);
-			}
-			if (!sids.includes(user)) problems.push(`${path}: the current user has no access entry`);
-		}
-	} else {
-		for (const path of paths) {
-			const mode = statSync(path).mode & 0o777;
-			if ((mode & 0o077) !== 0) problems.push(`${path}: mode ${mode.toString(8)} gives access to group or others`);
-		}
-	}
-	return problems;
-};
-
 // The access of one secret file that was just created, before any secret byte is in it: the file's own effective
 // ACL (what it inherited from the directory included) and the directory it sits in.
 export const verifyFileAccess = (file: string): string[] => pathsAccessProblems([dirname(file), file]);
 
-// Sets the access of a directory that holds no secret yet, explicitly and not by what it happens to carry: inheritance
-// off, the three allowed holders granted, and every other entry the directory already had (a grant or a deny, inherited
-// ones were turned into explicit entries by the inheritance step) removed by SID. Elsewhere: mode 700.
-const restrict = (directory: string): void => {
-	if (process.platform !== "win32") {
-		chmodSync(directory, 0o700);
-		return;
-	}
-	const allowed = [currentUserSid(), SID_SYSTEM, SID_ADMINISTRATORS];
-	const icacls = (args: string[]): void => {
-		const result = spawnSync("icacls", [directory, ...args], { encoding: "utf8" });
-		if (result.status !== 0) throw new Error(`icacls failed on the secrets directory: ${result.stderr || result.stdout}`);
-	};
-	// "/inheritance:r" copies nothing (the inherited entries are dropped); "/grant:r" replaces those holders' own entries.
-	icacls(["/inheritance:r", "/grant:r", ...allowed.map((sid) => `*${sid}:(OI)(CI)F`)]);
-	for (const sid of new Set(aclSids(directory))) {
-		if (!allowed.includes(sid)) icacls(["/remove", `*${sid}`]);
-	}
-};
+const restrict = (directory: string): void => restrictDirectory(directory, "secrets directory");
 
 type Lock = (directory: string) => void;
 
@@ -159,6 +115,9 @@ export const createSecrets = (directory: string, options: { lock?: Lock; verifyF
 	if (reused) {
 		const problems = verifySecretsAccess(target);
 		if (problems.length > 0) throw refuse(target, problems);
+		// Before anything is created or reported as kept: an invalid file is never overwritten and never counted as present.
+		const invalid = invalidSecretFiles(target);
+		if (invalid.length > 0) throw new Error(`refused: the secrets directory ${target} holds a secret file that is not usable:\n${invalid.map((p) => `  - ${p}`).join("\n")}`);
 	} else {
 		mkdirSync(target, { recursive: true, mode: 0o700 });
 		(options.lock ?? restrict)(target);
@@ -209,7 +168,7 @@ if (import.meta.main) {
 		console.error("usage: node deploy/setup-secrets.ts [--check] <secrets directory>");
 		process.exitCode = 2;
 	} else if (checkOnly) {
-		const problems = verifySecretsAccess(directory);
+		const problems = [...verifySecretsAccess(directory), ...(existsSync(directory) ? invalidSecretFiles(directory) : [])];
 		if (problems.length === 0) console.log(`secrets access ok: ${resolve(directory)} is open to the current user, SYSTEM and Administrators only`);
 		else {
 			console.error(`secrets access NOT ok: ${resolve(directory)}`);

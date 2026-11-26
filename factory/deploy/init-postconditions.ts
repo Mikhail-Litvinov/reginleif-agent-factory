@@ -34,12 +34,20 @@ export interface ShellCheck extends CheckBase {
 	// The check belongs to the last step of the init (the marker); it is run on request only (see verify-init.ts).
 	readonly isMarker?: boolean;
 }
-// A real login with the password from the role's secret file.
+// A real login with the password from the role's secret file; with `wrongPassword` the opposite: a login with a password
+// that is no role's secret must be REFUSED (a trust rule in the active configuration would let it in, and then a
+// successful login with the right password proves nothing).
 export interface LoginCheck extends CheckBase {
 	readonly kind: "login";
 	readonly role: string;
+	readonly wrongPassword?: boolean;
 }
-export type Check = SqlCheck | ShellCheck | LoginCheck;
+// The rules the running server really uses (pg_hba_file_rules, read as the bootstrap role over the socket), not the file
+// in the data directory, which may not be the active one (the stack starts the server with hba_file=/etc/...).
+export interface HbaCheck extends CheckBase {
+	readonly kind: "hba";
+}
+export type Check = SqlCheck | ShellCheck | LoginCheck | HbaCheck;
 
 export const FINISH_REMOVES_SERVICE_FILE = "99-finish: the bootstrap service file is removed";
 export const FINISH_NO_TRUST_RULE = "99-finish: no trust rule in the data directory's pg_hba.conf";
@@ -80,6 +88,178 @@ const defaultSelectOnly = (kind: "r" | "S", statement: string, label: string): S
 	covers: [statement],
 	expression: `(select coalesce(array_agg(a.privilege_type order by a.privilege_type), '{}') from pg_default_acl d join pg_roles o on o.oid = d.defaclrole join pg_namespace n on n.oid = d.defaclnamespace join lateral aclexplode(d.defaclacl) a on true join pg_roles g on g.oid = a.grantee where o.rolname = 'af_migrator' and n.nspname = 'public' and d.defaclobjtype = '${kind}' and g.rolname = 'af_backup') = array['SELECT']::text[]`,
 });
+
+// ---- the whole intended policy, not only the grants init writes ----
+// What every role may do right after the init, as one definition the checks below are built from. An extra membership,
+// an extra grant, a schema or table nobody intended is a difference from it. Later phases that add objects or grants
+// (migrations) extend this definition together with their grants.
+const OWNER_ROLE = "af_migrator";
+const BACKUP_ROLE = "af_backup";
+const PRIVILEGES = {
+	database: ["CONNECT", "CREATE", "TEMPORARY"],
+	schema: ["USAGE", "CREATE"],
+	table: ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"],
+	sequence: ["USAGE", "SELECT", "UPDATE"],
+	function: ["EXECUTE"],
+} as const;
+type ObjectKind = keyof typeof PRIVILEGES;
+
+// Does `role` hold `privilege` on an object of that kind, in the application database (the database itself, schema public,
+// and the objects of schema public)? The owner holds everything; the others only what init grants them: CONNECT and USAGE,
+// SELECT on tables and sequences for the backup role (its default privileges), EXECUTE on functions (PUBLIC's default).
+export const intendedPrivilege = (kind: ObjectKind, role: string, privilege: string): boolean => {
+	if (kind === "function") return true;
+	if (role === OWNER_ROLE) return true;
+	if (kind === "database") return privilege === "CONNECT";
+	if (kind === "schema") return privilege === "USAGE";
+	return role === BACKUP_ROLE && privilege === "SELECT";
+};
+
+// Rows (role, privilege, allowed) joined to the roles that exist (a missing role is a failure of the role checks, not of this).
+const wanted = (kind: ObjectKind, allowed: (role: string, privilege: string) => boolean = (role, privilege) => intendedPrivilege(kind, role, privilege)): string => {
+	const rows = APPLICATION_ROLES.flatMap((role) => PRIVILEGES[kind].map((privilege) => `('${role}', '${privilege}', ${allowed(role, privilege)})`));
+	return `(values ${rows.join(", ")}) as w(role, priv, allowed) join pg_roles r on r.rolname = w.role`;
+};
+
+const notExtensionMember = (alias: string, catalog: "pg_class" | "pg_proc"): string =>
+	`not exists (select 1 from pg_depend d where d.classid = '${catalog}'::regclass and d.objid = ${alias}.oid and d.deptype = 'e')`;
+const RELATIONS = "c.relnamespace = 'public'::regnamespace and c.relkind in ('r', 'p', 'v', 'm', 'f')";
+const SEQUENCES = "c.relnamespace = 'public'::regnamespace and c.relkind = 'S'";
+const ownerOid = `(select oid from pg_roles where rolname = '${OWNER_ROLE}')`;
+
+// Sorted the way the database sorts under COLLATE "C" (plain byte order), so the two lists compare equal.
+const sortedC = (values: readonly string[]): string[] => [...values].sort();
+const textArray = (values: readonly string[]): string => `array[${sortedC(values).map((v) => `'${v}'`).join(", ")}]::text[]`;
+
+const ALL_ROLE_NAMES = [BOOTSTRAP_ROLE, ...APPLICATION_ROLES];
+
+// The only default-privilege entries of the database, written `owner|schema|object type|grantee|privilege`; the owner's own
+// entry (it always has one once a default is set) is not a grant to anyone else and is left out.
+const INTENDED_DEFAULT_ENTRIES = ["r", "S"].map((kind) => `${OWNER_ROLE}|public|${kind}|${BACKUP_ROLE}|SELECT`);
+
+const policyChecks: readonly SqlCheck[] = [
+	{
+		kind: "sql",
+		name: "role set: only af_bootstrap and the five application roles exist (besides the predefined pg_ roles)",
+		covers: [],
+		expression: `(select coalesce(array_agg(rolname::text order by rolname::text collate "C"), '{}') from pg_roles where rolname !~ '^pg_') = ${textArray(ALL_ROLE_NAMES)}`,
+	},
+	{
+		kind: "sql",
+		name: "role attributes: no role besides af_bootstrap is a superuser, may create roles or databases, replicate or bypass row security",
+		covers: [],
+		expression: `not exists (select 1 from pg_roles where rolname <> '${BOOTSTRAP_ROLE}' and (rolsuper or rolcreaterole or rolcreatedb or rolreplication or rolbypassrls))`,
+	},
+	{
+		kind: "sql",
+		name: "role memberships: no role that is not a predefined pg_ role is a member of a role or has members",
+		covers: [],
+		expression: "not exists (select 1 from pg_auth_members m join pg_roles g on g.oid = m.roleid join pg_roles u on u.oid = m.member where g.rolname !~ '^pg_' or u.rolname !~ '^pg_')",
+	},
+	{
+		kind: "sql",
+		name: "schema ownership: public belongs to pg_database_owner, pg_catalog and information_schema to af_bootstrap, no other schema exists",
+		covers: [],
+		expression:
+			"(select count(*) from pg_namespace where nspname = 'public' and pg_get_userbyid(nspowner) = 'pg_database_owner') = 1" +
+			` and not exists (select 1 from pg_namespace where nspname in ('pg_catalog', 'information_schema') and pg_get_userbyid(nspowner) <> '${BOOTSTRAP_ROLE}')` +
+			" and not exists (select 1 from pg_namespace where nspname not in ('public', 'information_schema') and nspname !~ '^pg_')",
+	},
+	{
+		kind: "sql",
+		name: "database ownership: af_migrator owns agent_factory, af_bootstrap owns postgres, template0 and template1",
+		covers: [],
+		expression:
+			`(select count(*) from pg_database where datname = 'agent_factory' and pg_get_userbyid(datdba) = '${OWNER_ROLE}') = 1` +
+			` and not exists (select 1 from pg_database where datname in ('postgres', 'template0', 'template1') and pg_get_userbyid(datdba) <> '${BOOTSTRAP_ROLE}')`,
+	},
+	{
+		kind: "sql",
+		name: "database privileges: the application roles hold exactly the intended rights on agent_factory, and cannot connect to postgres or template1",
+		covers: [],
+		expression:
+			`not exists (select 1 from ${wanted("database")} where has_database_privilege(r.oid, 'agent_factory', w.priv) <> w.allowed)` +
+			` and not exists (select 1 from ${wanted("database", () => false)} cross join (values ('postgres'), ('template1')) as db(name) where w.priv = 'CONNECT' and has_database_privilege(r.oid, db.name, 'CONNECT'))`,
+	},
+	{
+		kind: "sql",
+		name: "schema privileges: the application roles hold exactly the intended rights on schema public",
+		covers: [],
+		expression: `not exists (select 1 from ${wanted("schema")} where has_schema_privilege(r.oid, 'public', w.priv) <> w.allowed)`,
+	},
+	{
+		kind: "sql",
+		name: "schema public: every table, view, sequence and function that is not part of an extension is owned by af_migrator",
+		covers: [],
+		expression:
+			`not exists (select 1 from pg_class c where c.relnamespace = 'public'::regnamespace and c.relkind in ('r', 'p', 'v', 'm', 'f', 'S') and ${notExtensionMember("c", "pg_class")} and c.relowner is distinct from ${ownerOid})` +
+			` and not exists (select 1 from pg_proc p where p.pronamespace = 'public'::regnamespace and ${notExtensionMember("p", "pg_proc")} and p.proowner is distinct from ${ownerOid})`,
+	},
+	{
+		kind: "sql",
+		name: "schema public: effective privileges on tables and views are exactly the intended ones",
+		covers: [],
+		expression: `not exists (select 1 from ${wanted("table")}, pg_class c where ${RELATIONS} and ${notExtensionMember("c", "pg_class")} and has_table_privilege(r.oid, c.oid, w.priv) <> w.allowed)`,
+	},
+	{
+		kind: "sql",
+		name: "schema public: effective privileges on sequences are exactly the intended ones",
+		covers: [],
+		expression: `not exists (select 1 from ${wanted("sequence")}, pg_class c where ${SEQUENCES} and ${notExtensionMember("c", "pg_class")} and has_sequence_privilege(r.oid, c.oid, w.priv) <> w.allowed)`,
+	},
+	{
+		kind: "sql",
+		name: "schema public: effective privileges on functions are exactly the intended ones",
+		covers: [],
+		expression: `not exists (select 1 from ${wanted("function")}, pg_proc p where p.pronamespace = 'public'::regnamespace and ${notExtensionMember("p", "pg_proc")} and has_function_privilege(r.oid, p.oid, w.priv) <> w.allowed)`,
+	},
+	{
+		kind: "sql",
+		name: "schema public: no column-level privileges on any table or view",
+		covers: [],
+		expression: `not exists (select 1 from pg_attribute a join pg_class c on c.oid = a.attrelid where ${RELATIONS} and ${notExtensionMember("c", "pg_class")} and a.attacl is not null)`,
+	},
+	{
+		kind: "sql",
+		name: "default privileges: no entry beyond af_backup select on new tables and sequences of af_migrator in schema public",
+		covers: [],
+		expression:
+			"(select coalesce(array_agg(e order by e collate \"C\"), '{}') from (select pg_get_userbyid(d.defaclrole) || '|' || coalesce((select nspname::text from pg_namespace where oid = d.defaclnamespace), '*') || '|' || d.defaclobjtype::text || '|' || case a.grantee when 0 then 'PUBLIC' else pg_get_userbyid(a.grantee) end || '|' || a.privilege_type as e from pg_default_acl d, aclexplode(d.defaclacl) a where a.grantee <> d.defaclrole) x)" +
+			` = ${textArray(INTENDED_DEFAULT_ENTRIES)}`,
+	},
+];
+
+// ---- authentication ----
+// A row of pg_hba_file_rules, the rules the running server uses.
+export interface HbaRule {
+	readonly line_number: number;
+	readonly type: string;
+	readonly database: string[] | null;
+	readonly user_name: string[] | null;
+	readonly address: string | null;
+	readonly auth_method: string | null;
+	readonly error: string | null;
+}
+// The only methods a rule may have: a password proven by scram, or a rejection. trust, peer, ident, md5, password, cert,
+// gss... let a login in without proving the password of the secret file.
+export const ALLOWED_AUTH_METHODS: readonly string[] = ["scram-sha-256", "reject"];
+// One JSON line: the file the server reads and its rules.
+export const HBA_RULES_SQL =
+	"select jsonb_build_object('file', current_setting('hba_file'), 'rules', coalesce((select jsonb_agg(to_jsonb(r) order by r.line_number) from (select line_number, type, database, user_name, address, auth_method, error from pg_hba_file_rules) r), '[]'::jsonb))::text;";
+
+export const hbaRuleProblems = (rules: readonly HbaRule[]): string[] => {
+	if (rules.length === 0) return ["no rule is active (pg_hba_file_rules is empty)"];
+	const problems: string[] = [];
+	for (const rule of rules) {
+		if (rule.error) problems.push(`line ${rule.line_number}: the server cannot use this rule: ${rule.error}`);
+		else if (!ALLOWED_AUTH_METHODS.includes(rule.auth_method ?? "")) {
+			problems.push(`line ${rule.line_number}: an active ${rule.type} rule uses the method ${rule.auth_method ?? "(none)"}; only ${ALLOWED_AUTH_METHODS.join(" and ")} are allowed`);
+		}
+	}
+	return problems;
+};
+
+const WRONG_PASSWORD_ROLE = "af_api";
 
 export const CHECKS: readonly Check[] = [
 	{
@@ -147,8 +327,23 @@ export const CHECKS: readonly Check[] = [
 	},
 	defaultSelectOnly("r", "ALTER DEFAULT PRIVILEGES FOR ROLE af_migrator IN SCHEMA public GRANT SELECT ON TABLES TO af_backup", "tables"),
 	defaultSelectOnly("S", "ALTER DEFAULT PRIVILEGES FOR ROLE af_migrator IN SCHEMA public GRANT SELECT ON SEQUENCES TO af_backup", "sequences"),
+	// Everything beyond the statements above: the whole intended policy (memberships, ownership, effective privileges).
+	...policyChecks,
 	// What the statements above cannot show: the passwords, and the connect grant itself as the server enforces it.
 	...APPLICATION_ROLES.map((role): LoginCheck => ({ kind: "login", name: `login as ${role} to agent_factory with the password of its secret file`, covers: [], role })),
+	// A login that works proves the password only when no active rule lets any password in.
+	{
+		kind: "hba",
+		name: "authentication: only scram-sha-256 and reject rules are active (pg_hba_file_rules)",
+		covers: [],
+	},
+	{
+		kind: "login",
+		name: `authentication: a login as ${WRONG_PASSWORD_ROLE} over TCP with a password that is in no secret file is refused`,
+		covers: [],
+		role: WRONG_PASSWORD_ROLE,
+		wrongPassword: true,
+	},
 	{
 		kind: "shell",
 		name: FINISH_REMOVES_SERVICE_FILE,

@@ -130,6 +130,60 @@ describe("verify-init against a real database", { concurrency: false }, () => {
 		{ name: "no default select on new tables for the backup role", breakIt: () => asBootstrap("ALTER DEFAULT PRIVILEGES FOR ROLE af_migrator IN SCHEMA public REVOKE SELECT ON TABLES FROM af_backup;"), repair: () => asBootstrap("ALTER DEFAULT PRIVILEGES FOR ROLE af_migrator IN SCHEMA public GRANT SELECT ON TABLES TO af_backup;"), fails: ["new tables"] },
 		{ name: "the backup role may write to new tables", breakIt: () => asBootstrap("ALTER DEFAULT PRIVILEGES FOR ROLE af_migrator IN SCHEMA public GRANT INSERT ON TABLES TO af_backup;"), repair: () => asBootstrap("ALTER DEFAULT PRIVILEGES FOR ROLE af_migrator IN SCHEMA public REVOKE INSERT ON TABLES FROM af_backup;"), fails: ["new tables"] },
 		{ name: "the vector extension missing", breakIt: () => asBootstrap("DROP EXTENSION vector;"), repair: () => asBootstrap("CREATE EXTENSION vector;"), fails: ["extension vector"] },
+		// The whole intended policy, not only the grants init writes: a membership, a stray role, an extra right of any kind.
+		{ name: "an application role that is a member of another (the migrator granted to the reader)", breakIt: () => asBootstrap("GRANT af_migrator TO af_reader;"), repair: () => asBootstrap("REVOKE af_migrator FROM af_reader;"), fails: ["role memberships"] },
+		{ name: "a predefined role granted to an application role (it carries no object privilege of its own)", breakIt: () => asBootstrap("GRANT pg_monitor TO af_api;"), repair: () => asBootstrap("REVOKE pg_monitor FROM af_api;"), fails: ["role memberships"] },
+		{ name: "a stray role that may create roles", breakIt: () => asBootstrap("CREATE ROLE af_stray CREATEROLE;"), repair: () => asBootstrap("DROP ROLE af_stray;"), fails: ["role set", "role attributes"] },
+		{ name: "an application role with a replication attribute", breakIt: () => asBootstrap("ALTER ROLE af_backup REPLICATION;"), repair: () => asBootstrap("ALTER ROLE af_backup NOREPLICATION;"), fails: ["role attributes"] },
+		{ name: "schema public owned by an application role", breakIt: () => asBootstrap("ALTER SCHEMA public OWNER TO af_api;"), repair: () => asBootstrap("ALTER SCHEMA public OWNER TO pg_database_owner; GRANT USAGE ON SCHEMA public TO af_api;"), fails: ["schema ownership"] },
+		{ name: "an extra schema", breakIt: () => asBootstrap("CREATE SCHEMA af_extra;"), repair: () => asBootstrap("DROP SCHEMA af_extra;"), fails: ["schema ownership"] },
+		{ name: "template1 owned by an application role", breakIt: () => asBootstrap("ALTER DATABASE template1 OWNER TO af_api;", "postgres"), repair: () => asBootstrap("ALTER DATABASE template1 OWNER TO af_bootstrap;", "postgres"), fails: ["database ownership"] },
+		{ name: "create on schema public for a role that only uses it", breakIt: () => asBootstrap("GRANT CREATE ON SCHEMA public TO af_api;"), repair: () => asBootstrap("REVOKE CREATE ON SCHEMA public FROM af_api;"), fails: ["schema privileges"] },
+		{ name: "temporary tables for the reader in the application database", breakIt: () => asBootstrap("GRANT TEMPORARY ON DATABASE agent_factory TO af_reader;"), repair: () => asBootstrap("REVOKE TEMPORARY ON DATABASE agent_factory FROM af_reader;"), fails: ["database privileges"] },
+		{ name: "connect to the postgres database for an application role", breakIt: () => asBootstrap("GRANT CONNECT ON DATABASE postgres TO af_api;", "postgres"), repair: () => asBootstrap("REVOKE CONNECT ON DATABASE postgres FROM af_api;", "postgres"), fails: ["database privileges"] },
+		{
+			name: "a table that an application role may read",
+			breakIt: () => asBootstrap("SET ROLE af_migrator; CREATE TABLE public.probe (id int); GRANT SELECT ON public.probe TO af_api;"),
+			repair: () => asBootstrap("DROP TABLE public.probe;"),
+			fails: ["privileges on tables and views"],
+		},
+		{
+			name: "a table that the reader may write",
+			breakIt: () => asBootstrap("SET ROLE af_migrator; CREATE TABLE public.probe (id int); GRANT INSERT ON public.probe TO af_reader;"),
+			repair: () => asBootstrap("DROP TABLE public.probe;"),
+			fails: ["privileges on tables and views"],
+		},
+		{
+			name: "a table with a column right for an application role",
+			breakIt: () => asBootstrap("SET ROLE af_migrator; CREATE TABLE public.probe (id int); GRANT SELECT (id) ON public.probe TO af_api;"),
+			repair: () => asBootstrap("DROP TABLE public.probe;"),
+			fails: ["column-level"],
+		},
+		{ name: "a table owned by the bootstrap role", breakIt: () => asBootstrap("CREATE TABLE public.probe (id int);"), repair: () => asBootstrap("DROP TABLE public.probe;"), fails: ["owned by af_migrator"] },
+		{
+			name: "a sequence that an application role may use",
+			breakIt: () => asBootstrap("SET ROLE af_migrator; CREATE SEQUENCE public.probe_seq; GRANT USAGE ON SEQUENCE public.probe_seq TO af_control;"),
+			repair: () => asBootstrap("DROP SEQUENCE public.probe_seq;"),
+			fails: ["privileges on sequences"],
+		},
+		{
+			name: "a function that an application role may not run",
+			breakIt: () => asBootstrap("SET ROLE af_migrator; CREATE FUNCTION public.probe_fn() RETURNS int LANGUAGE sql AS 'select 1'; REVOKE EXECUTE ON FUNCTION public.probe_fn() FROM PUBLIC;"),
+			repair: () => asBootstrap("DROP FUNCTION public.probe_fn();"),
+			fails: ["privileges on functions"],
+		},
+		{
+			name: "a default privilege that hands new tables of the migrator to an application role",
+			breakIt: () => asBootstrap("ALTER DEFAULT PRIVILEGES FOR ROLE af_migrator IN SCHEMA public GRANT SELECT ON TABLES TO af_api;"),
+			repair: () => asBootstrap("ALTER DEFAULT PRIVILEGES FOR ROLE af_migrator IN SCHEMA public REVOKE SELECT ON TABLES FROM af_api;"),
+			fails: ["no entry beyond"],
+		},
+		{
+			name: "a default privilege of another role that hands new functions to an application role",
+			breakIt: () => asBootstrap("ALTER DEFAULT PRIVILEGES FOR ROLE af_bootstrap IN SCHEMA public GRANT ALL ON TABLES TO af_api;"),
+			repair: () => asBootstrap("ALTER DEFAULT PRIVILEGES FOR ROLE af_bootstrap IN SCHEMA public REVOKE ALL ON TABLES FROM af_api;"),
+			fails: ["no entry beyond"],
+		},
 		{ name: "a password that is not the one of the secret file", breakIt: () => asBootstrap("ALTER ROLE af_api PASSWORD 'not-the-secret';"), repair: async () => asBootstrap(`ALTER ROLE af_api PASSWORD '${(await stack.secret("af_api")).trim()}';`), fails: ["login as af_api"] },
 		{
 			name: "a trust rule in the data directory's pg_hba.conf",
@@ -182,7 +236,11 @@ describe("verify-init against a real database", { concurrency: false }, () => {
 		const sql = results.filter((r) => /^(role|database|schema|extension|default privileges|no other)/.test(r.name));
 		assert.ok(sql.length > 10);
 		assert.ok(sql.every((r) => !r.ok && /could not run the catalog checks as af_backup/.test(r.detail)), formatResults(results).join("\n"));
-		assert.ok(byName(results, "login as af_api").every((r) => !r.ok));
+		// The login WITH the secret file's password fails (no database). The wrong-password probe is a different check: it is
+		// refused for the password before the database is looked at, which is what it must be, so it passes here.
+		const logins = results.filter((r) => r.name.startsWith("login as af_api"));
+		assert.equal(logins.length, 1);
+		assert.ok(logins.every((r) => !r.ok));
 		const command = await cli("--with-marker");
 		assert.equal(command.code, 1);
 		assert.match(command.stderr, /do not mark it, restore from a known-good backup/);

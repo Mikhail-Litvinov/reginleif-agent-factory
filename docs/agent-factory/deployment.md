@@ -55,6 +55,12 @@ Nothing else on the machine is touched: the stack neither uses nor removes other
 
    `node factory/deploy/setup-secrets.ts $secrets`
 
+   An existing file that is empty or does not hold a valid password (only `A-Z a-z 0-9 _ -`, as the command writes
+   them) is never reported as kept and never overwritten: the command, also with `--check`, refuses, names the file and
+   exits 1. The safe recovery is to remove that one file and run the command again, which makes a new password for that
+   account only. If the account already exists in a database, its stored password must then be changed to match; on a
+   fresh install nothing else is needed.
+
    Access is limited to the current Windows user, SYSTEM and Administrators with `icacls`, and the result is read back
    by SID (so a localized system does not matter): the directory and every secret file must hold exactly those three
    and no other entry. A directory that already holds secrets is never restricted silently: when its access is wider,
@@ -209,11 +215,19 @@ The check is a script, read-only, run from the repository root:
 `node factory/deploy/verify-init.ts`
 
 For another project name, run the same command with `--project` and the name added at the end. It verifies, as `af_backup` in one session, every postcondition of
-`init/10-roles.sh` and `init/99-finish.sh`: the six roles and their attributes (only `af_bootstrap` is a superuser),
-the read-only and timeout settings of `af_reader`, the connect and schema rights of `PUBLIC` and of the application
-roles, the owner of `agent_factory`, the `vector` extension, the default privileges of `af_backup`, a real login of
-each application role with the password of its secret file, no leftover service file and no trust rule in the data
-directory's `pg_hba.conf`. Each check prints `ok` or `FAIL <name>: <reason>`, and the script exits 0 only when all of
+`init/10-roles.sh` and `init/99-finish.sh`: the six roles and their attributes (only `af_bootstrap` is a superuser;
+no other role may create roles or databases, replicate or bypass row security), that no role is a member of another,
+the read-only and timeout settings of `af_reader`, the owner of the database and of its schemas, the connect and schema
+rights of `PUBLIC` and of the application roles, the effective privileges of every role on every table, view, sequence
+and function of the database (compared with the intended set, so an extra grant fails as surely as a missing one; the
+intended set comes from the same definition as the init scripts' checks), no column-level grants, the `vector`
+extension, the default privileges, no leftover service file and no trust rule in the data directory's `pg_hba.conf`.
+Authentication is proved on the running server, not on
+a file: the rules the server really uses are read as `af_bootstrap` from `pg_hba_file_rules` (whatever file the server's
+`hba_file` names; the failure message names it) and every rule must be
+`scram-sha-256` or `reject`, because an active `trust` rule would let any password in and a successful login would then
+prove nothing. Each application role then logs in over TCP with the password of its secret file, and one more login as
+`af_api` with a password that is in no secret file must be refused. Each check prints `ok` or `FAIL <name>: <reason>`, and the script exits 0 only when all of
 them pass (1 when any fails, 2 on a wrong argument). The list of checks is `factory/deploy/init-postconditions.ts`; a
 test (`factory/tests/verify-init.test.ts`) fails when a statement of the init scripts has no check, so the two cannot
 drift apart. Passwords are not in the catalogs, so they are proved by the real logins, not read.
@@ -245,8 +259,24 @@ The server dumped is the project `agent-factory`. After a switch-over to a resto
 
 `node factory/deploy/backup/backup.ts --target $backups --project $project`
 
-The command needs no `AF_SECRETS_DIR`: the password is read inside the container. The target directory is created when
-missing.
+The command needs no `AF_SECRETS_DIR`: the password is read inside the container.
+
+A backup holds the whole database, so the backups directory must be protected like the secrets directory: open to the
+current user, SYSTEM and Administrators only. A target that is missing is created and restricted that way by the
+command. A target that already exists is only verified (by SID, so a localized system does not matter): when it is
+open to anyone else the backup refuses before it writes a byte, names the entries and changes nothing. Restrict an
+existing directory once with (the last entry is the current user):
+
+`icacls $backups /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' "*$((whoami /user /fo csv /nh | ConvertFrom-Csv -Header n,s).s):(OI)(CI)F"`
+
+An entry the directory holds for another account itself (not inherited) stays after this command; remove it with
+`icacls $backups /remove` and the account's name. Verify the result with the check of the secrets directory, which
+tests exactly this rule and prints `secrets access ok`:
+
+`node factory/deploy/setup-secrets.ts --check $backups`
+
+The run's private staging directory inside the target gets the same access explicitly and the result is read back
+before the first dump byte is written, so no dump is ever written under an access it merely inherited.
 
 It writes `af-<UTC stamp>-<8 hex>.dump`, `.dump.sha256` and `.manifest.json`; the UTC stamp has the form `yyyyMMddTHHmmssZ`. The name is the UTC time plus 8 random hex digits, so two runs never
 share a name, also when started at once into one directory; every file is created exclusively (an existing file is

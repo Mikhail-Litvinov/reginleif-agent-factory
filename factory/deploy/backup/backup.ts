@@ -7,6 +7,12 @@
 // keys are read in that session and pg_dump reads the same snapshot (--snapshot), so the manifest describes the dump
 // exactly even while the application writes. The backup first waits (bounded) until the server is healthy.
 //
+// Access. A dump holds the whole database, so no dump byte is written where the protection was not verified (the rule of
+// the secrets directory, ../acl.ts: only the current user, SYSTEM and Administrators). The target is verified first: an
+// existing one that is open to others is refused and left as it is, one this run creates is restricted explicitly. The
+// staging directory's access is then set explicitly and read back before the dump starts; the published files are the
+// staged files (hard link), so they carry that protection.
+//
 // Files. The name is af-<UTC stamp>-<8 random hex digits>, so two runs in one directory (also at the same second) never
 // meet. The run first makes a private staging directory <target>/.af-staging-<random> (mkdtemp, so it is new) and
 // writes every file there, created exclusively. A file is then published to its final name by hard link, which fails
@@ -27,6 +33,7 @@ import type { Readable, Writable } from "node:stream";
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { DATABASE, FOREIGN_KEYS_SQL, PsqlSession, ROW_COUNTS_SQL, execArgs, findContainer, realClock, runChecked, waitHealthy, type Clock, type ForeignKey } from "../lib.ts";
+import { pathsAccessProblems, restrictDirectory } from "../acl.ts";
 import { OwnedDir, OwnedFiles } from "../owned.ts";
 
 export const MANIFEST_FORMAT = "agent-factory-backup-1";
@@ -54,7 +61,14 @@ export interface BackupOptions {
 	readonly nameFor?: () => string;
 	// Test hook: runs right after the dump is published, with the staging directory, to let a test play another run
 	// that takes one of the remaining names or writes into the staging directory.
-	readonly hooks?: { readonly afterDumpPublished?: (stagingDir: string) => Promise<void> };
+	readonly hooks?: {
+		readonly afterDumpPublished?: (stagingDir: string) => Promise<void>;
+		// Test hook: runs right after the staging directory is made, before its access is set, to play a wider inherited access.
+		readonly beforeStagingRestricted?: (stagingDir: string) => Promise<void>;
+	};
+	// Test hook: replaces the step that restricts the staging directory, to prove that nothing is written when the
+	// read-back after it fails.
+	readonly restrictStaging?: (stagingDir: string) => void;
 }
 
 export interface BackupResult {
@@ -157,10 +171,28 @@ const writeStaged = async (owned: OwnedFiles, path: string, text: string): Promi
 	}
 };
 
+const describeProblems = (problems: readonly string[]): string => problems.map((p) => `  - ${p}`).join("\n");
+
+// The target holds whole-database dumps, so it must be open to the current user, SYSTEM and Administrators only (the rule
+// of the secrets directory, ../acl.ts). A directory this run creates is restricted explicitly (what it inherits is not
+// trusted) and read back. A directory that already exists is only verified: when it is too open the run refuses and the
+// owner decides, nothing is written and nothing is changed. Runs before any container work.
+const prepareTarget = async (target: string): Promise<void> => {
+	const made = await mkdir(target, { recursive: true }); // the first directory it created, undefined when it existed
+	if (made !== undefined) restrictDirectory(target, "backup target directory");
+	const problems = pathsAccessProblems([target]);
+	if (problems.length === 0) return;
+	throw new Error(
+		`refused: the backup target ${target} is ${made !== undefined ? "not restricted as required" : "open to others"}; nothing was written${made !== undefined ? "" : " and it was not changed"}.\n` +
+			`${describeProblems(problems)}\n` +
+			"A backup holds the whole database: protect the directory like the secrets directory (docs/agent-factory/deployment.md, section Backup, has the command) and run the backup again.",
+	);
+};
+
 export const backup = async (options: BackupOptions): Promise<BackupResult> => {
 	if (!options.target) throw new Error("the target directory is required");
 	const target = resolve(options.target);
-	await mkdir(target, { recursive: true });
+	await prepareTarget(target);
 	const container = await findContainer(options.project);
 	await waitHealthy(container, options.healthTimeoutMs ?? 60_000, { clock: options.clock ?? realClock });
 	const image = (await runChecked("docker", ["inspect", "--format", "{{.Config.Image}}", container])).trim();
@@ -173,6 +205,18 @@ export const backup = async (options: BackupOptions): Promise<BackupResult> => {
 	// every file this run owns is recorded at creation (see ../owned.ts) and the cleanup below acts on those identities
 	// only, never on a path that merely carries this run's name.
 	const staging = await OwnedDir.make(target, ".af-staging-");
+	// The order is the rule: the staging directory's access is set explicitly and READ BACK before the first dump byte is
+	// written; every file is made inside it and published by hard link, so a published file keeps what it was made with.
+	try {
+		await options.hooks?.beforeStagingRestricted?.(staging.path);
+		(options.restrictStaging ?? ((dir) => restrictDirectory(dir, "backup staging directory")))(staging.path);
+		const stagingProblems = pathsAccessProblems([staging.path]);
+		if (stagingProblems.length > 0) throw new Error(`the backup staging directory ${staging.path} is not restricted as required; nothing was written:\n${describeProblems(stagingProblems)}`);
+	} catch (error) {
+		const left = await staging.remove().catch((removal: unknown) => [`staging cleanup failed: ${removal instanceof Error ? removal.message : String(removal)}`]);
+		if (left.length === 0) throw error;
+		throw new Error(`${error instanceof Error ? error.message : String(error)}; cleanup left: ${left.join("; ")}`, { cause: error });
+	}
 	const stagedDump = join(staging.path, "dump");
 	const stagedSum = join(staging.path, "sha256");
 	const stagedManifest = join(staging.path, "manifest");
