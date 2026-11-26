@@ -6,6 +6,7 @@ import { policyRepo } from "./policies.ts";
 import { projectRepo } from "./projects.ts";
 import { routingRuleRepo } from "./routing-rules.ts";
 import { settingsRepo } from "./settings.ts";
+import { taskRepo } from "./tasks.ts";
 import { tokenRepo } from "./tokens.ts";
 import { workerRepo } from "./workers.ts";
 
@@ -19,6 +20,7 @@ export const createRepo = (db: PostgresJsDatabase<any>) => ({
 	tokens: tokenRepo(db),
 	audit: auditRepo(db),
 	owners: ownerRepo(db),
+	tasks: taskRepo(db),
 });
 
 export type Repo = ReturnType<typeof createRepo>;
