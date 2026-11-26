@@ -50,7 +50,7 @@ cursor is opaque (see Events and pagination).
 | `POST /projects/{id}/archive` | O | 200; `409 project_active` while a task is active. |
 | `GET /projects/{id}/policy` | O R | Latest `execution_policies` version. |
 | `PUT /projects/{id}/policy` | O | Full policy; creates a new version. Loosening security columns needs a second press (see Second press), else `409 confirmation_required`. |
-| `GET/POST /projects/{id}/routing-rules`, `DELETE .../{rule}` | O R / O | Rule `match`, `preferred_agent_ids`, `position`. |
+| `GET/POST /projects/{id}/routing-rules`, `DELETE .../{rule}` | O R / O | Rule `match`, `preferred_agent_ids`, `position`. `DELETE` is the soft delete of database.md (D24): it sets `deleted_at`, answers 200 with the row, and a deleted rule is skipped by routing and hidden from the list unless the owner passes `include_deleted=true`. |
 
 ### Tasks
 
@@ -369,6 +369,275 @@ Checks, verdicts and run status reach PostgreSQL as activity results over Tempor
 | `GET /system/audit` | O | The audit log; filters `actor_id`, `action`, `target_id`, `cursor` (the audit stream's cursor, Pagination). |
 | `GET /openapi.json` | none | The specification generated from the code (below). |
 
+## Resource shapes
+
+One definition of every body, so the handlers invent none. Notation: `field: type`; `?` after a name is an optional
+field; `|null` is a nullable value; `ts` is an RFC 3339 UTC time; every `*_id` and `id` is a uuid; `json` is any JSON
+value; `E(a|b)` is an enum. Unknown request fields are `422`. **A resource response is its [database.md](database.md)
+table row with the same column names, minus the never-exposed columns** named under each entry; the entries below list
+the columns once, and the route index after them points at the entries and never repeats a field.
+
+### Shared shapes
+
+- **Page**: `{items: T[], next_cursor: string|null}`, keyset (Pagination). `limit` and an opaque `cursor` are the
+  only paging parameters. **StreamPage** is the same envelope for the five stream lists (`GET /tasks/{id}/events`,
+  `GET /events/stream`, `GET /conversations/{id}/messages`, `GET /system/audit`, `GET /notifications`) whose cursor is
+  the opaque form of `(commit_xid, seq)`; a cursor that does not decode is `400 bad_cursor`. Every other list is a Page.
+- **Problem** (every 4xx and 5xx, `application/problem+json`, one definition): `{type: string, title: string,
+  status: int, code: string, detail: string, request_id: uuid, errors: [{pointer, code, message}], retry_after?: number,
+  current_row_version?: int}`. `code` is one of the Errors table for that status; `current_row_version` is present on
+  `409 stale_version` and every other conflict on a versioned row. A response lists a failure by status and refers to
+  this entry.
+- **Created row**: a create answers `201` with the resource, plus `Location` of the new row. **Changed row**: `PATCH`,
+  the state actions (`archive`, `activate`, `revoke`, `restore`, `ack`) and `PUT` of a versioned row answer `200`
+  with the resource after the change. **Removed row**: `DELETE` answers `200` with the resource carrying its marker
+  (`deleted_at`, `revoked_at`, `removed_at` or `ended_at`; for each route, the column the route's row says). A replay of
+  an idempotent call answers the stored status and body with `Idempotent-Replay: true`.
+- **Recorded decision** (202, `Location: /decisions/{id}`): `{id, kind, delivery_state: E(recorded|delivering|applied|refused),
+  refusal_reason?: string|null}`; the full row of `GET /decisions/{id}` is **TaskDecision**.
+- **Second press** (`409 confirmation_required`): Problem plus `confirmation_id: uuid, nonce: string, expires_at: ts`.
+- **Secret answer** (token, device code, device session): the resource plus `secret: string`, shown once; a replay of
+  the call is `409 token_already_issued` and carries no secret.
+- **Empty body**: a route whose action takes no field (`archive`, `publish`, `ack`, `activate`, `revoke`, `restore`,
+  every `DELETE`) takes no body; a body on it is `422`.
+
+### Resources
+
+Hidden columns are named in each entry; `commit_xid` is hidden on every stream row.
+
+- **Project** (`projects`): `id, name, description, repository_url, default_branch, workspace_policy: E(worktree),
+  settings: json, priority: int, created_at, updated_at, archived_at|null, deleted_at|null, row_version`. `GET
+  /projects/{id}` adds `policy: ExecutionPolicy` (the latest version).
+- **ExecutionPolicy** (`execution_policies`, immutable): `id, project_id|null, version: int, allowed_commands: string[],
+  allowed_directories: string[], allowed_repositories: string[], network: json, git_operations: string[],
+  confirmation_required: string[], allowed_tools: string[]`, the `max_*` limits (`max_concurrent_tasks,
+  max_tasks_per_agent, max_run_seconds, max_tokens, max_cost: string (decimal) + currency, max_auto_fixes, max_attempts,
+  max_rework_rounds, max_child_depth, max_children_per_task`), `auto_accept_low_risk: bool, created_by, created_at`.
+  Writable (the `PUT` body is the whole policy): every column except `id, project_id, version, created_by, created_at`;
+  the server sets those and answers `201` with the new version.
+- **RoutingRule** (`routing_rules`): `id, project_id|null, position: int, match: json, preferred_agent_ids: uuid[],
+  row_version, deleted_at|null`. Writable: `match, preferred_agent_ids, position`.
+- **Task** (`tasks`): `id, project_id, parent_task_id|null, title, description, priority: int, status: E(the 16 states
+  of the task state machine), current_revision: int, created_by, assigned_agent_id|null, workflow_id|null,
+  workflow_run_id|null, block_kind|null, block_reason|null, block_handler|null, resume_to|null, pause_requested: bool,
+  stopping: bool, end_unconfirmed: bool, origin_type, origin_task_id|null, origin_run_id|null, depth: int, created_at,
+  updated_at, completed_at|null, deleted_at|null, row_version`. **TaskDetail** (`GET /tasks/{id}` and `POST /tasks`):
+  Task plus `revision: TaskRevision` (the current one), `dependencies: TaskDependency[]` (not removed),
+  `pending_decisions: Recorded decision[]` (delivery state of the decisions not yet `applied` or `refused`); `POST
+  /tasks` adds `workflow_start: E(recorded|delivering|applied)`.
+- **TaskRevision** (`task_revisions`): `id, task_id, revision_number: int, requirements: string, acceptance_criteria:
+  [{id: string, ...json}], constraints: json, change_reason|null, author_id, decision_id|null, created_at`.
+- **TaskDependency** (`task_dependencies`): `task_id, depends_on_task_id, dependency_type, created_at, removed_at|null,
+  removed_by|null`.
+- **TaskRun** (`task_runs`): `id, task_id, attempt_number, role, agent_id, worker_id|null, temporal_activity_id|null,
+  execution_id|null, session_id|null, workspace_id|null, task_revision: int, policy_id, regulation_version_id,
+  regulation_seen_id|null, contract_version, status, gpu_wait_since|null, started_at|null, heartbeat_at|null,
+  finished_at|null, exit_code|null, error_code|null, error_message|null, result_summary|null, usage_metrics: json,
+  participant, role_assignment_id|null, profile_rights: json, agent_version_id, created_at, row_version`.
+- **TaskEvent** (`task_events`, stream): `id, seq: int, task_id, run_id|null, event_type, actor_type:
+  E(owner|worker|workflow|system), actor_id|null, payload: json, correlation_id|null, dedupe_key|null, created_at`.
+  `GET /events/stream` is the same row for every task.
+- **TaskArtifact** (`task_artifacts`): `id, task_id, run_id|null, artifact_type: E(log|result|report|check_log|screenshot|file),
+  storage_backend, storage_key, checksum, size: int, metadata: json, upload_state: E(pending|confirmed|removed),
+  client_upload_id|null, created_at, confirmed_at|null, removed_at|null, removed_by|null`. The upload answer
+  (`POST /runs/{run_id}/artifacts`, 201 or 200 on a repeat of `client_upload_id`) is the row plus `upload_url: string`.
+- **TaskReview** (`task_reviews`): `id, task_id, run_id, reviewer_id, round: int, disputes_review_id|null, verdict:
+  E(pass|fail|inconclusive), findings: json, created_at`, plus `outcomes: ReviewFindingOutcome[]` (`id, review_id,
+  finding_key, outcome, run_id|null, reason|null, created_at`).
+- **TaskDecision** (`task_decisions`): `id, task_id, kind, actor_id, engineer_run_id|null, channel: E(client|telegram|api),
+  device_session_id|null, press_id|null, revision_number|null, payload: json, confirmation_id|null, delivery_state,
+  refusal_reason|null, outbox_id|null, recorded_at, delivered_at|null, resolved_at|null`. Hidden: `request_hash,
+  idempotency_key`.
+- **TaskProposal** (`task_proposals`): `id, task_id, run_id, kind: E(decomposition|agent_proposal), title, requirements,
+  covers: json, state, child_task_id|null, decided_by|null, created_at, decided_at|null`.
+- **CleanupPlan** (`POST /tasks/{id}/cleanup`, `dry_run=true`, 200): `{dry_run: true, items: [{kind: E(log|artifact|execution_folder|worktree),
+  ref: string, size: int}], total_size: int}`. With `dry_run=false` the answer is Recorded decision-style `202
+  {id, delivery_state}` of the cleanup request, with `Location`.
+- **Agent** (`agents`): `id, name, provider, adapter_type, capabilities: json, enabled: bool, concurrency_limit: int,
+  configuration: json (credential references only), created_at, updated_at, deleted_at|null, row_version`.
+- **Worker** (`workers`): `id, machine_id, name, platform, capabilities: json, version, contract_version, last_seen_at|null,
+  status: E(online|offline|outdated|disabled), concurrency_limit: int, created_at, updated_at, row_version`.
+- **Token** (`api_tokens`): `id, name, role: E(owner|worker|relay|reader|registry|hub), owner_id|null, worker_id|null,
+  session_ref|null, run_id|null, prefix, created_by, created_at, expires_at|null, last_used_at|null, revoked_at|null,
+  replaces_token_id|null, valid_until|null, row_version`. Hidden: `token_hash`. Create and rotate add `secret`.
+- **Notification** (`notifications`, stream): `id, seq, event_type, dedup_key, task_id|null, worker_id|null, state:
+  E(open|resolved), occurrences: int, first_raised_at, last_raised_at, delivered_at|null, resolved_at|null`.
+- **Device** (`devices`): `id, owner_id, name, platform: E(android|windows), code_expires_at, code_used_at|null,
+  created_at, revoked_at|null`. Hidden: `code_hash`. `POST /devices` adds `code: string` (one-time).
+- **DeviceSession** (`device_sessions`): `id, device_id, prefix, created_at, expires_at, last_used_at|null,
+  revoked_at|null, row_version`. Hidden: `token_hash`. `POST /devices/enroll` adds `secret`.
+- **Conversation** (`conversations`): `id, source: E(rig_session|factory), session_ref|null, project_id|null, task_id|null,
+  state: E(active|waiting|permission_wait|ended), title, created_at, last_message_at|null, archived_at|null`.
+- **Message** (`messages`, stream): `id, seq, conversation_id, source_key, kind: E(text|result|question|approval|blocker|status|owner),
+  author: E(agent|owner|system), body: string, parsed: json|null, task_id|null, attachment_ids: uuid[],
+  device_session_id|null, created_at`.
+- **Poll** (`polls`): `id, conversation_id, message_id, source_key, options: [{key, label, recommended}], task_id|null,
+  revision_number|null, decision_id|null, arbiter: E(hub|api), state: E(open|answered|expired), answer_key|null,
+  answered_via|null, answered_session_id|null, answered_at|null, created_at`. `GET /conversations/{id}/polls/{poll_id}`
+  adds `answer_requests: PollAnswerRequest[]` (the calling device session's own).
+- **PollAnswerRequest** (`poll_answer_requests`): `id, poll_id, device_session_id, answer_key, state:
+  E(pending|accepted|refused), refusal_reason|null, created_at, delivered_at|null, decided_at|null, hub_ref|null`.
+  Hidden: `idempotency_key`.
+- **Inquiry** (`registry_inquiries`): `id, number, session_ref|null, run_id|null, project_id|null, problem, category,
+  action|null, target|null, reuse_intent: E(standing|once), regulation_version_id, poll_question|null, poll_options|null,
+  poll_registered_at|null, created_at`, plus `results: InquiryResult[]` (`id, inquiry_id, record_id, record_version,
+  found_by, ranking: int, score: number, matched_fields: string[], verdict|null, difference|null,
+  conflicts_with_id|null, verdict_at|null`). Hidden: `token_id`.
+- **RegistryRecord** (`registry_records`): `id, number, kind, authority, status, scope_type, project_id|null, repository|null,
+  machine_id|null, action|null, target|null, category, problem, decision, exceptions_text|null, grounds|null,
+  consequences|null, reuse|null, version: int, question|null, options|null, pressed_option|null, summary|null,
+  tags: string[], evidence: json, source, source_ref|null, press_id|null, poll_option|null, inquiry_id|null, run_id|null,
+  created_by, created_at, status_changed_at, status_changed_by|null, right|null, consumed_at|null`, plus
+  `links: RegistryLink[]` (`id, from_record_id, to_record_id, link_type, created_by, created_at`) and `history`
+  (the status changes, newest last). Hidden: `search_ru, search_en` and the embedding.
+  **SearchHit**: `{record: RegistryRecord (id, kind, authority, scope_type, number), matched_fields: string[], ranking:
+  int, score: number, degraded: bool}`; the search list is a Page of SearchHit.
+- **RegulationVersion** (`regulation_versions`): `id, number, status, clauses: json, clauses_bytes: int, basis_version_id|null,
+  proposed_by, conflict_report: json|null, confirmed_by|null, confirmation_id|null, created_at, activated_at|null,
+  status_changed_at`. The list omits `clauses`. `GET .../diff` answers `{from_id, to_id, changes: [{clause_id, change:
+  E(added|removed|changed), before: json|null, after: json|null}]}`.
+- **Role** (`roles`): `id, name, version: int, status, rights: json, deny: json, regulation_version_id, created_at,
+  status_changed_at`. **Participant** (`role_assignments`, `GET /tasks/{id}/participants`): `id, task_id, participant,
+  role_id, assigned_by, created_at, superseded_at|null`.
+- **RightRequest** (`right_requests`): `id, task_id, session_ref|null, run_id|null, participant, action, target,
+  conditions: json|null, reason, tried, handling_task_id, created_at`, plus `state: E(open|call_owner|granted|refused)`
+  derived from the last answer and `answers: RightAnswer[]` in order. Hidden: `request_hash`.
+- **RightAnswer** (`right_answers`): `id, request_id, step: int, step_kind: E(code|chief_engineer|owner), answer:
+  E(grant|refuse|call_owner), clause_id|null, owner_act_ref|null, reason|null, answered_by, answer_run_id|null,
+  inquiry_id|null, created_at`.
+- **RightGrant** (`right_grants`): `id, request_id, answer_id, task_id, session_ref|null, participant, role_assignment_id|null,
+  right: json, clause_id|null, reason, granted_by_run_id|null, created_at, ended_at|null, ended_by|null, revoked_by|null,
+  suspension_id|null`.
+- **RightsSuspension** (`rights_suspensions`): `id, agent_id, run_id|null, task_id|null, session_ref|null, event_key, reason,
+  audit_id, created_at, ended_at|null, restored_by|null, restore_reason|null, restore_audit_id|null`, plus
+  `state: E(open|restored)`.
+- **Position** (`positions`): `id, name, kind, parent_position_id|null, role_id, created_at, retired_at|null`, plus
+  `assignment: PositionAssignment|null` (the current one) and `history: PositionAssignment[]`. **PositionAssignment**
+  (`position_assignments`): `id, position_id, agent_id, agent_version_id, started_at, ended_at|null, end_reason|null,
+  measure_id|null, decided_by`.
+- **Profile** (`GET /personnel/profiles`): `{agent_id, versions: AgentVersion[], positions: Position[], rights: json,
+  facts: [{criterion, count: int, values: PersonnelFact[]|null, enough_data: bool}]}`. **AgentVersion**
+  (`agent_versions`): `id, agent_id, version, provider, adapter_type, model, instructions_hash, tools: json, created_at`.
+  **PersonnelFact** (`personnel_facts`): `id, agent_id, agent_version_id, task_id|null, run_id|null, position_id|null,
+  criterion, kind, value: json, difficulty|null, rights_ref|null, source_type, source_id, created_at`.
+- **Assessment** (`assessments`): `id, agent_id, agent_version_id, position_id|null, period_start, period_end,
+  weights: json, criteria: json, total: number, category, evaluator_provider, mode, created_at`.
+- **Incident** (`incidents`): `id, agent_id, agent_version_id, task_id|null, run_id|null, event_key, class, clause_id|null,
+  evidence: json, classified_by, agent_explanation_id|null, reaction|null, suspension_id|null, status, created_at,
+  status_changed_at`. **Measure** (`measures`): `id, incident_id, agent_id, level: int, clause_id, evidence: json,
+  circumstances, consequences, corrective_action_id|null, qualification_review_id|null, effect, term_until|null,
+  restore_condition|null, decided_by, state: E(proposed|applied|ended), created_at, applied_at|null, ended_at|null`.
+- **Audit entry** (`audit_log`, stream): `id, seq, actor_id|null, token_id|null, request_id, action, target_type,
+  target_id|null, outcome, details: json, created_at, device_session_id|null`. Hidden: `request_hash`.
+- **Readiness** (`GET /system/ready`): `{postgres, temporal, outbox_lag_seconds: number, oldest_pending_outbox_at: ts|null,
+  artifact_volume: {used: int, free: int}}`, each of the first two `{ok: bool, detail: string}`.
+
+### Requests
+
+A request body is the writable columns of the table the route changes (server-set columns `id`, `created_*`,
+`updated_*`, `row_version`, `*_by` of the caller, `seq`, state markers are never in a body). `PATCH` takes any subset of
+the writable columns and `If-Match`. Required fields are the table's `not null` columns without a default.
+
+- **ProjectCreate**: `name, description?, repository_url, default_branch?, workspace_policy?, settings?, priority?`.
+  **ProjectPatch**: the same, all optional.
+- **PolicyPut**: the writable columns of ExecutionPolicy (above); `If-Match` is the version number being replaced. A
+  loosening answers `409 confirmation_required`, then repeats with `X-Confirm`.
+- **RoutingRuleCreate**: `match, preferred_agent_ids, position`; `project_id` is the path.
+- **TaskCreate**: `createTaskRequestSchema` (`project_id, title, description, priority, requirements, acceptance_criteria,
+  constraints, depends_on`). **TaskRevisionCreate**: `taskRevisionRequestSchema` (`requirements, acceptance_criteria,
+  constraints, change_reason, revision_number`, the revision the author read), answered by Recorded decision.
+- **DependencyCreate**: `{depends_on_task_id: uuid, dependency_type}`; answers 201 with TaskDependency.
+- **Decision kinds** (twelve routes of Decisions, each answered by Recorded decision), body per kind:
+  `approve {revision_number, comment}`, `reject {revision_number, reason}`, `request_changes {revision_number,
+  findings: json[], comment}`, `cancel|pause|resume|force_close {reason}`, `add_feedback {text}`, `change_priority
+  {priority}`, `revise_requirements` the TaskRevisionCreate body, `allow_agent {agent_id}`, `resolve_block` one of
+  `{block_kind, answer, revision_number}`, `{block_kind, resume_to, revision_number}` or `{block_kind, choice:
+  "call_owner", reason}`. The physical decision is `{platform: string, decision: json}`. `POST /tasks/{id}/publish`
+  takes no body and records the `confirmations` row first (second press), then the decision.
+- **AgentCreate**: `name, provider, adapter_type, capabilities?, enabled?, concurrency_limit?, configuration?`;
+  **AgentPatch** is the same, all optional.
+- **WorkerPatch**: `{status?: E(disabled|online), concurrency_limit?: int}`.
+- **WorkerRegister**: `{machine_id, name, platform, capabilities: json, version, contract_version}`; answers 200 `{worker_id,
+  contract_range: {min: string, max: string}}`. **Heartbeat**: `{capabilities?: json (only when changed), run_ids: uuid[]}`;
+  answers 200 `{server_time: ts, token_expires_at: ts|null}`.
+- **TokenCreate**: `{name, role, worker_id?, expires_at?}` (and `owner_id`, `session_ref`, `run_id` where the role needs
+  one); answers 201 Token plus `secret`. **Rotate** takes no body, answers 201 the new Token plus `secret`, the old one
+  carrying `valid_until`.
+- **ArtifactUpload**: `artifactUploadRequestSchema`. **ChildProposal**: `childTaskProposalRequestSchema`, answers 201 TaskProposal.
+- **DeviceCreate**: `{name, platform}`; **Enroll**: `{code, name}`.
+- **MessageCreate** (`POST /conversations/{id}/messages`): `{text: string, attachment_ids?: uuid[]}`; answers 201 `{message:
+  Message, task_id: uuid|null}`.
+- **HubItem** (`/hub/messages`, `/hub/polls`, `/hub/states`): `{session_ref: string, key: string, kind: string, content}`;
+  the answer is the stored row, Message, Poll or Conversation in that route's order. `201` for a new key, `200` for a repeat.
+  The shape of `content` is Open (below).
+- **PollAnswer**: `{answer_key: string}` with `Idempotency-Key`; 202 PollAnswerRequest for `arbiter = hub`, or Recorded
+  decision for `arbiter = api`. **PollAnswerResult** (`/hub/poll-answers/{id}/result`): `{state: E(accepted|refused),
+  refusal_reason?: string (required when refused), hub_ref?: string}`; answers 200 PollAnswerRequest. **PollResult**
+  (`/hub/polls/{id}/result`): `{answer_key, answered_via: "telegram"}`; answers 200 Poll.
+- **InquiryCreate**: `{problem, category, project_id?, action?, target?, reuse_intent: E(standing|once)}`; answers 201 Inquiry.
+  **Verdict**: `{record_id, verdict: E(applies|not_applicable|outdated|conflict), difference?: string (required unless
+  `applies`), conflicts_with?: uuid}`; answers 201 InquiryResult. **Gate**: `{inquiry_id, question: string}`; answers 200
+  `{pass: true}` or `{pass: false, records: RegistryRecord[]}`.
+- **RecordCreate** (`POST /registry/records`, and the supersede draft): the draft columns of RegistryRecord `kind, scope_type,
+  project_id?, repository?, machine_id?, action?, target?, category, problem, decision, exceptions_text?, grounds?,
+  consequences?, reuse?, tags?, evidence?`; answers 201 RegistryRecord with `status = draft`. **Supersede** takes the same
+  body and answers 201 the new draft linked `supersedes` to `{id}`. **Activate** takes no body, or `{ids?: uuid[]}` for the bulk
+  form, and answers 200 `RegistryRecord[]` (the activated records); `409 guard_conflict` carries `conflicts_with: uuid[]`
+  beside the Problem fields. **Revoke** takes no body and answers 200 RegistryRecord.
+- **RegistryPoll**: `{inquiry_id, question, options: [{key, label, recommended?}]}`; answers 201 `{poll_id, display_line: string}`.
+  **Capture**: `{press_id, telegram_user_id, poll_id, option_index: int}`; answers 200 RegistryRecord or the draft it made;
+  `409 press_replayed` otherwise.
+- **RegulationCreate**: `{clauses: json, basis_version_id?: uuid}`; answers 201 RegulationVersion with `conflict_report`.
+  **Activate** and **Revoke** take no body (second press) and answer 200 RegulationVersion.
+- **RightCheck**: `{action, target, run_id?, session_id?, task_id?}` (one of `run_id`, `session_id`); answers 200 `{allowed:
+  bool, source: "role"|"record"|"grant"|"refused"|"none", ref?: string (record number or grant id), reason?: string}`.
+  **RightRequestCreate**: `{run_id?, session_id?, action, target, reason, tried}`; answers 200 as RightCheck, or 202 `{id,
+  state}`.
+- **RightAnswerCreate**: `{answer: E(grant|refuse), owner_act_ref: uuid (a confirmations id; required for grant, `400`
+  without), reason?: string}`; answers 201 RightAnswer (a grant adds `grant: RightGrant`). **GrantRevoke** takes no body and
+  answers 200 RightGrant. **SuspensionRestore**: `{restore_reason: string}`; answers 200 RightsSuspension.
+- **IncidentCreate** (service): `{agent_id, agent_version_id, task_id?, run_id?, event_key, class, clause_id?, evidence: json,
+  suspension_id?}`; answers 201 Incident, or 200 the existing one for the same `event_key`. **MeasureCreate** (service):
+  `{incident_id, level, clause_id, evidence, circumstances, consequences, corrective_action_id?, qualification_review_id?,
+  effect, term_until?, restore_condition?}`; answers 201 Measure. **MeasureRestore** takes no body, answers 200 Measure.
+- **ChiefEngineer** (`POST /personnel/chief-engineer`): `{agent_id}`; answers 201 PositionAssignment (the new one; the old one
+  is ended in the same transaction). `DELETE` takes no body (second press) and answers 200 the ended PositionAssignment.
+  **Mode**: `{mode: E(observe|enforce)}`; answers 200 `{mode}`.
+- **ArtifactContent**: raw bytes; answers 200 `{id, upload_state, size}` or `422 checksum_mismatch`.
+- **Audit** and **Conversation lists**: the filters of their routes; response StreamPage of Audit entry, StreamPage of Message
+  (conversations list is a Page of Conversation).
+
+### Route index
+
+Every route of the table `openapi-questions` lists (request and response). `L` is a list.
+
+| Route family | Request | Responses |
+|---|---|---|
+| Projects: `GET /projects` L, `POST`, `GET/PATCH /{id}`, `POST /{id}/archive` | ProjectCreate, ProjectPatch, none | Page of Project; 201, 200 Project; archive 200 Project or `409 project_active` |
+| `GET/PUT /projects/{id}/policy` | PolicyPut | 200 ExecutionPolicy; PUT 201 ExecutionPolicy |
+| Routing rules: `GET` L, `POST`, `DELETE .../{rule}` | RoutingRuleCreate | Page of RoutingRule; 201, 200 RoutingRule (with `deleted_at`) |
+| Tasks: `GET /tasks` L, `POST`, `GET /{id}`, `DELETE /{id}` | TaskCreate | Page of Task; 201, 200 TaskDetail; delete 200 Task or `409 task_active` |
+| `GET /tasks/{id}/revisions` L, `/{n}`; `POST .../revisions` | TaskRevisionCreate | Page of TaskRevision; 200 TaskRevision; POST Recorded decision |
+| `POST/DELETE /tasks/{id}/dependencies[/{dep}]` | DependencyCreate | 201, 200 TaskDependency; `409 dependency_cycle` |
+| `GET /tasks/{id}/runs`, `/events`, `/artifacts`, `/reviews`, `/decisions` | filters | Page of TaskRun, StreamPage of TaskEvent, Page of TaskArtifact, Page of TaskReview, Page of TaskDecision |
+| `GET /decisions/{id}` | none | 200 TaskDecision |
+| Decision routes (twelve), `POST /tasks/{id}/publish`, `.../physical-decisions` | Decision kinds | 202 Recorded decision |
+| `POST /tasks/{id}/cleanup` | `dry_run?`, `force?` (query) | 200 CleanupPlan; 202 as there |
+| Agents: `GET` L, `GET /{id}`, `POST`, `PATCH`, `DELETE` | AgentCreate, AgentPatch | Page of Agent; 200, 201, 200, delete 200 Agent (with `deleted_at`) |
+| Workers: `GET` L, `GET /{id}`, `PATCH`, `POST /register`, `POST /{id}/heartbeat` | WorkerPatch, WorkerRegister, Heartbeat | Page of Worker; 200 Worker; register and heartbeat as there |
+| Tokens: `GET` L, `POST`, `POST /{id}/rotate`, `DELETE /{id}` | TokenCreate | Page of Token; 201 Token plus secret; delete 200 Token with `revoked_at` |
+| `GET /notifications`, `POST /notifications/{id}/ack` | filters, none | StreamPage of Notification; 200 Notification |
+| `POST /runs/{run_id}/artifacts`, `PUT/GET /artifacts/{id}/content`, `POST /runs/{run_id}/proposals` | ArtifactUpload, bytes, ChildProposal | TaskArtifact plus `upload_url`; ArtifactContent; bytes; 201 TaskProposal |
+| Devices: `POST /devices`, `POST /devices/enroll`, `GET /devices` L, `GET /devices/{id}/sessions` L, `DELETE /devices/{id}`, `DELETE /device-sessions/{id}` | DeviceCreate, Enroll | 201 Device plus code; 201 DeviceSession plus secret; Page of Device, Page of DeviceSession; delete 200 with `revoked_at` |
+| Conversations: `GET` L, `GET /{id}`, `GET .../messages` L, `POST .../messages`, `GET .../polls/{poll_id}`, `POST .../answer` | MessageCreate, PollAnswer | Page of Conversation; 200 Conversation; StreamPage of Message; MessageCreate answer; 200 Poll; 202 as PollAnswer |
+| Hub: `POST /hub/messages|polls|states`, `GET /hub/poll-answers` L, `POST /hub/poll-answers/{id}/result`, `POST /hub/polls/{id}/result`, `GET /hub/polls` L | HubItem, PollAnswerResult, PollResult | Message, Poll, Conversation; Page of PollAnswerRequest; 200 PollAnswerRequest; 200 Poll; Page of Poll |
+| Registry: inquiries, verdicts, gate, search L, records L and `{id}`, `POST /records`, drafts L, activate, revoke, supersede, polls, captures | InquiryCreate, Verdict, Gate, RecordCreate, RegistryPoll, Capture | as under Requests; lists are Page of Inquiry, SearchHit, RegistryRecord |
+| Regulation: versions L and `{id}`, `POST`, `/diff`, `/activate`, `/revoke` | RegulationCreate | Page of RegulationVersion; 200 and 201 RegulationVersion; diff as there |
+| Roles: `GET /roles` L, `/{id}`, `GET /tasks/{id}/participants` | filters | Page of Role; 200 Role; Page of Participant |
+| Rights: check, requests (`POST`, `GET` L, `GET /{id}`, `/answer`), grants L and `/revoke`, suspensions L, `/{id}`, `/restore` | RightCheck, RightRequestCreate, RightAnswerCreate, GrantRevoke, SuspensionRestore | as under Requests; Page of RightRequest, RightGrant, RightsSuspension |
+| Personnel: positions, profiles, assessments, incidents, measures (all `GET` L and one), `POST` incidents, measures, restore, chief-engineer, `DELETE` chief-engineer, `PUT /personnel/mode` | IncidentCreate, MeasureCreate, ChiefEngineer, Mode | Page of Position, Profile, Assessment, Incident, Measure; 200 or 201 as under Requests |
+| System: `GET /system/ready`, `GET /system/audit` | filters | 200 Readiness; StreamPage of Audit entry |
+
 ## Idempotency
 
 - `Idempotency-Key` (8 to 128 characters of `A-Za-z0-9_-`) is required on every `POST`, `PUT`, `PATCH`, `DELETE` of an
@@ -508,3 +777,24 @@ Temporal as activity results. Both name the same run id and checksum, and a test
 | Question | What it changes for the owner | Phase |
 |---|---|---|
 | Rate-limit numbers (`rate.*`) | When a client of the owner is answered `429` | 7 (defaults in phase 2) |
+
+## Open shapes
+
+Bodies the documents do not fix, so a handler package does not invent them. Each row names the route, what is fixed, and
+why the rest is open. A row closes when the named owner (the table or the stage) fixes the columns, and the shape then
+goes into Resource shapes. Until then the handler answers the fixed part and the route is not in the generated
+specification beyond its status codes and the Problem body.
+
+| Routes | Fixed already | Open, and why |
+|---|---|---|
+| `GET /robots`, `GET /robots/{id}`, `POST /robots`, `PATCH /robots/{id}`, `GET /robots/{id}/state` | roles and the second-press rule where the route table names them | The `robots` columns are working names, settled when the robotics stage starts (database.md); a response is the row, so neither the row nor the writable columns exist yet. `state` has no field list in any document. |
+| `GET`/`POST /robots/{id}/configurations`, `POST /robots/{id}/assignments`, `DELETE /robots/{id}/assignments/{aid}`, `PATCH /robot-zones/{id}`, `GET /robot-zones` | the route names and their roles | The tables `robot_configurations`, `robot_assignments`, `robot_zones` are working names with no settled columns. |
+| `GET /robots/{id}/leases`, `POST /robots/{id}/leases`, `DELETE /robots/{id}/leases/{number}` | `POST` is service-only, takes exactly one gate-3 reference (`qualification_id` or `admission_id`), answers the signed lease package; refusals `409 lease_held`, `409 lease_ending`, `409 people_may_be_present`, `409 unattended_policy_missing`, `422 qualification_invalid`, `422 admission_invalid` | The lease row, the signed package's fields and the `DELETE` body are not written anywhere; `robot_leases` is a working name. |
+| `POST /robot-start-confirmations`, `POST /robot-start-presses`, `GET`/`POST /unattended-policies` | the operation `robot_start`, `reasons` non-empty of `people_possible` or `no_unattended_policy`, the `confirmations` columns (`task_id`, `zone_id`, `robot_id`, `reasons`, `valid_until`) | The answer of a start press and the policy columns are not given; `robot_start_presses` and `unattended_policies` are working names. |
+| `POST /robots/{id}/stop`, `POST /robots/{id}/release` | stop answers `202` `recorded` with a request id; release refuses `409 release_requires_check` | The request body of both (reason, scope) and the `release` answer are not given. |
+| `GET`/`POST /robots/{id}/diagnostics`, `GET`/`POST /robots/{id}/maintenance`, `GET /inventory` | the route names | `robot_maintenance` is a working name; the diagnostics record and the inventory have no table. |
+| `GET /robot-skills`, `GET /robot-skills/{id}`, `POST /robot-skills/{id}/qualifications`, `POST /robot-experiments/{id}/admissions`, `GET /robot-experiments`, `GET /robot-experiments/{id}`, `GET /robot-evidence/{id}`, `GET /robot-stages` | a qualification carries identifiers plus evidence ids and is refused `422 evidence_missing`; an admission is made on an experiment | Every row is a working-name table; the identifier names, the evidence fields and the list rows are not fixed. |
+| `POST /robots/{id}/reports`, `GET /robots/{id}/commands`, `POST /robots/{id}/challenges` | the role B, the routes' purpose | The report, command and challenge fields belong to `robot_commands`, `robot_receipts` and `robot_safety_events`, working names with unsettled columns; the signed forms are defined with the robot channel. |
+| `POST /system/stop-all` | the owner's call, audited with the same row as a suspension (Roles and rights) | No request or answer field is written, and neither a scope nor a result list. |
+| `PUT /personnel/replacement-procedure` | owner, two presses; conditions, the candidate list, the term of unavailability; `409 replacement_not_approved` when none | Field names and the storage of the procedure are not given by the personnel tables; the answer is then the stored procedure. |
+| `content` of `POST /hub/messages`, `/hub/polls`, `/hub/states` | the envelope `session_ref`, `key`, `kind` and the answered row | The hub is outside this repository; the field names of a message body, a poll's options and a state object are fixed by the hub's contract, not by the Factory documents. The columns `messages` and `polls` define the row, not the hub's wire form. |
