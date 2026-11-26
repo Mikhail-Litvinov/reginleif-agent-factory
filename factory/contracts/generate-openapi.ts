@@ -1,8 +1,9 @@
 import { writeFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import { z } from 'zod';
-import { confirmationRequiredSchema, routes, type Body, type Route } from './routes.ts';
-import { problemDetailsSchema } from './schemas/index.ts';
+import { confirmationRequiredSchema, guardConflictSchema, routes, type Body, type Route } from './routes.ts';
+import { problemDetailsSchema, taskDecisionResponseSchema } from './schemas/index.ts';
+import { CleanupRecorded } from './schemas/resources.ts';
 
 function content(body: Body) {
   if (body === 'none') return {};
@@ -18,12 +19,14 @@ export function generateOpenApi(table: readonly Route[] = routes): string {
     const responses: Record<string, unknown> = {};
     for (const [status, body] of Object.entries(route.responses)) {
       if (route.errors[Number(status)]) continue;
-      responses[status] = { description: 'Response', ...content(body) };
+      const location = status === '201' || (status === '202' && (body === taskDecisionResponseSchema || body === CleanupRecorded));
+      responses[status] = { description: 'Response', ...(location ? { headers: { Location: { schema: { type: 'string' }, description: 'URI of the created resource or recorded decision' } } } : {}), ...content(body) };
     }
     for (const [status, codes] of Object.entries(route.errors)) {
-      const errorSchema = codes.includes('confirmation_required')
-        ? { anyOf: [{ $ref: '#/components/schemas/ProblemDetails' }, { $ref: '#/components/schemas/ConfirmationRequired' }] }
-        : { $ref: '#/components/schemas/ProblemDetails' };
+      const variants = [{ $ref: '#/components/schemas/ProblemDetails' }];
+      if (codes.includes('confirmation_required')) variants.push({ $ref: '#/components/schemas/ConfirmationRequired' });
+      if (codes.includes('guard_conflict')) variants.push({ $ref: '#/components/schemas/GuardConflict' });
+      const errorSchema = variants.length > 1 ? { anyOf: variants } : variants[0];
       responses[status] = { description: 'Error', 'x-error-codes': codes,
         content: { 'application/problem+json': { schema: errorSchema } } };
     }
@@ -39,12 +42,12 @@ export function generateOpenApi(table: readonly Route[] = routes): string {
       'x-roles': route.roles,
       'x-idempotent': route.idempotent,
       ...(parameters.length ? { parameters } : {}),
-      ...(route.request === 'none' ? {} : { requestBody: { ...(route.request === 'unspecified' ? {} : { required: true }), ...content(route.request) } }),
+      ...(route.request === 'none' ? {} : { requestBody: { ...(route.request === 'unspecified' || route.requestOptional ? {} : { required: true }), ...content(route.request) } }),
       responses,
     };
   }
   return `${JSON.stringify({ openapi: '3.1.0', info: { title: 'Agent Factory API', version: '1.0.0' }, paths,
-    components: { schemas: { ProblemDetails: z.toJSONSchema(problemDetailsSchema), ConfirmationRequired: z.toJSONSchema(confirmationRequiredSchema) } } }, null, 2)}\n`;
+    components: { schemas: { ProblemDetails: z.toJSONSchema(problemDetailsSchema), ConfirmationRequired: z.toJSONSchema(confirmationRequiredSchema), GuardConflict: z.toJSONSchema(guardConflictSchema) } } }, null, 2)}\n`;
 }
 
 export function generateOpenApiQuestions(table: readonly Route[] = routes): string {

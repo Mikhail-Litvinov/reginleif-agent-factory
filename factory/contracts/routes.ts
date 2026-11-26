@@ -1,5 +1,8 @@
 import { z } from 'zod';
 import { artifactUploadRequestSchema, childTaskProposalRequestSchema, createTaskRequestSchema, decisionRequestSchemas, problemDetailsSchema, taskDecisionResponseSchema } from './schemas/index.ts';
+import { executionPolicySchema, pageSchema, streamPageSchema, policyPutSchema, projectCreateSchema, projectDetailSchema, projectPatchSchema, projectSchema, routingRuleCreateSchema, routingRuleSchema } from './schemas/projects.ts';
+import * as R from './schemas/resources.ts';
+import * as Q from './schemas/requests.ts';
 
 /** The API document leaves some body shapes open for their handler packages. */
 export type Body = z.ZodType | 'unspecified' | 'none' | 'binary' | 'text' | 'event-stream';
@@ -8,6 +11,7 @@ export const confirmationRequiredSchema = problemDetailsSchema.extend({
   code: z.literal('confirmation_required'), confirmation_id: z.string().uuid(),
   nonce: z.string(), expires_at: z.string(),
 });
+export const guardConflictSchema = problemDetailsSchema.extend({ code: z.literal('guard_conflict'), conflicts_with: z.array(z.string().uuid()) });
 
 export interface Route {
   method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'HEAD';
@@ -15,6 +19,7 @@ export interface Route {
   operationId: string;
   roles: readonly string[];
   request: Body;
+  requestOptional?: boolean;
   responses: Readonly<Record<string, Body>>;
   errors: Readonly<Record<number, readonly string[]>>;
   idempotent: boolean;
@@ -37,10 +42,10 @@ const decisions = [
 
 function relayPayload(schema: z.ZodType): z.ZodType {
   if (schema instanceof z.ZodObject) {
-    return schema.extend({ press_id: z.string(), telegram_user_id: z.number().int() });
+    return schema.extend({ press_id: z.string().uuid(), telegram_user_id: z.number().int() });
   }
   if (schema instanceof z.ZodUnion) {
-    const options = schema.options.slice(0, 2).map((option) => {
+    const options = schema.options.map((option) => {
       if (!(option instanceof z.ZodType)) throw new Error('Unsupported decision option');
       return relayPayload(option);
     });
@@ -81,28 +86,24 @@ type Input = { method: Method; path: string; roles: readonly string[]; request?:
 const owner = ['owner'] as const;
 const readers = ['owner', 'reader', 'relay'] as const;
 const workers = ['worker:own_runs'] as const;
-const projectFields = {
-  name: z.string(), description: z.string(), repository_url: z.string(), default_branch: z.string(),
-  workspace_policy: z.json(), settings: z.json(), priority: z.number(),
-};
 const entries: Input[] = [
-  { method: 'GET', path: '/projects', roles: readers },
-  { method: 'POST', path: '/projects', roles: owner, request: z.strictObject(projectFields), responses: { 201: 'unspecified' } },
-  { method: 'GET', path: '/projects/{id}', roles: readers },
-  { method: 'PATCH', path: '/projects/{id}', roles: owner, request: z.strictObject(projectFields).partial(), errors: { 409: ['version_conflict'] } },
-  { method: 'POST', path: '/projects/{id}/archive', roles: owner, responses: { 200: 'unspecified' }, errors: { 409: ['project_active'] } },
-  { method: 'GET', path: '/projects/{id}/policy', roles: readers },
-  { method: 'PUT', path: '/projects/{id}/policy', roles: owner, errors: { 409: ['confirmation_required'] } },
-  { method: 'GET', path: '/projects/{id}/routing-rules', roles: readers },
-  { method: 'POST', path: '/projects/{id}/routing-rules', roles: owner, request: z.strictObject({ match: z.json(), preferred_agent_ids: z.array(z.string().uuid()), position: z.number().int() }) },
-  { method: 'DELETE', path: '/projects/{id}/routing-rules/{rule}', roles: owner },
+  { method: 'GET', path: '/projects', roles: readers, responses: { 200: pageSchema(projectSchema) } },
+  { method: 'POST', path: '/projects', roles: owner, request: projectCreateSchema, responses: { 201: projectSchema } },
+  { method: 'GET', path: '/projects/{id}', roles: readers, responses: { 200: projectDetailSchema } },
+  { method: 'PATCH', path: '/projects/{id}', roles: owner, request: projectPatchSchema, responses: { 200: projectSchema }, errors: { 409: ['version_conflict'] } },
+  { method: 'POST', path: '/projects/{id}/archive', roles: owner, request: 'none', responses: { 200: projectSchema }, errors: { 409: ['project_active'] } },
+  { method: 'GET', path: '/projects/{id}/policy', roles: readers, responses: { 200: executionPolicySchema } },
+  { method: 'PUT', path: '/projects/{id}/policy', roles: owner, request: policyPutSchema, responses: { 201: executionPolicySchema }, errors: { 409: ['confirmation_required'] } },
+  { method: 'GET', path: '/projects/{id}/routing-rules', roles: readers, responses: { 200: pageSchema(routingRuleSchema) } },
+  { method: 'POST', path: '/projects/{id}/routing-rules', roles: owner, request: routingRuleCreateSchema, responses: { 201: routingRuleSchema } },
+  { method: 'DELETE', path: '/projects/{id}/routing-rules/{rule}', roles: owner, request: 'none', responses: { 200: routingRuleSchema } },
   { method: 'GET', path: '/tasks', roles: readers },
   { method: 'POST', path: '/tasks', roles: owner, request: createTaskRequestSchema, responses: { 201: 'unspecified' } },
   { method: 'GET', path: '/tasks/{id}', roles: readers },
-  { method: 'DELETE', path: '/tasks/{id}', roles: owner, errors: { 409: ['task_active'] } },
+  { method: 'DELETE', path: '/tasks/{id}', roles: owner, request: 'none', errors: { 409: ['task_active'] } },
   { method: 'GET', path: '/tasks/{id}/revisions', roles: readers },
   { method: 'GET', path: '/tasks/{id}/revisions/{n}', roles: readers },
-  { method: 'POST', path: '/tasks/{id}/dependencies', roles: owner, request: z.strictObject({ depends_on_task_id: z.string().uuid(), dependency_type: z.string() }), responses: { 201: 'unspecified' }, errors: { 409: ['dependency_cycle'] } },
+  { method: 'POST', path: '/tasks/{id}/dependencies', roles: owner, errors: { 409: ['dependency_cycle'] } },
   { method: 'DELETE', path: '/tasks/{id}/dependencies/{dep}', roles: owner },
   { method: 'GET', path: '/tasks/{id}/runs', roles: readers },
   { method: 'GET', path: '/tasks/{id}/events', roles: readers },
@@ -111,7 +112,7 @@ const entries: Input[] = [
   { method: 'GET', path: '/tasks/{id}/decisions', roles: readers },
   { method: 'GET', path: '/decisions/{id}', roles: readers },
   { method: 'POST', path: '/tasks/{id}/publish', roles: owner },
-  { method: 'POST', path: '/tasks/{id}/cleanup', roles: owner, request: z.strictObject({ dry_run: z.boolean().default(true), force: z.boolean().optional() }), responses: { 200: 'unspecified', 202: 'unspecified' }, errors: { 409: ['task_active'] } },
+  { method: 'POST', path: '/tasks/{id}/cleanup', roles: owner, errors: { 409: ['task_active'] } },
   { method: 'GET', path: '/agents', roles: readers },
   { method: 'GET', path: '/agents/{id}', roles: readers },
   { method: 'POST', path: '/agents', roles: owner, responses: { 201: 'unspecified' } },
@@ -119,11 +120,11 @@ const entries: Input[] = [
   { method: 'DELETE', path: '/agents/{id}', roles: owner },
   { method: 'GET', path: '/workers', roles: readers },
   { method: 'GET', path: '/workers/{id}', roles: readers },
-  { method: 'PATCH', path: '/workers/{id}', roles: owner, request: z.strictObject({ status: z.enum(['disabled', 'online']).optional(), concurrency_limit: z.number().int().optional() }) },
-  { method: 'POST', path: '/workers/register', roles: ['worker'], request: z.strictObject({ machine_id: z.string(), name: z.string(), platform: z.string(), capabilities: z.json(), version: z.string(), contract_version: z.number().int() }), responses: { 200: 'unspecified' }, idempotent: true, errors: { 409: ['queue_isolation_required'] } },
+  { method: 'PATCH', path: '/workers/{id}', roles: owner },
+  { method: 'POST', path: '/workers/register', roles: ['worker'], idempotent: true, errors: { 409: ['queue_isolation_required'] } },
   { method: 'POST', path: '/workers/{id}/heartbeat', roles: ['worker:own_id'], responses: { 200: 'unspecified' }, idempotent: true },
   { method: 'GET', path: '/tokens', roles: owner },
-  { method: 'POST', path: '/tokens', roles: owner, request: z.strictObject({ name: z.string(), role: z.string(), worker_id: z.string().uuid().nullable(), expires_at: z.string().nullable() }), responses: { 201: 'unspecified' } },
+  { method: 'POST', path: '/tokens', roles: owner },
   { method: 'POST', path: '/tokens/{id}/rotate', roles: owner, responses: { 201: 'unspecified' } },
   { method: 'DELETE', path: '/tokens/{id}', roles: owner },
   { method: 'GET', path: '/notifications', roles: readers },
@@ -133,8 +134,8 @@ const entries: Input[] = [
   { method: 'HEAD', path: '/artifacts/{id}/content', roles: workers, responses: { 200: 'none' } },
   { method: 'GET', path: '/artifacts/{id}/content', roles: [...readers, ...workers], responses: { 200: 'binary' } },
   { method: 'POST', path: '/runs/{run_id}/proposals', roles: workers, request: childTaskProposalRequestSchema, responses: { 201: 'unspecified' }, errors: { 409: ['depth_exceeded'] } },
-  { method: 'POST', path: '/devices', roles: owner, request: z.strictObject({ name: z.string(), platform: z.enum(['android', 'windows']) }), responses: { 201: 'unspecified' } },
-  { method: 'POST', path: '/devices/enroll', roles: ['none'], request: z.strictObject({ code: z.string(), name: z.string() }), responses: { 201: 'unspecified' }, errors: { 401: ['device_code_invalid'] } },
+  { method: 'POST', path: '/devices', roles: owner },
+  { method: 'POST', path: '/devices/enroll', roles: ['none'], errors: { 401: ['device_code_invalid'] } },
   { method: 'GET', path: '/devices', roles: ['owner', 'device'] },
   { method: 'GET', path: '/devices/{id}/sessions', roles: ['owner', 'device'] },
   { method: 'DELETE', path: '/devices/{id}', roles: ['owner', 'device'] },
@@ -142,22 +143,23 @@ const entries: Input[] = [
   { method: 'GET', path: '/conversations', roles: [...readers, 'device'] },
   { method: 'GET', path: '/conversations/{id}', roles: [...readers, 'device'] },
   { method: 'GET', path: '/conversations/{id}/messages', roles: [...readers, 'device'] },
-  { method: 'POST', path: '/conversations/{id}/messages', roles: ['owner', 'device'], request: z.strictObject({ text: z.string(), attachment_ids: z.array(z.string().uuid()) }) },
+  { method: 'POST', path: '/conversations/{id}/messages', roles: ['owner', 'device'] },
   { method: 'POST', path: '/hub/messages', roles: ['hub'], idempotent: true },
   { method: 'POST', path: '/hub/polls', roles: ['hub'], idempotent: true },
   { method: 'POST', path: '/hub/states', roles: ['hub'], idempotent: true },
-  { method: 'POST', path: '/conversations/{id}/polls/{poll_id}/answer', roles: ['owner', 'device'], request: z.strictObject({ answer_key: z.string() }), responses: { 202: 'unspecified' }, errors: { 409: ['poll_closed'] } },
+  { method: 'POST', path: '/conversations/{id}/polls/{poll_id}/answer', roles: ['owner', 'device'], errors: { 409: ['poll_closed'] } },
   { method: 'GET', path: '/conversations/{id}/polls/{poll_id}', roles: [...readers, 'device'] },
   { method: 'GET', path: '/hub/poll-answers', roles: ['hub'] },
-  { method: 'POST', path: '/hub/poll-answers/{id}/result', roles: ['hub'], request: z.union([z.strictObject({ state: z.literal('accepted'), refusal_reason: z.string().optional(), hub_ref: z.string() }), z.strictObject({ state: z.literal('refused'), refusal_reason: z.string(), hub_ref: z.string() })]), idempotent: true, errors: { 409: ['request_closed'] } },
-  { method: 'POST', path: '/hub/polls/{id}/result', roles: ['hub'], request: z.strictObject({ answer_key: z.string(), answered_via: z.literal('telegram') }), errors: { 409: ['poll_closed'] } },
+  { method: 'POST', path: '/hub/poll-answers/{id}/result', roles: ['hub'], idempotent: true, errors: { 409: ['request_closed'] } },
+  { method: 'POST', path: '/hub/polls/{id}/result', roles: ['hub'], errors: { 409: ['poll_closed'] } },
   { method: 'GET', path: '/hub/polls', roles: ['hub'] },
   { method: 'GET', path: '/events/stream', roles: [...readers, 'device'], responses: { 200: 'event-stream' }, errors: { 400: ['bad_cursor'] } },
+  // Open shapes: stop-all has no specified request, scope, or result fields.
   { method: 'POST', path: '/system/stop-all', roles: ['owner', 'device'] },
-  { method: 'POST', path: '/registry/inquiries', roles: ['registry:own_session_or_run', 'owner'], request: z.strictObject({ problem: z.string(), category: z.string(), project_id: z.string().uuid().nullable(), action: z.string(), target: z.json(), reuse_intent: z.enum(['standing', 'once']).optional() }), responses: { 201: 'unspecified' } },
+  { method: 'POST', path: '/registry/inquiries', roles: ['registry:own_session_or_run', 'owner'] },
   { method: 'GET', path: '/registry/inquiries/{id}', roles: [...readers, 'registry:own_session_or_run'] },
-  { method: 'POST', path: '/registry/inquiries/{id}/verdicts', roles: ['registry'], request: z.union([z.strictObject({ record_id: z.string().uuid(), verdict: z.literal('applies'), difference: z.string().optional(), conflicts_with: z.string().uuid().optional() }), z.strictObject({ record_id: z.string().uuid(), verdict: z.enum(['not_applicable', 'outdated']), difference: z.string(), conflicts_with: z.string().uuid().optional() }), z.strictObject({ record_id: z.string().uuid(), verdict: z.literal('conflict'), difference: z.string(), conflicts_with: z.string().uuid() })]), responses: { 201: 'unspecified' } },
-  { method: 'POST', path: '/registry/gate', roles: ['registry'], responses: { 200: z.union([z.strictObject({ pass: z.literal(true) }), z.strictObject({ pass: z.literal(false), records: z.array(z.json()) })]) } },
+  { method: 'POST', path: '/registry/inquiries/{id}/verdicts', roles: ['registry'] },
+  { method: 'POST', path: '/registry/gate', roles: ['registry'] },
   { method: 'GET', path: '/registry/search', roles: [...readers, 'registry'] },
   { method: 'GET', path: '/registry/records', roles: readers },
   { method: 'GET', path: '/registry/records/{id}', roles: readers },
@@ -166,8 +168,8 @@ const entries: Input[] = [
   { method: 'POST', path: '/registry/records/{id}/activate', roles: owner, errors: { 409: ['rule_needs_regulation', 'guard_conflict'] } },
   { method: 'POST', path: '/registry/records/{id}/revoke', roles: owner },
   { method: 'POST', path: '/registry/records/{id}/supersede', roles: owner },
-  { method: 'POST', path: '/registry/polls', roles: ['relay'], request: z.strictObject({ inquiry_id: z.string().uuid(), question: z.string(), options: z.array(z.json()) }), responses: { 201: 'unspecified' } },
-  { method: 'POST', path: '/registry/captures', roles: ['relay'], request: z.strictObject({ press_id: z.string(), telegram_user_id: z.number().int(), poll_id: z.string().uuid(), option_index: z.number().int() }), errors: { 409: ['press_replayed'] } },
+  { method: 'POST', path: '/registry/polls', roles: ['relay'] },
+  { method: 'POST', path: '/registry/captures', roles: ['relay'], errors: { 409: ['press_replayed'] } },
   { method: 'GET', path: '/regulation/versions', roles: [...readers, 'registry'] },
   { method: 'GET', path: '/regulation/versions/{id}', roles: [...readers, 'registry'] },
   { method: 'POST', path: '/regulation/versions', roles: ['owner', 'registry:draft_only'], responses: { 201: 'unspecified' } },
@@ -177,8 +179,8 @@ const entries: Input[] = [
   { method: 'GET', path: '/roles', roles: readers },
   { method: 'GET', path: '/roles/{id}', roles: readers },
   { method: 'GET', path: '/tasks/{id}/participants', roles: readers },
-  { method: 'POST', path: '/rights/check', roles: ['registry', 'worker'], request: z.union([z.strictObject({ action: z.string(), target: z.json(), run_id: z.string().uuid(), task_id: z.string().uuid() }), z.strictObject({ action: z.string(), target: z.json(), session_id: z.string().uuid(), task_id: z.string().uuid() })]), responses: { 200: z.object({ allowed: z.boolean(), source: z.enum(['role', 'record', 'grant', 'refused', 'none']) }).passthrough() } },
-  { method: 'POST', path: '/rights/requests', roles: ['registry:own_session_or_run', 'worker'], request: z.union([z.strictObject({ run_id: z.string().uuid(), action: z.string(), target: z.json(), reason: z.string(), tried: z.json() }), z.strictObject({ session_id: z.string().uuid(), action: z.string(), target: z.json(), reason: z.string(), tried: z.json() })]), responses: { 200: 'unspecified', 202: 'unspecified' } },
+  { method: 'POST', path: '/rights/check', roles: ['registry', 'worker'] },
+  { method: 'POST', path: '/rights/requests', roles: ['registry:own_session_or_run', 'worker'] },
   { method: 'GET', path: '/rights/requests', roles: [...readers, 'registry:own_session_or_run'] },
   { method: 'GET', path: '/rights/requests/{id}', roles: [...readers, 'registry:own_session_or_run'] },
   { method: 'POST', path: '/rights/requests/{id}/answer', roles: owner, errors: { 400: ['validation_failed'], 409: ['confirmation_invalid', 'request_not_owner', 'request_closed'] } },
@@ -186,7 +188,7 @@ const entries: Input[] = [
   { method: 'POST', path: '/rights/grants/{id}/revoke', roles: owner },
   { method: 'GET', path: '/rights/suspensions', roles: readers },
   { method: 'GET', path: '/rights/suspensions/{id}', roles: readers },
-  { method: 'POST', path: '/rights/suspensions/{id}/restore', roles: ['owner:chief_engineer_suspension', 'worker:chief_engineer_run'], request: z.strictObject({ restore_reason: z.string() }), errors: { 409: ['request_closed'] } },
+  { method: 'POST', path: '/rights/suspensions/{id}/restore', roles: ['owner:chief_engineer_suspension', 'worker:chief_engineer_run'], errors: { 409: ['request_closed'] } },
   { method: 'GET', path: '/personnel/positions', roles: readers },
   { method: 'GET', path: '/personnel/positions/{id}', roles: readers },
   { method: 'GET', path: '/personnel/profiles', roles: readers },
@@ -200,32 +202,40 @@ const entries: Input[] = [
   { method: 'POST', path: '/personnel/incidents', roles: ['service'], idempotent: true, errors: { 409: ['protected_conduct'], 422: ['measure_invalid'] } },
   { method: 'POST', path: '/personnel/measures', roles: ['service'], errors: { 422: ['measure_invalid'] } },
   { method: 'POST', path: '/personnel/measures/{id}/restore', roles: ['service'], errors: { 422: ['measure_invalid'] } },
-  { method: 'POST', path: '/personnel/chief-engineer', roles: owner, request: z.strictObject({ agent_id: z.string().uuid() }) },
+  { method: 'POST', path: '/personnel/chief-engineer', roles: owner },
   { method: 'DELETE', path: '/personnel/chief-engineer', roles: owner },
+  // Open shapes: replacement procedure field names and storage are not specified.
   { method: 'PUT', path: '/personnel/replacement-procedure', roles: owner, errors: { 409: ['replacement_not_approved'] } },
-  { method: 'PUT', path: '/personnel/mode', roles: owner, request: z.strictObject({ mode: z.enum(['observe', 'enforce']) }), errors: { 409: ['calibration_missing'] } },
+  { method: 'PUT', path: '/personnel/mode', roles: owner, errors: { 409: ['calibration_missing'] } },
+  // Open shapes: robot row and writable columns are unsettled; state has no field list.
   { method: 'GET', path: '/robots', roles: readers },
   { method: 'GET', path: '/robots/{id}', roles: readers },
   { method: 'POST', path: '/robots', roles: owner },
   { method: 'PATCH', path: '/robots/{id}', roles: owner },
+  // Open shapes: configuration, assignment and zone table columns are unsettled.
   { method: 'GET', path: '/robots/{id}/configurations', roles: readers },
   { method: 'POST', path: '/robots/{id}/configurations', roles: owner },
   { method: 'GET', path: '/robots/{id}/state', roles: readers },
   { method: 'POST', path: '/robots/{id}/assignments', roles: ['service', 'owner'] },
-  { method: 'DELETE', path: '/robots/{id}/assignments/{aid}', roles: ['service', 'owner'] },
+  { method: 'DELETE', path: '/robots/{id}/assignments/{aid}', roles: ['service', 'owner'], request: 'none' },
+  // Open shapes: lease row, signed package and DELETE body are not specified.
   { method: 'GET', path: '/robots/{id}/leases', roles: readers },
   { method: 'POST', path: '/robots/{id}/leases', roles: ['service'], errors: { 409: ['lease_held', 'lease_ending', 'people_may_be_present', 'unattended_policy_missing', 'confirmation_invalid', 'robot_state_unconfirmed'], 422: ['qualification_invalid', 'admission_invalid'] } },
   { method: 'DELETE', path: '/robots/{id}/leases/{number}', roles: ['service', 'owner'] },
   { method: 'GET', path: '/robot-zones', roles: readers },
   { method: 'PATCH', path: '/robot-zones/{id}', roles: owner, errors: { 422: ['owner_only'] } },
+  // Open shapes: start press answer and unattended-policy columns are not specified.
   { method: 'POST', path: '/robot-start-confirmations', roles: owner, errors: { 409: ['confirmation_required'] } },
   { method: 'GET', path: '/unattended-policies', roles: readers },
   { method: 'POST', path: '/unattended-policies', roles: ['service'], errors: { 422: ['review_invalid'] } },
+  // Open shapes: stop and release request fields and the release answer are not specified.
   { method: 'POST', path: '/robots/{id}/stop', roles: ['owner', 'device', 'service'], responses: { 202: 'unspecified' } },
   { method: 'POST', path: '/robots/{id}/release', roles: ['service', 'owner'], errors: { 409: ['release_requires_check'], 422: ['owner_only'] } },
+  // Open shapes: diagnostics and inventory have no table; maintenance columns are unsettled.
   { method: 'GET', path: '/robots/{id}/diagnostics', roles: readers },
   { method: 'POST', path: '/robots/{id}/diagnostics', roles: ['service'] },
   { method: 'POST', path: '/robot-start-presses', roles: owner },
+  // Open shapes: skill, qualification, admission, experiment, evidence and stage columns are unsettled.
   { method: 'GET', path: '/robot-skills', roles: readers },
   { method: 'GET', path: '/robot-skills/{id}', roles: readers },
   { method: 'POST', path: '/robot-skills/{id}/qualifications', roles: ['service'], errors: { 422: ['qualification_invalid', 'evidence_missing', 'review_invalid'] } },
@@ -237,6 +247,7 @@ const entries: Input[] = [
   { method: 'GET', path: '/robot-experiments/{id}', roles: readers },
   { method: 'GET', path: '/robot-evidence/{id}', roles: readers },
   { method: 'GET', path: '/robot-stages', roles: readers },
+  // Open shapes: robot channel report, command and challenge signed forms and columns are unsettled.
   { method: 'POST', path: '/robots/{id}/reports', roles: ['robot:own_id'], errors: { 409: ['command_stale', 'command_replayed'] } },
   { method: 'GET', path: '/robots/{id}/commands', roles: ['robot:own_id'] },
   { method: 'POST', path: '/robots/{id}/challenges', roles: ['robot:own_id'], errors: { 409: ['heartbeat_stale'] } },
@@ -273,7 +284,61 @@ const secondPress = new Set([
 ]);
 const lists = new Set(['/projects', '/tasks', '/tasks/{id}/revisions', '/tasks/{id}/runs', '/tasks/{id}/events', '/tasks/{id}/artifacts', '/tasks/{id}/reviews', '/tasks/{id}/decisions', '/agents', '/workers', '/tokens', '/notifications', '/devices', '/devices/{id}/sessions', '/conversations', '/conversations/{id}/messages', '/hub/poll-answers', '/hub/polls', '/registry/search', '/registry/records', '/registry/drafts', '/regulation/versions', '/roles', '/tasks/{id}/participants', '/rights/requests', '/rights/grants', '/rights/suspensions', '/personnel/positions', '/personnel/profiles', '/personnel/assessments', '/personnel/incidents', '/personnel/measures', '/robots', '/robots/{id}/configurations', '/robots/{id}/leases', '/robot-zones', '/unattended-policies', '/robot-skills', '/robots/{id}/maintenance', '/inventory', '/robot-experiments', '/robot-stages', '/system/audit']);
 
+type Shape = { request?: Body; requestOptional?: boolean; responses: Route['responses'] };
+const shapes: Record<string, Shape> = {};
+const shape = (key: string, responses: Route['responses'], request?: Body) => { shapes[key] = { responses, request }; };
+const get = (path: string, body: z.ZodType) => shape(`GET ${path}`, {200:body});
+const list = (path: string, body: z.ZodType) => get(path, pageSchema(body));
+const stream = (path: string, body: z.ZodType) => get(path, streamPageSchema(body));
+const action = (method: Method, path: string, status: number, body: z.ZodType, request: Body = 'none') => shape(`${method} ${path}`, {[status]:body}, request);
+
+list('/tasks', R.Task); action('POST','/tasks',201,R.TaskCreated,createTaskRequestSchema);
+get('/tasks/{id}',R.TaskDetail); action('DELETE','/tasks/{id}',200,R.Task);
+list('/tasks/{id}/revisions',R.TaskRevision); get('/tasks/{id}/revisions/{n}',R.TaskRevision);
+action('POST','/tasks/{id}/dependencies',201,R.TaskDependency,Q.DependencyCreate);
+action('DELETE','/tasks/{id}/dependencies/{dep}',200,R.TaskDependency);
+list('/tasks/{id}/runs',R.TaskRun); stream('/tasks/{id}/events',R.TaskEvent); list('/tasks/{id}/artifacts',R.TaskArtifact);
+list('/tasks/{id}/reviews',R.TaskReview); list('/tasks/{id}/decisions',R.TaskDecision); get('/decisions/{id}',R.TaskDecision);
+action('POST','/tasks/{id}/publish',202,taskDecisionResponseSchema);
+shape('POST /tasks/{id}/cleanup',{200:R.CleanupPlan,202:R.CleanupRecorded},'none');
+list('/agents',R.Agent); get('/agents/{id}',R.Agent); action('POST','/agents',201,R.Agent,Q.AgentCreate); action('PATCH','/agents/{id}',200,R.Agent,Q.AgentPatch); action('DELETE','/agents/{id}',200,R.Agent);
+list('/workers',R.Worker); get('/workers/{id}',R.Worker); action('PATCH','/workers/{id}',200,R.Worker,Q.WorkerPatch);
+action('POST','/workers/register',200,Q.WorkerRegistered,Q.WorkerRegister); action('POST','/workers/{id}/heartbeat',200,Q.HeartbeatAnswer,Q.Heartbeat);
+list('/tokens',R.Token); action('POST','/tokens',201,Q.TokenSecret,Q.TokenCreate); action('POST','/tokens/{id}/rotate',201,Q.TokenSecret); action('DELETE','/tokens/{id}',200,R.Token);
+stream('/notifications',R.Notification); action('POST','/notifications/{id}/ack',200,R.Notification);
+shape('POST /runs/{run_id}/artifacts',{200:R.ArtifactUploadAnswer,201:R.ArtifactUploadAnswer},artifactUploadRequestSchema);
+shape('PUT /artifacts/{id}/content',{200:Q.ArtifactContent},'binary'); action('POST','/runs/{run_id}/proposals',201,R.TaskProposal,childTaskProposalRequestSchema);
+action('POST','/devices',201,Q.DeviceCode,Q.DeviceCreate); action('POST','/devices/enroll',201,Q.DeviceSessionSecret,Q.Enroll);
+list('/devices',R.Device); list('/devices/{id}/sessions',R.DeviceSession); action('DELETE','/devices/{id}',200,R.Device); action('DELETE','/device-sessions/{id}',200,R.DeviceSession);
+list('/conversations',R.Conversation); get('/conversations/{id}',R.Conversation); stream('/conversations/{id}/messages',R.Message);
+action('POST','/conversations/{id}/messages',201,Q.MessageAnswer,Q.MessageCreate);
+for (const [path,body] of [['/hub/messages',R.Message],['/hub/polls',R.Poll],['/hub/states',R.Conversation]] as const) shape(`POST ${path}`,{200:body,201:body},Q.HubItem);
+action('POST','/conversations/{id}/polls/{poll_id}/answer',202,Q.PollAnswerResponse,Q.PollAnswer);
+get('/conversations/{id}/polls/{poll_id}',R.PollDetail); list('/hub/poll-answers',R.PollAnswerRequest); list('/hub/polls',R.Poll);
+action('POST','/hub/poll-answers/{id}/result',200,R.PollAnswerRequest,Q.PollAnswerResult); action('POST','/hub/polls/{id}/result',200,R.Poll,Q.PollResult);
+action('POST','/registry/inquiries',201,R.Inquiry,Q.InquiryCreate); get('/registry/inquiries/{id}',R.Inquiry);
+action('POST','/registry/inquiries/{id}/verdicts',201,R.InquiryResult,Q.Verdict); action('POST','/registry/gate',200,Q.GateAnswer,Q.Gate);
+list('/registry/search',R.SearchHit); list('/registry/records',R.RegistryRecord); get('/registry/records/{id}',R.RegistryRecord); list('/registry/drafts',R.RegistryRecord);
+action('POST','/registry/records',201,R.RegistryRecord,Q.RecordCreate);
+shapes['POST /registry/records/{id}/activate'] = {responses:{200:z.array(R.RegistryRecord)}, request:Q.Activate, requestOptional:true};
+action('POST','/registry/records/{id}/revoke',200,R.RegistryRecord); action('POST','/registry/records/{id}/supersede',201,R.RegistryRecord,Q.RecordCreate);
+action('POST','/registry/polls',201,Q.RegistryPollAnswer,Q.RegistryPoll); action('POST','/registry/captures',200,R.RegistryRecord,Q.Capture);
+list('/regulation/versions',R.RegulationVersionSummary); get('/regulation/versions/{id}',R.RegulationVersion);
+action('POST','/regulation/versions',201,R.RegulationVersion,Q.RegulationCreate); get('/regulation/versions/{id}/diff',R.RegulationDiff);
+action('POST','/regulation/versions/{id}/activate',200,R.RegulationVersion); action('POST','/regulation/versions/{id}/revoke',200,R.RegulationVersion);
+list('/roles',R.Role); get('/roles/{id}',R.Role); list('/tasks/{id}/participants',R.Participant);
+action('POST','/rights/check',200,Q.RightCheckAnswer,Q.RightCheck); shape('POST /rights/requests',{200:Q.RightCheckAnswer,202:Q.RightRequestRecorded},Q.RightRequestCreate);
+list('/rights/requests',R.RightRequest); get('/rights/requests/{id}',R.RightRequest); action('POST','/rights/requests/{id}/answer',201,Q.RightAnswerCreated,Q.RightAnswerCreate);
+list('/rights/grants',R.RightGrant); action('POST','/rights/grants/{id}/revoke',200,R.RightGrant);
+list('/rights/suspensions',R.RightsSuspension); get('/rights/suspensions/{id}',R.RightsSuspension); action('POST','/rights/suspensions/{id}/restore',200,R.RightsSuspension,Q.SuspensionRestore);
+for (const [path,body] of [['positions',R.Position],['profiles',R.Profile],['assessments',R.Assessment],['incidents',R.Incident],['measures',R.Measure]] as const) list(`/personnel/${path}`,body);
+get('/personnel/positions/{id}',R.Position); get('/personnel/profiles/{agent_id}',R.Profile); get('/personnel/assessments/{id}',R.Assessment); get('/personnel/incidents/{id}',R.Incident); get('/personnel/measures/{id}',R.Measure);
+shape('POST /personnel/incidents',{200:R.Incident,201:R.Incident},Q.IncidentCreate); action('POST','/personnel/measures',201,R.Measure,Q.MeasureCreate); action('POST','/personnel/measures/{id}/restore',200,R.Measure);
+action('POST','/personnel/chief-engineer',201,R.PositionAssignment,Q.ChiefEngineer); action('DELETE','/personnel/chief-engineer',200,R.PositionAssignment); action('PUT','/personnel/mode',200,Q.Mode,Q.Mode);
+get('/system/ready',R.Readiness); stream('/system/audit',R.AuditEntry); get('/openapi.json',z.json());
+
 function toRoute(entry: Input): Route {
+  const mapped = shapes[`${entry.method} ${entry.path}`];
   const isRead = entry.method === 'GET' || entry.method === 'HEAD';
   const earlierOwnerRoute = /^\/(projects|tasks|decisions|agents|workers|notifications)(\/|$)/.test(entry.path) && entry.path !== '/tasks/{id}/participants';
   const roles = earlierOwnerRoute && entry.roles.includes('owner') ? [...entry.roles, 'device'] : entry.roles;
@@ -286,9 +351,11 @@ function toRoute(entry: Input): Route {
     for (const name of names) parameters.push({ name, in: 'query', ...((entry.path === '/tasks' && name === 'status') || (entry.path === '/events/stream' && name === 'cursor') ? { repeatable: true } : {}) });
     if (entry.path === '/events/stream') parameters.push({ name: 'Last-Event-ID', in: 'header' });
   }
+  if (entry.method === 'POST' && entry.path === '/tasks/{id}/cleanup') parameters.push({name:'dry_run',in:'query'}, {name:'force',in:'query'});
   parameters.push({ name: 'X-Request-Id', in: 'header' });
   if (entry.roles.some((role) => role === 'worker' || role.startsWith('worker:'))) parameters.push({ name: 'X-Factory-Contract', in: 'header', required: true });
   if (entry.method === 'PATCH' && (entry.path === '/projects/{id}' || entry.path === '/agents/{id}')) parameters.push({ name: 'If-Match', in: 'header', required: true });
+  if (entry.method === 'PUT' && entry.path === '/projects/{id}/policy') parameters.push({ name: 'If-Match', in: 'header', required: true });
   if (keyedMutation) parameters.push({ name: 'Idempotency-Key', in: 'header', required: true, schema: idempotencyKeySchema });
   const confirms = secondPress.has(`${entry.method} ${entry.path}`);
   if (confirms) parameters.push({ name: 'X-Confirm', in: 'header' });
@@ -309,8 +376,8 @@ function toRoute(entry: Input): Route {
   return {
     method: entry.method, path: entry.path,
     operationId: `${entry.method.toLowerCase()}_${entry.path.replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_|_$/g, '')}`,
-    roles, request: entry.request ?? (isRead ? 'none' : 'unspecified'),
-    responses: entry.responses ?? (isRead ? { 200: 'unspecified' } : { default: 'unspecified' }), errors,
+    roles, request: mapped?.request ?? entry.request ?? (isRead ? 'none' : 'unspecified'), requestOptional: mapped?.requestOptional,
+    responses: mapped?.responses ?? entry.responses ?? (isRead ? { 200: 'unspecified' } : { default: 'unspecified' }), errors,
     idempotent: entry.idempotent ?? (isRead || keyedMutation), parameters,
   };
 }
@@ -319,8 +386,11 @@ export const routes: readonly Route[] = [...decisionRoutes, ...entries.map(toRou
   ...route,
   responses: {
     ...route.responses,
-    ...Object.fromEntries(Object.entries(route.errors).map(([status, codes]) => [status,
-      codes.includes('confirmation_required') ? z.union([problemDetailsSchema, confirmationRequiredSchema]) : problemDetailsSchema,
-    ])),
+    ...Object.fromEntries(Object.entries(route.errors).map(([status, codes]) => {
+      const variants: z.ZodType[] = [problemDetailsSchema];
+      if (codes.includes('confirmation_required')) variants.push(confirmationRequiredSchema);
+      if (codes.includes('guard_conflict')) variants.push(guardConflictSchema);
+      return [status, variants.length > 1 ? z.union([variants[0]!, variants[1]!, ...variants.slice(2)]) : variants[0]!];
+    })),
   },
 }));

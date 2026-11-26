@@ -16,7 +16,15 @@ test('resolve-block limits worker access to the chief engineer run', () => {
 test('relay decisions carry the press identity with the decision payload', () => {
   const route = routes.find((entry) => entry.method === 'POST' && entry.path === '/tasks/{id}/reject');
   assert.ok(route && typeof route.request !== 'string');
-  assert.equal(route.request.safeParse({ revision_number: 1, reason: 'reason', press_id: 'press', telegram_user_id: 123 }).success, true);
+  const body = { revision_number: 1, reason: 'reason', press_id: '00000000-0000-4000-8000-000000000001', telegram_user_id: 123 };
+  assert.equal(route.request.safeParse(body).success, true);
+  assert.equal(route.request.safeParse({ ...body, press_id: 'press' }).success, false);
+});
+
+test('relay resolve-block preserves the call-owner variant', () => {
+  const route = routes.find((entry) => entry.method === 'POST' && entry.path === '/tasks/{id}/resolve-block');
+  assert.ok(route && typeof route.request !== 'string');
+  assert.equal(route.request.safeParse({block_kind:'execution', choice:'call_owner', reason:'Need a decision', press_id:'00000000-0000-4000-8000-000000000001', telegram_user_id:123}).success, true);
 });
 
 test('device sessions inherit earlier owner routes except token management', () => {
@@ -55,15 +63,85 @@ test('unspecified request bodies remain valid OpenAPI request bodies', () => {
   assert.equal(operation.requestBody.required, undefined);
 });
 
-test('a documented delete without a body definition remains unspecified', () => {
+test('a documented delete takes no body', () => {
   const route = routes.find((entry) => entry.method === 'DELETE' && entry.path === '/tasks/{id}');
-  assert.equal(route?.request, 'unspecified');
+  assert.equal(route?.request, 'none');
+});
+
+test('project creation accepts defaults and rejects unknown fields', () => {
+  const route = routes.find((entry) => entry.method === 'POST' && entry.path === '/projects');
+  assert.ok(route && typeof route.request !== 'string');
+  const body = { name: 'Example', repository_url: 'https://example.invalid/repository' };
+  assert.equal(route.request.safeParse(body).success, true);
+  assert.equal(route.request.safeParse({ ...body, unexpected: true }).success, false);
+});
+
+test('unspecified bodies equal the Open shapes inventory', async () => {
+  const openRequests = [
+    'POST /system/stop-all', 'PUT /personnel/replacement-procedure', 'POST /robots', 'PATCH /robots/{id}',
+    'POST /robots/{id}/configurations', 'POST /robots/{id}/assignments', 'POST /robots/{id}/leases',
+    'DELETE /robots/{id}/leases/{number}', 'PATCH /robot-zones/{id}', 'POST /robot-start-confirmations',
+    'POST /unattended-policies', 'POST /robots/{id}/stop', 'POST /robots/{id}/release',
+    'POST /robots/{id}/diagnostics', 'POST /robot-start-presses', 'POST /robot-skills/{id}/qualifications',
+    'POST /robot-experiments/{id}/admissions', 'POST /robots/{id}/maintenance', 'POST /robots/{id}/reports',
+    'POST /robots/{id}/challenges',
+  ];
+  const openResponses = [
+    'POST /system/stop-all', 'PUT /personnel/replacement-procedure', 'GET /robots', 'GET /robots/{id}',
+    'POST /robots', 'PATCH /robots/{id}', 'GET /robots/{id}/configurations', 'POST /robots/{id}/configurations',
+    'GET /robots/{id}/state', 'POST /robots/{id}/assignments', 'DELETE /robots/{id}/assignments/{aid}',
+    'GET /robots/{id}/leases', 'POST /robots/{id}/leases', 'DELETE /robots/{id}/leases/{number}',
+    'GET /robot-zones', 'PATCH /robot-zones/{id}', 'POST /robot-start-confirmations', 'GET /unattended-policies',
+    'POST /unattended-policies', 'POST /robots/{id}/stop', 'POST /robots/{id}/release', 'GET /robots/{id}/diagnostics',
+    'POST /robots/{id}/diagnostics', 'POST /robot-start-presses', 'GET /robot-skills', 'GET /robot-skills/{id}',
+    'POST /robot-skills/{id}/qualifications', 'POST /robot-experiments/{id}/admissions', 'GET /robots/{id}/maintenance',
+    'POST /robots/{id}/maintenance', 'GET /inventory', 'GET /robot-experiments', 'GET /robot-experiments/{id}',
+    'GET /robot-evidence/{id}', 'GET /robot-stages', 'POST /robots/{id}/reports', 'GET /robots/{id}/commands',
+    'POST /robots/{id}/challenges',
+  ];
+  const actualRequests = routes.filter((route) => route.request === 'unspecified').map((route) => `${route.method} ${route.path}`);
+  const actualResponses = routes.flatMap((route) => Object.entries(route.responses).filter(([, body]) => body === 'unspecified').map(([status]) => `${route.method} ${route.path} ${status}`));
+  assert.deepEqual(actualRequests.sort(), openRequests.sort());
+  const expectedResponses = openResponses.map((key) => `${key} ${key.startsWith('GET ') ? '200' : key === 'POST /robots/{id}/stop' ? '202' : 'default'}`);
+  assert.deepEqual(actualResponses.sort(), expectedResponses.sort());
+
+  const document = await readFile(new URL('../../docs/agent-factory/api.md', import.meta.url), 'utf8');
+  const section = document.split(/## Open shapes\r?\n/)[1];
+  assert.ok(section, 'Open shapes section');
+  const documented = new Set<string>();
+  for (const line of section.split(/\r?\n/).filter((line) => line.startsWith('| `'))) {
+    const cell = line.split('|')[1] ?? '';
+    let pending = '';
+    let method = '';
+    for (const matchToken of cell.matchAll(/`([^`]+)`/g)) {
+      const token = matchToken[1]!;
+      if (token === 'content') continue;
+      if (/^(GET|POST|PUT|PATCH|DELETE)$/.test(token)) { pending = token; continue; }
+      const match = token.match(/^(GET|POST|PUT|PATCH|DELETE) (\/\S+)$/);
+      if (match) {
+        method = match[1]!;
+        if (pending) documented.add(`${pending} ${match[2]}`);
+        documented.add(`${method} ${match[2]}`);
+        pending = '';
+      } else if (token.startsWith('/') && method) documented.add(`${method} ${token}`);
+    }
+  }
+  // Hub envelopes are defined; only their content value is open.
+  const expectedRoutes = new Set([...openRequests, ...openResponses, 'POST /hub/messages', 'POST /hub/polls', 'POST /hub/states']);
+  assert.deepEqual([...documented].sort(), [...expectedRoutes].sort());
 });
 
 test('artifact content is represented as bytes', () => {
   const operation = JSON.parse(generateOpenApi()).paths['/artifacts/{id}/content'];
   assert.ok(operation.put.requestBody.content['application/octet-stream']);
   assert.ok(operation.get.responses['200'].content['application/octet-stream']);
+});
+
+test('created resources and recorded decisions advertise Location', () => {
+  const paths = JSON.parse(generateOpenApi()).paths;
+  assert.ok(paths['/projects'].post.responses['201'].headers.Location);
+  assert.ok(paths['/tasks/{id}/approve'].post.responses['202'].headers.Location);
+  assert.ok(paths['/tasks/{id}/cleanup'].post.responses['202'].headers.Location);
 });
 
 test('dangerous operations expose second-press errors and header', () => {
@@ -75,6 +153,25 @@ test('dangerous operations expose second-press errors and header', () => {
   const document = JSON.parse(generateOpenApi());
   const schema = document.paths['/devices'].post.responses['409'].content['application/problem+json'].schema;
   assert.ok(schema.anyOf.some((variant: { $ref: string }) => variant.$ref === '#/components/schemas/ConfirmationRequired'));
+});
+
+test('registry guard conflicts include the conflicting record identifiers', () => {
+  const route = routes.find((entry) => entry.method === 'POST' && entry.path === '/registry/records/{id}/activate');
+  assert.ok(route);
+  const response = route.responses[409];
+  assert.ok(response && typeof response !== 'string');
+  assert.equal(response.safeParse({type:'about:blank',title:'Conflict',status:409,code:'guard_conflict',detail:'Conflict',request_id:'00000000-0000-4000-8000-000000000001',errors:[],conflicts_with:['00000000-0000-4000-8000-000000000002']}).success, true);
+  const schema = JSON.parse(generateOpenApi()).paths['/registry/records/{id}/activate'].post.responses['409'].content['application/problem+json'].schema;
+  assert.ok(schema.anyOf.some((item: {$ref?: string}) => item.$ref === '#/components/schemas/GuardConflict'));
+});
+
+test('registry activation accepts an optional bulk list', () => {
+  const operation = JSON.parse(generateOpenApi()).paths['/registry/records/{id}/activate'].post;
+  assert.equal(operation.requestBody.required, undefined);
+  const route = routes.find((entry) => entry.method === 'POST' && entry.path === '/registry/records/{id}/activate');
+  assert.ok(route && typeof route.request !== 'string');
+  assert.equal(route.request.safeParse({ids:['00000000-0000-4000-8000-000000000001']}).success, true);
+  assert.equal(route.request.safeParse({ids:['invalid']}).success, false);
 });
 
 test('task status can be repeated in the query', () => {
@@ -92,10 +189,12 @@ test('idempotency keys carry the documented length and character constraints', (
   assert.ok(parameter.schema.pattern);
 });
 
-test('worker registration accepts textual machine identifiers and an integer contract version', () => {
+test('worker registration requires a UUID machine identifier and an integer contract version', () => {
   const route = routes.find((entry) => entry.method === 'POST' && entry.path === '/workers/register');
   assert.ok(route && typeof route.request !== 'string');
-  assert.equal(route.request.safeParse({ machine_id: 'host-example', name: 'worker', platform: 'linux', capabilities: {}, version: 'example', contract_version: 1 }).success, true);
+  const body = { machine_id: '00000000-0000-4000-8000-000000000001', name: 'worker', platform: 'linux', capabilities: {}, version: 'example', contract_version: 1 };
+  assert.equal(route.request.safeParse(body).success, true);
+  assert.equal(route.request.safeParse({ ...body, machine_id: 'host-example' }).success, false);
 });
 
 test('the registry gate describes its documented pass response', () => {
@@ -110,15 +209,16 @@ test('the registry gate describes its documented pass response', () => {
 test('right requests describe the documented run and session forms', () => {
   const route = routes.find((entry) => entry.method === 'POST' && entry.path === '/rights/requests');
   assert.ok(route && typeof route.request !== 'string');
-  const request = { action: 'read', target: {}, reason: 'reason', tried: [] };
+  const request = { action: 'read', target: {}, reason: 'reason', tried: 'checked the policy' };
   assert.equal(route.request.safeParse({ ...request, session_id: '00000000-0000-4000-8000-000000000001' }).success, true);
   assert.equal(route.request.safeParse({ ...request, run_id: '00000000-0000-4000-8000-000000000001' }).success, true);
+  assert.equal(route.request.safeParse({ ...request, run_id: '00000000-0000-4000-8000-000000000001', session_id: '00000000-0000-4000-8000-000000000002' }).success, false);
 });
 
 test('documented table routes occur exactly once, with roles and responses', async () => {
   const lines = (await readFile(new URL('../../docs/agent-factory/api.md', import.meta.url), 'utf8')).split(/\r?\n/);
   const endpointStart = lines.findIndex((line) => line === '## Endpoints');
-  const endpointEnd = lines.findIndex((line) => line === '## Idempotency');
+  const endpointEnd = lines.findIndex((line) => line === '## Resource shapes');
   const decisionStart = lines.findIndex((line) => line.startsWith('### Decisions '));
   const decisionEnd = lines.findIndex((line) => line.startsWith('**Who handles a block.**'));
   assert.ok(endpointStart >= 0 && endpointEnd > endpointStart && decisionStart > endpointStart && decisionEnd > decisionStart);

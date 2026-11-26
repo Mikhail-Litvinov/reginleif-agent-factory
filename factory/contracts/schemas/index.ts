@@ -1,10 +1,3 @@
-/*
- * Response shapes api.md does not define field by field and handler packages must derive later:
- * - GET /tasks and GET /tasks/{id} envelopes and nested task/revision/dependency objects.
- * - GET /tasks/{id}/revisions, /runs, /events, /artifacts, /reviews and /decisions list envelopes and row fields.
- * - POST /tasks response row shape, artifact upload URL response, and the complete GET /decisions/{id} object.
- * - Response envelopes for the remaining project, agent, worker, registry, rights, personnel, robotics and client routes.
- */
 import { z } from 'zod';
 import {
   blockKinds,
