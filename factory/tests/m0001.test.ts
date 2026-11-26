@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { copyFile, mkdtemp, rm } from "node:fs/promises";
+import { copyFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { it } from "node:test";
+import { OwnedDir } from "../deploy/owned.ts";
 import { migrate } from "../db/migrate.ts";
 import { connectBench, databaseBench } from "./database-bench.ts";
 
@@ -15,9 +16,11 @@ const tables = [...mutable, ...immutable];
 
 it("applies 0001 and enforces its history, soft deletion and account rights", async () => {
 	const db = await bench;
-	const dir = await mkdtemp(join(tmpdir(), "af-m0001-"));
+	const owned = await OwnedDir.make(tmpdir(), "af-m0001-");
+	const dir = owned.path;
 	try {
 	await copyFile(fileURLToPath(new URL("../db/migrations/0001_core.sql", import.meta.url)), join(dir, "0001_core.sql"));
+	await owned.files.adopt(join(dir, "0001_core.sql")); // copied by this test into its own directory
 	const applied = await migrate({ url: db.migratorUrl, migrationsDir: dir });
 	assert.equal(applied.length, 1);
 	assert.match(applied[0]!, /^0001_.*\.sql$/);
@@ -83,5 +86,5 @@ it("applies 0001 and enforces its history, soft deletion and account rights", as
 			} finally { await connection.end(); }
 		}
 	} finally { await admin.end(); }
-	} finally { await rm(dir, { recursive: true, force: true }); }
+	} finally { assert.deepEqual(await owned.remove(), []); }
 });

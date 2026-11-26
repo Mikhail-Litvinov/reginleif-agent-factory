@@ -2,7 +2,7 @@
 // restart, kill, recreate or reconfigure it). Started once before all files (`node --test --test-global-setup`), removed
 // once after all files, also when a test failed (node runs globalTeardown after failures).
 //
-// Only `docker compose up -d` runs here: the wait for health is done by the first file that needs the stack
+// Only the compose start of the two stacks runs here: the wait for health is done by the first file that needs the stack
 // (sharedStack in helpers.ts), so the files that do not use it start at once instead of waiting 15-20 s for the server.
 //
 // The stack is described to the test files by one environment variable: node passes what globalSetup sets in
@@ -11,7 +11,7 @@
 import { freePort, newRunId, removeOwned, runChecked, stackArgs, stackEnv } from "../deploy/lib.ts";
 import { sweepStale } from "./dead-owners.ts";
 import { newPaths, snapshotUntracked, worktreeGuardMessage } from "./worktree-guard.ts";
-import { BENCH_STACK_ENV, benchStackArgs, benchStackEnv, Cleanups, newBenchStackInfo, newProject, newSecretsDir, SHARED_STACK_ENV, type SharedStackInfo } from "./helpers.ts";
+import { BENCH_COMPOSE_FILE, BENCH_STACK_ENV, benchStackEnv, Cleanups, newBenchStackInfo, newProject, newSecretsDir, SHARED_STACK_ENV, type SharedStackInfo } from "./helpers.ts";
 
 const cleanups = new Cleanups();
 let untrackedAtStart: string[] | undefined;
@@ -39,7 +39,7 @@ export const globalSetup = async (): Promise<void> => {
 		// The bench stack (own secrets, run id and port; test pg_hba.conf), up next to the shared one; its health is awaited by
 		// the first bench file, like the shared stack's.
 		const bench = await newBenchStackInfo(cleanups);
-		await runChecked("docker", benchStackArgs(bench, "up", "-d"), { env: benchStackEnv(bench) });
+		await runChecked("docker", stackArgs(bench, "-f", BENCH_COMPOSE_FILE, "up", "-d"), { env: benchStackEnv(bench) });
 		process.env[BENCH_STACK_ENV] = JSON.stringify(bench);
 	} catch (error) {
 		try {

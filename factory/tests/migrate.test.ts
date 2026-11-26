@@ -1,24 +1,30 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, it } from "node:test";
+import { OwnedDir } from "../deploy/owned.ts";
 import { migrate } from "../db/migrate.ts";
 import { connectBench, databaseBench } from "./database-bench.ts";
 
 const bench = databaseBench(import.meta.url);
+let owned: OwnedDir;
 let dir: string;
-const file = (name: string, sql: string) => writeFile(join(dir, name), sql);
+const file = async (name: string, sql: string) => {
+	await writeFile(join(dir, name), sql);
+	await owned.files.adopt(join(dir, name)); // written by this test into its own directory; a file recorded already keeps its first identity
+};
 
 describe("migrations", () => {
 	beforeEach(async () => {
-		dir = await mkdtemp(join(tmpdir(), "af-migrate-"));
+		owned = await OwnedDir.make(tmpdir(), "af-migrate-");
+		dir = owned.path;
 		const sql = connectBench((await bench).migratorUrl);
 		try { await sql`DROP TABLE IF EXISTS public.af_test_migration, public.af_migrations`; } finally { await sql.end(); }
 	});
-	afterEach(async () => { await rm(dir, { recursive: true, force: true }); });
+	afterEach(async () => { assert.deepEqual(await owned.remove(), []); });
 	const run = async () => migrate({ url: (await bench).migratorUrl, migrationsDir: dir });
 
 	it("applies files in order and a second run is a no-op", async () => {
@@ -34,7 +40,7 @@ describe("migrations", () => {
 		await run();
 		await file("0001_first.sql", "SELECT 2;");
 		await assert.rejects(run(), /checksum/i);
-		await rm(join(dir, "0001_first.sql"));
+		assert.equal(await owned.files.remove(join(dir, "0001_first.sql")), "removed");
 		await assert.rejects(run(), /missing|history/i);
 		await file("0001_other.sql", "SELECT 1;");
 		await assert.rejects(run(), /name|history/i);

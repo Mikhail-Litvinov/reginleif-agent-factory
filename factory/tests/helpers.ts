@@ -181,9 +181,8 @@ export const sharedStack = async (): Promise<TestStack> => {
 export const BENCH_STACK_ENV = "AF_BENCH_STACK";
 const benchFile = (name: string): string => fileURLToPath(new URL(`./bench/${name}`, import.meta.url));
 
-/** Compose arguments of the bench stack: the owned project plus the test override. */
-export const benchStackArgs = (options: SharedStackInfo, ...rest: string[]): string[] =>
-	stackArgs(options, "-f", benchFile("compose.bench.yml"), ...rest);
+/** The test override of the bench stack; callers pass it to stackArgs as `"-f", BENCH_COMPOSE_FILE`. */
+export const BENCH_COMPOSE_FILE = benchFile("compose.bench.yml");
 export const benchStackEnv = (options: SharedStackInfo): Record<string, string> => ({ ...stackEnv(options), AF_BENCH_HBA: benchFile("pg_hba.bench.conf") });
 
 /** Registers the cleanups of a bench stack and returns its info (nothing exists yet); the caller runs startBenchStack. */
@@ -196,7 +195,7 @@ export const newBenchStackInfo = async (cleanups: Cleanups): Promise<SharedStack
 
 /** Starts the bench stack and waits until it is healthy. */
 export const startBenchStack = async (info: SharedStackInfo): Promise<string> => {
-	await runChecked("docker", benchStackArgs(info, "up", "-d"), { env: benchStackEnv(info) });
+	await runChecked("docker", stackArgs(info, "-f", BENCH_COMPOSE_FILE, "up", "-d"), { env: benchStackEnv(info) });
 	const container = await findContainer(info.project);
 	await waitHealthy(container);
 	return container;
