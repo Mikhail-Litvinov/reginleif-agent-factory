@@ -20,7 +20,9 @@ const tokens = Object.fromEntries(roles.map(role => [role, `afk_${role}_${random
 const seconds = 1000; // Convert the test's settings in seconds to the injected clock's milliseconds.
 const confirmationWindow = 60;
 const codeTtl = 300;
-let now = new Date();
+// The injected API clock is fixed at module load. A slow file (parallel load) runs minutes after it, so the fixed clock is modelled
+// as already stale by more than the confirmation window; the database's own now() (triggers) must never be compared against it.
+let now = new Date(Date.now() - 2 * 60 * 1000);
 let admin: ReturnType<typeof connectBench>;
 let database: ReturnType<typeof connectBench>;
 let bench: DatabaseBench;
@@ -160,7 +162,29 @@ const hubPoll = (sessionRef: string) => hubItem(sessionRef, randomUUID(), 'poll'
 const pollPath = (poll: Poll) => `/conversations/${poll.conversation_id}/polls/${poll.id}`;
 const hubResult = (request: AnswerRequest) => `/hub/poll-answers/${request.id}/result`;
 
+// xids are cluster-wide: a transaction open in another database (a parallel test file) holds the snapshot xmin below this database's
+// own commits, so a stream read with the default horizon can miss rows committed a moment ago. Reads that assert on fresh rows use
+// the next xid as the horizon, which covers every commit of this database.
+const nextXid = async () => String((await admin<{ horizon: string }[]>`SELECT (pg_current_xact_id()::text::bigint + 1)::text AS horizon`)[0]!.horizon);
+
 test('client-sessions: the fake hub can keep taking presses while the API is down and replay the queue', async () => {
+  // Deterministic model of a parallel test file: a foreign transaction holds an xid open for the whole test.
+  const holder = connectBench(bench.apiUrl);
+  const holding = await holder.reserve();
+  await holding`BEGIN`;
+  await holding`SELECT pg_current_xact_id()`;
+  horizon = nextXid;
+  try {
+    await replayWhileApiIsDown();
+  } finally {
+    horizon = undefined;
+    await holding`ROLLBACK`.catch(() => {});
+    holding.release();
+    await holder.end();
+  }
+});
+
+async function replayWhileApiIsDown() {
   const sessionRef = randomUUID();
   const first = chatMessage(sessionRef, 'First delivered item');
   const message = await call<Message>('POST', '/hub/messages', { ...hub, body: first, status: 201 });
@@ -200,7 +224,7 @@ test('client-sessions: the fake hub can keep taking presses while the API is dow
   const conversations = await call<Page<{ id: string }>>('GET', `/conversations?source=factory&task_id=${taskId}&archived=false`, reader);
   assert.deepEqual(conversations.items.map(row => row.id), [factoryConversationId]);
   assert.equal((await call('GET', `/conversations/${message.conversation_id}`, client)).session_ref, sessionRef);
-});
+}
 
 test('client-foreign-prompt: permissions stay out of the chat and look-alikes are plain text', async () => {
   assert.deepEqual(clientPromptPolicy.served, ['factory_decision', 'confirmation', 'session_poll']);
@@ -308,7 +332,7 @@ test('stop-all binds both presses and transactionally suspends runs and rights, 
     VALUES (${randomUUID()}, ${rightRequestId}, 1, 'code', 'call_owner')`;
   const grantConfirmation = randomUUID();
   await repo.confirmations.create({ id: grantConfirmation, actorId: ownerId, channel: 'api', operation: 'right.grant', targetType: 'right_requests',
-    targetId: rightRequestId, requestHash: rightHash, expiresAt: new Date(now.getTime() + confirmationWindow * seconds) });
+    targetId: rightRequestId, requestHash: rightHash, expiresAt: new Date(Date.now() + confirmationWindow * seconds) }); // The migration trigger checks it against the database's real now(), not the injected clock.
   await admin`INSERT INTO right_answers (id, request_id, step, step_kind, answer, owner_act_ref)
     VALUES (${randomUUID()}, ${rightRequestId}, 2, 'owner', 'grant', ${grantConfirmation})`;
 
