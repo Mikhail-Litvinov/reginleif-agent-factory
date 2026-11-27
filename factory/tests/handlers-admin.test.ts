@@ -93,7 +93,8 @@ before(async () => {
   ];
   const running: ReturnType<typeof createApiServer>[] = [];
   for (const { deps, set } of servers) {
-    const api = createApiServer({ tokens: repo.tokens });
+    // The server authenticates with the same fixed clock the handlers use; with the real clock a slow setup (a database created in Docker takes over a minute on a loaded machine) outlives the 60 s rotation overlap fixed at load time.
+    const api = createApiServer({ tokens: repo.tokens, clock: () => clockNow });
     registerAdminHandlers(api, deps);
     const address = await api.listen(0);
     set(`http://127.0.0.1:${address.port}`);
