@@ -8,7 +8,7 @@ import { checkForSubject, checkRights } from '../../rights/check.ts';
 import { standingTaskFor } from '../../rights/standing-task.ts';
 import { issueConfirmation, verifyConfirmation } from '../../api/second-press.ts';
 import { routes } from '../../contracts/routes.ts';
-import { connectBench, databaseBench } from '../database-bench.ts';
+import { connectBench, databaseBench, jsonb } from '../database-bench.ts';
 
 const bench = databaseBench(import.meta.url);
 let sql: ReturnType<typeof connectBench>, repo: Repo;
@@ -25,7 +25,7 @@ before(async () => {
   await sql`INSERT INTO projects(id,name) VALUES (${project}, 'rights bench'), (${otherProject}, 'other rights bench')`;
   await sql`INSERT INTO agents(id) VALUES (${agent})`;
   await sql`INSERT INTO tasks(id,project_id,status,origin_type,depth,workflow_id) VALUES (${task},${project},'RUNNING','owner',0,${'task-' + task})`;
-  await sql`INSERT INTO registry_records(id,kind,authority,source,status,scope_type,project_id,reuse,"right") VALUES (${record},'permission','owner','owner_button','draft','project',${project},'once',${sql.json(right)})`;
+  await sql`INSERT INTO registry_records(id,kind,authority,source,status,scope_type,project_id,reuse,"right") VALUES (${record},'permission','owner','owner_button','draft','project',${project},'once',${jsonb(right)}::text::jsonb)`;
   await sql`UPDATE registry_records SET status='active' WHERE id=${record}`;
 });
 after(async () => { await sql?.end(); });
@@ -44,7 +44,7 @@ test('permission-by-record: standing permission applies to a session; decisions 
   const session = { projectId: project, taskId: null, participant: null, agentId: null, sessionRef: 'bench-session' };
   const standing = randomUUID(), decision = randomUUID();
   const alternate = { ...right, target: 'another-file' };
-  await sql`INSERT INTO registry_records(id,kind,authority,source,status,scope_type,project_id,reuse,"right") VALUES (${standing},'permission','owner','owner_button','draft','project',${project},'standing',${sql.json(alternate)})`;
+  await sql`INSERT INTO registry_records(id,kind,authority,source,status,scope_type,project_id,reuse,"right") VALUES (${standing},'permission','owner','owner_button','draft','project',${project},'standing',${jsonb(alternate)}::text::jsonb)`;
   await sql`UPDATE registry_records SET status='active' WHERE id=${standing}`;
   await sql`INSERT INTO registry_records(id,kind,authority,source,status,scope_type,project_id,reuse,decision) VALUES (${decision},'decision','owner','owner_button','draft','project',${project},'standing','read another/file')`;
   await sql`UPDATE registry_records SET status='active' WHERE id=${decision}`;

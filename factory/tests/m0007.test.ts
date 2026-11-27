@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { it } from "node:test";
 import type { TransactionSql } from "postgres";
 import { migrate } from "../db/migrate.ts";
-import { connectBench, databaseBench } from "./database-bench.ts";
+import { connectBench, databaseBench, jsonb } from "./database-bench.ts";
 
 const bench = databaseBench(import.meta.url);
 it("applies migrations through 0007 once and seeds the standing task", async () => {
@@ -78,8 +78,8 @@ it("refuses self-restoration and permits a separate chief engineer", async () =>
   await sql`INSERT INTO right_requests (id, task_id, handling_task_id) VALUES (${request}, ${task}, ${task})`;
   await sql`INSERT INTO task_runs (id, task_id, agent_id, role) VALUES (${ownRun}, ${task}, ${subject}, 'implementer'), (${chiefRun}, ${task}, ${chief}, 'chief_engineer')`;
   await sql`INSERT INTO rights_suspensions (id, agent_id, event_key) VALUES (${suspension}, ${subject}, ${randomUUID()})`;
-  await assert.rejects(sql`UPDATE rights_suspensions SET ended_at = now(), restored_by = ${sql.json({ type: 'run', id: ownRun })} WHERE id = ${suspension}`, /actor/i);
-  await sql`UPDATE rights_suspensions SET ended_at = now(), restored_by = ${sql.json({ type: 'run', id: chiefRun })} WHERE id = ${suspension}`;
+  await assert.rejects(sql`UPDATE rights_suspensions SET ended_at = now(), restored_by = ${jsonb({ type: 'run', id: ownRun })}::text::jsonb WHERE id = ${suspension}`, /actor/i);
+  await sql`UPDATE rights_suspensions SET ended_at = now(), restored_by = ${jsonb({ type: 'run', id: chiefRun })}::text::jsonb WHERE id = ${suspension}`;
   await assert.rejects(sql`UPDATE rights_suspensions SET ended_at = NULL WHERE id = ${suspension}`, /twice/i);
  } finally { await sql.end(); }
 });
@@ -94,8 +94,8 @@ it("requires an owner to restore a suspended chief engineer", async () => {
   await sql`INSERT INTO right_requests (id, task_id, handling_task_id) VALUES (${request}, ${task}, ${task})`;
   await sql`INSERT INTO task_runs (id, task_id, agent_id, role) VALUES (${run}, ${task}, ${agent}, 'chief_engineer')`;
   await sql`INSERT INTO rights_suspensions (id, agent_id, run_id, event_key) VALUES (${suspension}, ${agent}, ${run}, ${randomUUID()})`;
-  await assert.rejects(sql`UPDATE rights_suspensions SET ended_at = now(), restored_by = ${sql.json({ type: 'run', id: run })} WHERE id = ${suspension}`, /actor/i);
-  await sql`UPDATE rights_suspensions SET ended_at = now(), restored_by = ${sql.json({ type: 'owner', id: owner })} WHERE id = ${suspension}`;
+  await assert.rejects(sql`UPDATE rights_suspensions SET ended_at = now(), restored_by = ${jsonb({ type: 'run', id: run })}::text::jsonb WHERE id = ${suspension}`, /actor/i);
+  await sql`UPDATE rights_suspensions SET ended_at = now(), restored_by = ${jsonb({ type: 'owner', id: owner })}::text::jsonb WHERE id = ${suspension}`;
  } finally { await sql.end(); }
 });
 
@@ -128,7 +128,7 @@ it("validates permissions and stores a run profile once", async () => {
   await sql`UPDATE registry_records SET consumed_at = now() WHERE id = ${record}`;
   await assert.rejects(sql`UPDATE registry_records SET consumed_at = NULL WHERE id = ${record}`, /once/i);
   await sql`INSERT INTO tasks (id, depth) VALUES (${task}, 0)`;
-  await sql`INSERT INTO task_runs (id, task_id, role, profile_rights) VALUES (${run}, ${task}, 'implementer', ${sql.json([{ source: record }])})`;
+  await sql`INSERT INTO task_runs (id, task_id, role, profile_rights) VALUES (${run}, ${task}, 'implementer', ${jsonb([{ source: record }])}::text::jsonb)`;
   await assert.rejects(sql`UPDATE task_runs SET profile_rights = '[]'::jsonb WHERE id = ${run}`, /immutable/i);
  } finally { await sql.end(); }
 });
@@ -209,7 +209,7 @@ async function addRuns(tx: TransactionSql, task: string, fixtures: RunFixture[])
  }));
  await tx`INSERT INTO task_runs (id, task_id, participant, attempt_number, role, execution_id, status, finished_at, agent_id, role_assignment_id, profile_rights)
   SELECT id, ${task}, participant, attempt_number, 'implementer', execution_id, status, CASE WHEN confirmed_end THEN now() END, agent_id, role_assignment_id, profile_rights
-  FROM jsonb_to_recordset(${tx.json(rows)}) AS run(id uuid, execution_id uuid, status text, confirmed_end boolean,
+  FROM jsonb_to_recordset(${jsonb(rows)}::text::jsonb) AS run(id uuid, execution_id uuid, status text, confirmed_end boolean,
    participant text, attempt_number integer, agent_id uuid, role_assignment_id uuid, profile_rights jsonb)`;
  return rows.map(({ id, execution_id }) => ({ task_id: task, run_id: id, execution_id }));
 }
@@ -410,7 +410,7 @@ it("grant-ends and rights-snapshot: suspension stops the agent and ends its gran
    await suspend(tx);
    await assertCriticalGrants(tx);
    await assertStops(tx, [task, otherTask], stopped);
-   await tx`UPDATE rights_suspensions SET ended_at = now(), restored_by = ${tx.json({ type: "run", id: chiefRun })} WHERE id = ${suspension}`;
+   await tx`UPDATE rights_suspensions SET ended_at = now(), restored_by = ${jsonb({ type: "run", id: chiefRun })}::text::jsonb WHERE id = ${suspension}`;
    await assertCriticalGrants(tx);
    await assertStops(tx, [task, otherTask], stopped);
   });

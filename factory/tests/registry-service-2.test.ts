@@ -6,7 +6,7 @@ import postgres from "postgres";
 import { migrate } from "../db/migrate.ts";
 import { createRepo } from "../db/repo/index.ts";
 import { createRegistryService } from "../registry/service.ts";
-import { connectBench, databaseBench } from "./database-bench.ts";
+import { connectBench, databaseBench, jsonb } from "./database-bench.ts";
 
 const bench = databaseBench(import.meta.url);
 let sql: ReturnType<typeof postgres>;
@@ -34,7 +34,7 @@ before(async () => {
 			foundBy: "inquiry", ranking: "fulltext", score: "1", matchedFields: ["decision"],
 		})));
 	await sql`INSERT INTO owners (id, telegram_user_id) VALUES (${owner.id}, ${telegramUserId.toString()})`;
-	await sql`INSERT INTO settings (key, value) VALUES ('confirm.windowSeconds', ${sql.json(confirmationSeconds)}), ('registry.clauseMaxBytes', ${sql.json(clauseMaxBytes)}) ON CONFLICT (key) DO UPDATE SET value = excluded.value`;
+	await sql`INSERT INTO settings (key, value) VALUES ('confirm.windowSeconds', ${jsonb(confirmationSeconds)}::text::jsonb), ('registry.clauseMaxBytes', ${jsonb(clauseMaxBytes)}::text::jsonb) ON CONFLICT (key) DO UPDATE SET value = excluded.value`;
 	await repo.tokens.create({ id: agent.tokenId, role: "registry", sessionRef: agent.sessionRef, prefix: agent.sessionRef, tokenHash: agent.sessionRef });
 });
 
@@ -238,7 +238,7 @@ it("regulation replacement keeps history and enqueues stops for withdrawn role r
 	await sql`INSERT INTO tasks (id) VALUES (${task})`;
 	await sql`INSERT INTO role_assignments (id, task_id, participant, role_id) VALUES (${assignment}, ${task}, 'implementer', ${oldRole})`;
 	await sql`INSERT INTO task_runs (id, task_id, participant, role, execution_id, status, role_assignment_id, profile_rights)
-		VALUES (${run}, ${task}, 'implementer', 'implementer', ${execution}, 'running', ${assignment}, ${sql.json([{ source: "role" }])})`;
+		VALUES (${run}, ${task}, 'implementer', 'implementer', ${execution}, 'running', ${assignment}, ${jsonb([{ source: "role" }])}::text::jsonb)`;
 	await sql`INSERT INTO task_runs (id, task_id, participant, role, execution_id, status) VALUES (${randomUUID()}, ${task}, 'reviewer', 'reviewer', ${randomUUID()}, 'running')`;
 	const stopsForTask = () => sql`SELECT payload->>'run_id' AS run_id, payload->>'execution_id' AS execution_id, state FROM outbox_events WHERE kind = 'stop_run' AND task_id = ${task}`;
 	assert.deepEqual([...(await stopsForTask())], []);

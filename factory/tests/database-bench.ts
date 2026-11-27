@@ -90,3 +90,10 @@ export const databaseBench = (testFileUrl: string): Promise<DatabaseBench> => {
 };
 
 export const connectBench = (url: string) => postgres(url, { max: 1 });
+
+// A jsonb parameter for a test client: sql`... ${jsonb(value)}::text::jsonb`. drizzle(sql) replaces the json serializers of
+// the postgres.js client it wraps, so sql.json() throws ERR_INVALID_ARG_TYPE on it, and a string sent as a jsonb-typed
+// parameter is encoded twice on a client it does not wrap. Sending the text as a text parameter and casting it on the
+// server gives the same result on every client.
+// tests/no-sql-json.test.ts fails when a test calls sql.json() directly.
+export const jsonb = (value: unknown): string => JSON.stringify(value);

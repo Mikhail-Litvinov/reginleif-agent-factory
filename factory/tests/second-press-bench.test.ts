@@ -7,7 +7,7 @@ import { createApiServer } from '../api/server.ts';
 import { registerAllHandlers } from '../api/handlers/register-all.ts';
 import { migrate } from '../db/migrate.ts';
 import { createRepo, type Repo } from '../db/repo/index.ts';
-import { connectBench, databaseBench } from './database-bench.ts';
+import { connectBench, databaseBench, jsonb } from './database-bench.ts';
 import { issueConfirmation } from '../api/second-press.ts';
 
 const benchPromise = databaseBench(import.meta.url);
@@ -64,7 +64,7 @@ async function fixture(route: Route): Promise<Fixture> {
   const routeKey = `${route.method} ${route.path}`;
   if (route.secondPress === 'sensitive-draft') {
     const draft = randomUUID();
-    await sql`INSERT INTO registry_records (id, kind, authority, status, scope_type, category, problem, decision, reuse, source, created_by) VALUES (${draft}, 'decision', 'owner', 'draft', 'global', 'security', 'Bench question', 'Bench answer', 'once', 'owner_message', ${JSON.stringify({ type: 'owner', id: owner })}::jsonb)`;
+    await sql`INSERT INTO registry_records (id, kind, authority, status, scope_type, category, problem, decision, reuse, source, created_by) VALUES (${draft}, 'decision', 'owner', 'draft', 'global', 'security', 'Bench question', 'Bench answer', 'once', 'owner_message', ${jsonb({ type: 'owner', id: owner })}::text::jsonb)`;
     const register = async () => {
       const response = await fetch(`${base}/registry/drafts/${draft}/presses`, { method: 'POST', headers: { authorization: `Bearer afk_relay_${relaySecret}`, 'idempotency-key': randomUUID() } });
       assert.equal(response.status, 201);
@@ -131,8 +131,7 @@ for (const route of covered) for (const source of ['record', 'grant'] as const) 
   const session = randomUUID();
   if (source === 'record') {
     const id = randomUUID();
-    // drizzle(sql) replaces the json serializers of this client, so sql.json() no longer works on it: send text and cast.
-    await sql`INSERT INTO registry_records(id,kind,authority,source,status,scope_type,project_id,reuse,"right") VALUES (${id},'permission','owner','owner_button','draft','project',${project},'standing',${JSON.stringify(right)}::jsonb)`;
+    await sql`INSERT INTO registry_records(id,kind,authority,source,status,scope_type,project_id,reuse,"right") VALUES (${id},'permission','owner','owner_button','draft','project',${project},'standing',${jsonb(right)}::text::jsonb)`;
     await sql`UPDATE registry_records SET status='active' WHERE id=${id}`;
   } else {
     const request = randomUUID(), requestHash = randomUUID();

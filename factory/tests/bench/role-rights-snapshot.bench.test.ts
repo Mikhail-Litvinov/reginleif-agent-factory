@@ -6,7 +6,7 @@ import { migrate } from '../../db/migrate.ts';
 import { createRepo, type Repo } from '../../db/repo/index.ts';
 import { checkForSubject } from '../../rights/check.ts';
 import { assignRole, profileRights, roleForParticipant } from '../../rights/roles.ts';
-import { connectBench, databaseBench } from '../database-bench.ts';
+import { connectBench, databaseBench, jsonb } from '../database-bench.ts';
 
 const bench = databaseBench(import.meta.url);
 let sql: ReturnType<typeof connectBench>, repo: Repo;
@@ -21,7 +21,7 @@ before(async () => {
   await sql`INSERT INTO projects(id,name) VALUES (${project},'role bench')`;
   await sql`INSERT INTO tasks(id,project_id,status,origin_type,depth,workflow_id) VALUES (${task},${project},'RUNNING','owner',0,${'task-' + task})`;
   await sql`INSERT INTO regulation_versions(id,number,status,clauses,clauses_bytes) VALUES (${regulation},1,'draft','[]',0)`;
-  await sql`INSERT INTO roles(id,name,version,status,rights,deny,regulation_version_id) VALUES (${role},'bench-role',1,'draft',${sql.json([right])},'[]',${regulation})`;
+  await sql`INSERT INTO roles(id,name,version,status,rights,deny,regulation_version_id) VALUES (${role},'bench-role',1,'draft',${jsonb([right])}::text::jsonb,'[]',${regulation})`;
   await sql`UPDATE regulation_versions SET status='active' WHERE id=${regulation}`;
   await sql`INSERT INTO agents(id) VALUES (${agent}),(${builder})`;
   await sql`INSERT INTO right_requests(id,task_id,handling_task_id,action,target) VALUES (${randomUUID()},${task},${task},'read','work')`;
@@ -50,7 +50,7 @@ test('rights-snapshot: only expressible role and grant rights are stored with th
   const narrow = { ...right, target: 'single-file' };
   const once = { ...right, conditions: { once: true } };
   const profile = profileRights([right, narrow], [{ id: grant, right }, { id: randomUUID(), right: once }], value => value.target === 'work');
-  await sql`INSERT INTO task_runs(id,task_id,role,profile_rights) VALUES (${run},${task},'implementer',${JSON.stringify(profile)}::jsonb)`;
+  await sql`INSERT INTO task_runs(id,task_id,role,profile_rights) VALUES (${run},${task},'implementer',${jsonb(profile)}::text::jsonb)`;
   const stored = (await repo.taskReads.getRun(run))?.profileRights;
   assert.deepEqual(stored, profile);
   assert.deepEqual(profile.map(value => value.source), ['role', grant]);

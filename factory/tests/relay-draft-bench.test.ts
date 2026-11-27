@@ -6,7 +6,7 @@ import { createApiServer } from '../api/server.ts';
 import { registerAllHandlers } from '../api/handlers/register-all.ts';
 import { migrate } from '../db/migrate.ts';
 import { createRepo } from '../db/repo/index.ts';
-import { connectBench, databaseBench } from './database-bench.ts';
+import { connectBench, databaseBench, jsonb } from './database-bench.ts';
 
 const benchPromise = databaseBench(import.meta.url);
 const owner = randomUUID(), draft = randomUUID(), token = randomUUID(), secret = randomUUID();
@@ -22,7 +22,7 @@ before(async () => {
   await admin`INSERT INTO owners (id, name, telegram_user_id) VALUES (${owner}, 'Owner', 42)`;
   await admin`INSERT INTO api_tokens (id, role, prefix, token_hash) VALUES (${token}, 'relay', 'relay', ${createHash('sha256').update(secret).digest('hex')})`;
   await admin`INSERT INTO registry_records (id, kind, authority, status, scope_type, category, problem, decision, reuse, source, created_by)
-    VALUES (${draft}, 'decision', 'owner', 'draft', 'global', 'security', 'Fixture question', 'Fixture answer', 'once', 'owner_message', ${admin.json({ type: 'owner', id: owner })})`;
+    VALUES (${draft}, 'decision', 'owner', 'draft', 'global', 'security', 'Fixture question', 'Fixture answer', 'once', 'owner_message', ${jsonb({ type: 'owner', id: owner })}::text::jsonb)`;
   const repo = createRepo(drizzle(connection));
   api = createApiServer({ tokens: repo.tokens, clock: () => now });
   registerAllHandlers(api, repo, { now: () => now });

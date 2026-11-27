@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { it } from "node:test";
 import { migrate } from "../db/migrate.ts";
-import { connectBench, databaseBench } from "./database-bench.ts";
+import { connectBench, databaseBench, jsonb } from "./database-bench.ts";
 
 const bench = databaseBench(import.meta.url);
 it("applies migrations 0001 through 0006 in order", async () => {
@@ -44,7 +44,7 @@ it("activates, replaces and revokes regulation rules atomically", async () => {
  const first = randomUUID(), second = randomUUID(), v1 = randomUUID(), v2 = randomUUID(), invalid = randomUUID();
  try {
   await sql`INSERT INTO registry_records (id, kind, status, scope_type) VALUES (${first}, 'rule', 'draft', 'global'), (${second}, 'rule', 'draft', 'global')`;
-  await sql`INSERT INTO regulation_versions (id, status, clauses, clauses_bytes) VALUES (${v1}, 'draft', ${sql.json([first])}, 2), (${v2}, 'draft', ${sql.json([{ record_id: second }])}, 2), (${invalid}, 'draft', ${sql.json([randomUUID()])}, 2)`;
+  await sql`INSERT INTO regulation_versions (id, status, clauses, clauses_bytes) VALUES (${v1}, 'draft', ${jsonb([first])}::text::jsonb, 2), (${v2}, 'draft', ${jsonb([{ record_id: second }])}::text::jsonb, 2), (${invalid}, 'draft', ${jsonb([randomUUID()])}::text::jsonb, 2)`;
   await sql`INSERT INTO settings (key, value) VALUES ('registry.clauseMaxBytes', '1'::jsonb) ON CONFLICT (key) DO UPDATE SET value = excluded.value`;
   await assert.rejects(sql`UPDATE regulation_versions SET status = 'active' WHERE id = ${v1}`, /clauseMaxBytes/i);
   await sql`UPDATE settings SET value = '2'::jsonb WHERE key = 'registry.clauseMaxBytes'`;
