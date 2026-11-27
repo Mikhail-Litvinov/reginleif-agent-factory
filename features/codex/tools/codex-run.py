@@ -1,7 +1,7 @@
 """Run a Codex task for Claude: detached, supervised, resumable.
 
 Commands:
-  start  --model luna|terra|sol|astra --effort E --prompt-file F [--cwd DIR] [--read-only] [--approved]
+  start  --model local|luna|terra|sol|astra --effort E --prompt-file F [--cwd DIR] [--read-only] [--approved]
          creates a job, starts the supervisor, then waits like `wait`
   wait   <job> [--interval SECONDS]   block until the job ends, asks, is blocked, or the interval passes;
                                       print a digest of what Codex did since the previous wait
@@ -16,8 +16,9 @@ start and reply refuse on a cswap account outside "codex" in ~/.agent-rig/accoun
 
 Model names resolve to the newest visible model of the line in ~/.codex/models_cache.json, never
 below the floor: luna 6, terra 6.1, sol 6.1, and astra 6. Efforts above high on costly lines need
---approved (the user's consent); astra always needs it. The free luna line runs at any effort. The
-Codex usage limit is shared by all lines; a job that hits it ends as limit with the reset time, and
+--approved (the user's consent); astra always needs it. The free luna and local lines run at any effort;
+local ignores effort and uses CODEX_RUN_LOCAL_MODEL (default openai/gpt-oss-20b) with LM Studio. The
+Codex usage limit is shared by cloud lines; a job that hits it ends as limit with the reset time, and
 continues on the same line by reply after the reset.
 Every wait is a heartbeat: with no heartbeat for ORPHAN_SECONDS the supervisor stops Codex.
 """
@@ -33,6 +34,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 
@@ -61,7 +63,14 @@ JOBS_DIR = HOME / ".claude" / "codex-jobs"
 MODELS_CACHE = HOME / ".codex" / "models_cache.json"
 FLOORS = {"luna": (6,), "terra": (6, 1), "sol": (6, 1), "astra": (6,)}
 FREE_EFFORTS = ("low", "medium", "high")
-FREE_LINES = ("luna",)
+FREE_LINES = ("luna", "local")
+# The gpt-6-luna model_messages.instructions_template in the installed Codex models_cache.json
+# measured 17,799 UTF-8 bytes (Node Buffer.byteLength); one byte per token is a conservative
+# bound. Reserve another 4,096 tokens for the task, tools and output, not a guarantee of fit.
+LOCAL_BASE_PROMPT_BYTES = 17799
+LOCAL_WORKING_TOKENS = 4096
+LOCAL_MIN_CONTEXT = LOCAL_BASE_PROMPT_BYTES + LOCAL_WORKING_TOKENS
+LOCAL_URL = "http://localhost:1234"
 ALL_EFFORTS = ("low", "medium", "high", "xhigh", "max", "ultra")
 DEFAULT_INTERVAL = 180
 POLL_SECONDS = 2
@@ -320,6 +329,48 @@ def short(text, n=DIGEST_TEXT_CHARS):
     return text if len(text) <= n else text[: n - 1] + "…"
 
 
+def local_preflight(model):
+    def get_json(path):
+        for attempt in range(2):  # Retry one transient local server failure.
+            try:
+                with urllib.request.urlopen(LOCAL_URL + path, timeout=3) as response:
+                    return json.loads(response.read().decode("utf-8"))
+            except OSError:
+                if attempt:
+                    raise
+
+    try:
+        models = get_json("/v1/models")
+        if not isinstance(models, dict) or not isinstance(models.get("data"), list):
+            raise ValueError("invalid model list")
+    except (OSError, ValueError):
+        return "LM Studio server is down or its model list is unavailable"
+    if not any(isinstance(m, dict) and m.get("id") == model for m in models["data"]):
+        return f"LM Studio model {model} is not loaded"
+    context = None
+    try:
+        result = subprocess.run(["lms", "ps", "--json"], capture_output=True, text=True, encoding="utf-8",
+                                timeout=5, check=True)
+        loaded = json.loads(result.stdout)
+        if isinstance(loaded, list):
+            context = next((m.get("contextLength") for m in loaded if isinstance(m, dict)
+                            and (m.get("identifier") == model or m.get("modelKey") == model)), None)
+    except (OSError, subprocess.SubprocessError, ValueError, UnicodeError):
+        pass
+    if not isinstance(context, int) or isinstance(context, bool) or context <= 0:
+        try:
+            info = get_json("/api/v0/models")
+            context = next((m.get("loaded_context_length") for m in info.get("data", [])
+                            if isinstance(m, dict) and m.get("id") == model and m.get("state") == "loaded"), None)
+        except (OSError, ValueError, AttributeError, TypeError):
+            pass
+    if not isinstance(context, int) or isinstance(context, bool) or context <= 0:
+        return f"cannot determine the loaded context for LM Studio model {model}"
+    if context < LOCAL_MIN_CONTEXT:
+        return f"LM Studio context {context} is below the minimum {LOCAL_MIN_CONTEXT} tokens"
+    return None
+
+
 # ---------- supervisor ----------
 
 class Supervisor:
@@ -350,10 +401,13 @@ class Supervisor:
         s = self.state
         args = [shutil.which("codex") or "codex", "exec"]
         common = ["--json", "--skip-git-repo-check", "-m", s["slug"],
-                  "-c", f"model_reasoning_effort={s['effort']}",
                   "-c", "model_reasoning_summary=auto",
                   "-c", f"sandbox_mode={'read-only' if s['read_only'] else 'workspace-write'}",
                   "-o", str(self.dir / "last.md")]
+        if s.get("line") == "local":
+            common += ["-c", "model_provider=lmstudio"]
+        else:
+            common += ["-c", f"model_reasoning_effort={s['effort']}"]
         if os.name == "nt":
             common += ["-c", UTF8_ENV_OVERRIDE]
         if resume_text is None:
@@ -435,6 +489,12 @@ class Supervisor:
         self.save(supervisor_pid=os.getpid(), status="running", started=self.state.get("started") or now())
         restarts = 0
         while True:
+            if self.state.get("line") == "local":
+                problem = local_preflight(self.state["slug"])
+                if problem:
+                    (self.dir / "last.md").write_text(f"STATUS: blocked\nBlocked by: environment: {problem}\n",
+                                                      encoding="utf-8")
+                    return self.save(status="blocked", ended=now(), error=None)
             run_started = now()
             reason, code = self.run_once(resume_text)
             if reason in ("cancelled", "orphaned"):
@@ -520,9 +580,12 @@ def cmd_start(a):
         sys.exit("REFUSED: astra needs the user's explicit consent (--approved)")
     if a.effort not in FREE_EFFORTS and line not in FREE_LINES and not a.approved:
         sys.exit(f"REFUSED: effort {a.effort} is above high and needs the user's consent (--approved)")
-    slug, efforts = resolve_model(line)
-    if a.effort not in efforts:
-        sys.exit(f"ERROR: {slug} does not support effort {a.effort}; supported: {', '.join(efforts)}")
+    if line == "local":
+        slug = os.environ.get("CODEX_RUN_LOCAL_MODEL", "openai/gpt-oss-20b")
+    else:
+        slug, efforts = resolve_model(line)
+        if a.effort not in efforts:
+            sys.exit(f"ERROR: {slug} does not support effort {a.effort}; supported: {', '.join(efforts)}")
     prompt = take_prompt(a.prompt_file)
     cleanup_old_jobs()
     job = datetime.now().strftime("%Y%m%d-%H%M%S-") + secrets.token_hex(2)
@@ -722,7 +785,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("start")
-    s.add_argument("--model", choices=sorted(FLOORS), default="terra")
+    s.add_argument("--model", choices=sorted((*FLOORS, "local")), default="terra")
     s.add_argument("--effort", choices=ALL_EFFORTS, default="medium")
     s.add_argument("--prompt-file", required=True)
     s.add_argument("--cwd")

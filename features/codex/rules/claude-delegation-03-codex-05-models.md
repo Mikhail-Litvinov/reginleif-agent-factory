@@ -1,4 +1,5 @@
-- Model, four lines. `luna`: mechanical work and simple tasks where it is hard to go wrong (search, simple
+- Model, five lines. `local`: purely mechanical, narrow tasks such as search, collecting output or a known edit; never design or review.
+  `luna`: mechanical work and simple tasks where it is hard to go wrong (search, simple
   implementation, tests, logs) — `high` by default (its usage is tiny anyway, and it has more brains); `medium` only
   for purely mechanical work with no decisions. `luna` at any effort, `xhigh` and `max` included, runs freely: it
   barely spends limits and the wrapper does not stop it; where brains are needed, `luna` is not set below `high`.
@@ -11,5 +12,5 @@
 - Review on Codex has two stages. First the preliminary review on `terra` `high`. Serious problems (High severity and
   above) are fixed and the `terra` review is repeated; minor findings are fixed before the next stage without another
   `terra` round. Only when `terra` finds no serious problems does the final review run on `sol` `high`.
-- The Codex usage limit is one for all lines: when it runs out, every line is out at once, so another line is no way
+- The Codex usage limit is shared by all cloud lines: when it runs out, every cloud line is out at once, so another cloud line is no way
   around it.

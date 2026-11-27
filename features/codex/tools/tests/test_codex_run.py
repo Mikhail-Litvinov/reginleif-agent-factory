@@ -306,6 +306,96 @@ class TerraLineTest(unittest.TestCase):
 FAKE_CODEX = Path(__file__).resolve().parent / "fake_codex.py"
 
 
+class LocalModelTest(unittest.TestCase):
+    def response(self, payload):
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps(payload).encode()
+        return response
+
+    def test_local_start_and_commands(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args = mock.Mock(model="local", effort="ultra", approved=False, prompt_file="unused",
+                             cwd=tmp, read_only=False)
+            with mock.patch.dict(os.environ, {"CODEX_RUN_LOCAL_MODEL": "vendor/model"}), \
+                    mock.patch.multiple(cr, JOBS_DIR=root, take_prompt=mock.Mock(return_value="task"),
+                                        cleanup_old_jobs=mock.Mock(), resolve_model=mock.Mock(side_effect=AssertionError)), \
+                    mock.patch.object(cr, "spawn_supervisor"), redirect_stdout(io.StringIO()):
+                cr.cmd_start(args)
+            sup = cr.Supervisor(next(root.iterdir()))
+            sup.state["session_id"] = "session"
+            prompt = (sup.dir / "prompt.md").read_text(encoding="utf-8")
+            self.assertIn("Rules for this run", prompt)
+            self.assertIn(cr.report_module.REPORT_FORM, prompt)
+            if os.name == "nt":
+                self.assertIn(cr.SHELL_RULE_WINDOWS, prompt)
+            for reply in ("continue", None):
+                command, _ = sup.command(reply)
+                self.assertIn("vendor/model", command)
+                self.assertIn("model_provider=lmstudio", command)
+                self.assertNotIn("--oss", command)
+                self.assertNotIn("--local-provider", command)
+                self.assertFalse(any("model_reasoning_effort" in arg for arg in command))
+                if reply is not None:
+                    # Options accepted by `codex exec resume --help`, including their value arity.
+                    arity = {"--json": 0, "--skip-git-repo-check": 0, "-m": 1, "-c": 1, "-o": 1}
+                    options = command[4:-1]  # executable, exec, resume, session; then prompt
+                    while options:
+                        option = options.pop(0)
+                        self.assertIn(option, arity, f"resume does not accept {option}")
+                        del options[:arity[option]]
+
+    def test_preflight_blocks_before_start_or_resume(self):
+        cases = [
+            (OSError("offline"), None, "server"),
+            (self.response({"data": []}), None, "not loaded"),
+            (self.response({"data": [{"id": "vendor/model"}]}),
+             [{"modelKey": "vendor/model", "contextLength": 1024}], "context"),
+        ]
+        for http, processes, cause in cases:
+            for resume in (False, True):
+                with self.subTest(cause=cause, resume=resume), tempfile.TemporaryDirectory() as tmp:
+                    d = Path(tmp)
+                    cr.write_json(d / "state.json", {"job": "j", "line": "local", "slug": "vendor/model",
+                        "effort": "high", "read_only": False, "cwd": tmp, "created": cr.now(), "notes": [],
+                        "session_id": "session"})
+                    (d / "prompt.md").write_text("task", encoding="utf-8")
+                    if resume:
+                        (d / "reply.md").write_text("continue", encoding="utf-8")
+                    result = mock.Mock(returncode=0, stdout=json.dumps(processes))
+                    with mock.patch("urllib.request.urlopen", side_effect=http if isinstance(http, Exception) else None,
+                                    return_value=None if isinstance(http, Exception) else http), \
+                            mock.patch.object(cr.subprocess, "run", return_value=result), \
+                            mock.patch.object(cr.process_job, "start", side_effect=AssertionError("launched")):
+                        cr.Supervisor(d).run()
+                    state = cr.read_json(d / "state.json")
+                    self.assertEqual(state["status"], "blocked")
+                    report = (d / "last.md").read_text(encoding="utf-8").lower()
+                    self.assertIn("environment:", report)
+                    self.assertIn(cause, report)
+
+    def test_context_fallback_to_api(self):
+        models = self.response({"data": [{"id": "vendor/model"}]})
+        info = self.response({"data": [{"id": "vendor/model", "state": "loaded", "loaded_context_length": 1024}]})
+        with mock.patch("urllib.request.urlopen", side_effect=[models, info]), \
+                mock.patch.object(cr.subprocess, "run", side_effect=FileNotFoundError):
+            self.assertIn("context", cr.local_preflight("vendor/model").lower())
+
+    def test_loaded_context_is_accepted_and_unknown_context_blocks(self):
+        for length, expected in ((32768, None), (None, "context")):
+            with self.subTest(length=length):
+                models = self.response({"data": [{"id": "vendor/model"}]})
+                info = self.response({"data": [{"id": "vendor/model", "state": "loaded",
+                                               "loaded_context_length": length}]})
+                with mock.patch("urllib.request.urlopen", side_effect=[models, info]), \
+                        mock.patch.object(cr.subprocess, "run", side_effect=FileNotFoundError):
+                    problem = cr.local_preflight("vendor/model")
+                if expected:
+                    self.assertIn(expected, problem.lower())
+                else:
+                    self.assertIsNone(problem)
+
+
 class DetachedChildTest(unittest.TestCase):
     def run_job(self, cancelled):
         with tempfile.TemporaryDirectory(prefix="codex-detached-") as tmp:
