@@ -26,6 +26,20 @@ const foreignVolume = async (cleanups: Cleanups, runId: string, name: string): P
 	await runContainer(runId, "--rm", "-v", `${name}:/d`, "-e", `S=${SENTINEL}`, "alpine", "sh", "-c", "echo $S > /d/SENTINEL");
 };
 
+describe("mount sites: a compose line counts only when a file it names declares a volume", () => {
+	it("the main compose file with its pgdata volume is a mount site", () => {
+		assert.ok(isMountSite("docker compose -p agent-factory -f factory/deploy/compose.yml up -d"));
+	});
+	it("the embedder compose file declares no volume, so its line is not a mount site", () => {
+		assert.equal(isMountSite("docker compose -p af-embedder -f factory/deploy/embedder/compose.yml up -d --build"), false);
+	});
+	it("an -f that cannot be resolved, or no -f, stays a mount site", () => {
+		assert.ok(isMountSite('docker compose -p agent-factory -f "$old/compose.yml" up -d'));
+		assert.ok(isMountSite("docker compose -p agent-factory -f factory/deploy/no-such-file.yml up -d"));
+		assert.ok(isMountSite("docker compose -p agent-factory up -d"));
+	});
+});
+
 describe("volume identity: the doc proves the data volume before it acts on it", () => {
 	for (const name of DOCS) {
 		it(`${name} defines the proof once and puts it before every command that mounts or removes the data volume`, () => {

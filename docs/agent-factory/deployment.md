@@ -196,11 +196,9 @@ has no route to the outside.
 2. Build and start. `AF_EMBEDDER_MODEL_DIR` is required (compose refuses without it) and is mounted read-only at
    `/model`:
 
-   `$env:AF_EMBEDDER_MODEL_DIR = '<model dir>'; & $proveVolume 'af-embedder'; docker compose -p af-embedder -f factory/deploy/embedder/compose.yml up -d --build`
+   `$env:AF_EMBEDDER_MODEL_DIR = '<model dir>'; docker compose -p af-embedder -f factory/deploy/embedder/compose.yml up -d --build`
 
-   The embedder has no data volume of its own (only the read-only model directory above), so the proof finds no
-   `af-embedder_pgdata` and passes; it is on the line because every `up` of this document starts with it, and it stops
-   the line if a volume of that name made by someone else is ever there. The image `af-embedder:local` is built from `factory/deploy/embedder/Dockerfile` (Python with `onnxruntime`,
+   The image `af-embedder:local` is built from `factory/deploy/embedder/Dockerfile` (Python with `onnxruntime`,
    `tokenizers` and `numpy`, versions pinned there). The server hashes the weights before it listens, so the first
    request after a start can take several seconds to half a minute.
 3. Check it. `POST /embed` with `{"texts":["text"]}` returns the model name, the revision, the SHA-256 of the weights

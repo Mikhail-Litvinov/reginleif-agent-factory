@@ -51,7 +51,53 @@ export const MOUNT_SITES: readonly RegExp[] = [
 	/\bdocker\s+volume\s+rm\b/,
 	/\bdocker\s+run\b.*pgdata\b/,
 ];
-export const isMountSite = (code: string): boolean => MOUNT_SITES.some((site) => site.test(code));
+const COMPOSE_UP_RUN = MOUNT_SITES[0] as RegExp;
+
+// Whether a compose file declares a volume: a top-level `volumes:`, or a named volume (not a bind mount of a path or a
+// variable) among a service's `volumes:` entries. Line-based, the compose files here are plain block YAML.
+export const composeDeclaresVolume = (yaml: string): boolean => {
+	let inVolumes = false;
+	let indent = 0;
+	for (const raw of yaml.split(/\r?\n/)) {
+		const line = raw.replace(/\s+#.*$/, "").trimEnd();
+		if (line.trim() === "" || line.trim().startsWith("#")) continue;
+		const lead = line.length - line.trimStart().length;
+		if (/^volumes:/.test(line)) return true;
+		if (inVolumes && lead <= indent) inVolumes = false;
+		if (/^\s+volumes:\s*$/.test(line)) {
+			inVolumes = true;
+			indent = lead;
+			continue;
+		}
+		if (/^\s+volumes:\s*\[\s*[^\]\s]/.test(line)) return true;
+		if (inVolumes) {
+			const source = /^\s*-\s*["']?([^:"'\s]+)/.exec(line)?.[1];
+			if (source === undefined || /^[A-Za-z0-9][\w.-]*$/.test(source)) return true;
+		}
+	}
+	return false;
+};
+
+// The files a compose line names with -f, as the docs write them (relative to the repository root).
+const composeFiles = (code: string): string[] => [...code.matchAll(/\s-f\s+("[^"]*"|'[^']*'|\S+)/g)].map((m) => (m[1] as string).replace(/^["']|["']$/g, ""));
+
+// A compose line is a mount site only when a file it names declares a volume. No -f, or an -f that cannot be resolved
+// (a variable, a missing file), stays a mount site: the rule fails closed.
+const composeMounts = (code: string): boolean => {
+	const files = composeFiles(code);
+	if (files.length === 0) return true;
+	return files.some((file) => {
+		if (/[$`]/.test(file)) return true;
+		try {
+			return composeDeclaresVolume(readFileSync(join(REPO_ROOT, file), "utf8"));
+		} catch {
+			return true;
+		}
+	});
+};
+
+export const isMountSite = (code: string): boolean =>
+	MOUNT_SITES.slice(1).some((site) => site.test(code)) || (COMPOSE_UP_RUN.test(code) && composeMounts(code));
 
 export const PROOF_NAME = "$proveVolume";
 export const GATE_NAME = "$protectedDir";
