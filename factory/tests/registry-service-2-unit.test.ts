@@ -142,6 +142,7 @@ function registryFixture(clauseMaxBytes = 1000, search?: Parameters<typeof creat
 	};
 	const confirmationRows = new Map<string, Parameters<Repo["confirmations"]["create"]>[0]>();
 	const used = new Set<string>();
+	let transactions = 0;
 	const tx = {
 		audit: { append: async (row: object) => row },
 		owners: { byTelegramUserId: async (id: bigint) => id === 123n ? owner : undefined },
@@ -187,10 +188,10 @@ function registryFixture(clauseMaxBytes = 1000, search?: Parameters<typeof creat
 				captureByPress: async (pressId: string) => [...records.values()].find(row => Reflect.get(row, "pressId") === pressId),
 				captureByInquiry: async (inquiryId: string) => [...records.values()].find(row => Reflect.get(row, "inquiryId") === inquiryId),
 				create: async (row: ReturnType<typeof decision>) => { records.set(row.id, row); return row; },
-				changeStatus: async (id: string, status: string) => {
+				changeStatus: async (id: string, status: string, statusChangedAt?: Date) => {
 					const row = records.get(id);
 					if (!row) return null;
-					row.status = status;
+					Object.assign(row, { status, statusChangedAt });
 					return row;
 				},
 			},
@@ -201,11 +202,23 @@ function registryFixture(clauseMaxBytes = 1000, search?: Parameters<typeof creat
 			results: { forInquiry: async () => results, create: async (row: object) => row },
 		},
 	};
-	const repo = { registry: tx.registry, transaction: async (fn: (arg: typeof tx) => unknown) => fn(tx) } as unknown as Repo;
-	return { tx, service: createRegistryService(repo, search), records, versions, links, results, inquiry, used };
+	const repo = { registry: tx.registry, transaction: async (fn: (arg: typeof tx) => unknown) => { transactions++; return fn(tx); } } as unknown as Repo;
+	return { tx, service: createRegistryService(repo, search), records, versions, links, results, inquiry, used, transactionCount: () => transactions };
 }
 
 const press = { pollId: "poll", telegramUserId: 123n, optionIndex: 0, pressId: "press" };
+
+test("owner batch activation changes every draft in one transaction at the supplied time", async () => {
+	const f = registryFixture();
+	f.records.set("first", decision("first"));
+	f.records.set("second", decision("second"));
+	const changedAt = new Date("2031-02-03T04:05:06.000Z");
+	const rows = await f.service.changeStatuses(owner, ["first", "second"], "active", changedAt);
+	assert.deepEqual(rows.map(row => [row!.id, row!.status]), [["first", "active"], ["second", "active"]]);
+	assert.equal(f.transactionCount(), 1);
+	assert.equal(Reflect.get(f.records.get("first")!, "statusChangedAt"), changedAt);
+	assert.equal(Reflect.get(f.records.get("second")!, "statusChangedAt"), changedAt);
+});
 
 test("G2 and G8 capture one offered Telegram answer word for word in its project", async () => {
 	const { service, inquiry } = registryFixture();

@@ -4,7 +4,7 @@ import type { Repo } from '../../db/repo/index.ts';
 import type { HandlerContext } from '../server.ts';
 import { MAX_PAGE_LIMIT } from './settings.ts';
 
-export type HandlerRegistrar = { register(method: Route['method'], path: string, handler: (context: HandlerContext) => Promise<{ status: number; body?: unknown; headers?: Record<string, string> }>): void };
+export type HandlerRegistrar = { register(method: Route['method'], path: string, handler: (context: HandlerContext) => Promise<{ status: number; body?: unknown; headers?: Record<string, string> }>, options?: { authorizeScope?: (context: { identity: NonNullable<HandlerContext['identity']>; route: Route; params: Record<string, string>; body: unknown; scope: string }) => Promise<boolean> }): void };
 export type HandlerDeps = { repo: Repo; queueGatewayEnabled?: boolean; now?: () => Date };
 export type Row = Record<string, any>;
 

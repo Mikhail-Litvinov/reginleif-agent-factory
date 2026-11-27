@@ -3,6 +3,7 @@ import type { createApiServer } from '../server.ts';
 import { registerClientHandlers } from './client.ts';
 import { registerAdminHandlers } from './index.ts';
 import { registerTasks } from './tasks.ts';
+import { registerRegistryHandlers } from './registry.ts';
 
 type Options = {
   now?: () => Date;
@@ -17,4 +18,5 @@ export function registerAllHandlers(api: ReturnType<typeof createApiServer>, rep
   registerAdminHandlers(api, { repo, now, queueGatewayEnabled });
   registerTasks(api, repo, { clock: now, contractVersion });
   registerClientHandlers(api, repo, client);
+  registerRegistryHandlers(api, repo, { now });
 }

@@ -17,13 +17,6 @@ const laterPackages: Record<string, string> = {
   ...later('run artifacts and proposals handlers (api/handlers artifacts, proposals; phase 2 routes, phase 4 upload activities)', [
     'POST /runs/{run_id}/artifacts', 'PUT /artifacts/{id}/content', 'HEAD /artifacts/{id}/content', 'GET /artifacts/{id}/content', 'POST /runs/{run_id}/proposals',
   ]),
-  ...later('registry handlers (api/handlers/registry.ts, phase 2)', [
-    'POST /registry/inquiries', 'GET /registry/inquiries/{id}', 'POST /registry/inquiries/{id}/verdicts', 'POST /registry/gate', 'GET /registry/search',
-    'GET /registry/records', 'GET /registry/records/{id}', 'POST /registry/records', 'GET /registry/drafts', 'POST /registry/records/{id}/activate',
-    'POST /registry/records/{id}/revoke', 'POST /registry/records/{id}/supersede', 'POST /registry/polls', 'POST /registry/captures',
-    'GET /regulation/versions', 'GET /regulation/versions/{id}', 'POST /regulation/versions', 'GET /regulation/versions/{id}/diff',
-    'POST /regulation/versions/{id}/activate', 'POST /regulation/versions/{id}/revoke',
-  ]),
   ...later('rights handlers (api/handlers/rights.ts, phase 2)', [
     'GET /roles', 'GET /roles/{id}', 'GET /tasks/{id}/participants', 'POST /rights/check', 'POST /rights/requests', 'GET /rights/requests',
     'GET /rights/requests/{id}', 'POST /rights/requests/{id}/answer', 'GET /rights/grants', 'POST /rights/grants/{id}/revoke',
