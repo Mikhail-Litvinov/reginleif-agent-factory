@@ -18,8 +18,9 @@ const TESTS_DIR = decodeURIComponent(new URL(".", import.meta.url).pathname.repl
 const SELF = "owned-creation-guard.test.ts";
 const HELPER = "owned-docker.ts";
 
-// Test files that hold docker command lines only as text to be scanned, never run: the removal guard's fixtures.
-const TEXT_ONLY = new Set(["removal-guard.test.ts"]);
+// Test files that hold docker command lines only as text to be scanned, never run: the removal guard's fixtures and the
+// mount-site parser's inputs. A file that also runs docker never belongs here.
+const TEXT_ONLY = new Set(["removal-guard.test.ts", "mount-site.test.ts"]);
 
 const SAFE_CALLS = /^(?:stackArgs|ownedComposeArgs|withPassfile)\s*\(/;
 const READ_ONLY = new Set(["inspect", "ls", "ps", "port", "logs", "exec", "cp", "start", "stop", "kill", "wait", "update", "--filter", "config"]);
