@@ -1,7 +1,7 @@
-import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { HandlerDeps, HandlerRegistrar } from './shared.ts';
 import { query, response } from './shared.ts';
-import { confirmWindowSeconds } from './settings.ts';
+import { secondPress } from '../second-press.ts';
 
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 
@@ -24,26 +24,12 @@ export function registerCleanupHandlers(api: HandlerRegistrar, { repo, now = () 
     const actorId = context.identity?.ownerId ?? context.identity?.id;
     if (!key) return response(422, { code: 'validation_failed' });
     if (!actorId) return response(403, { code: 'forbidden' });
-    if (force) {
-      const confirmHeader = context.request.headers['x-confirm'];
-      if (typeof confirmHeader !== 'string') {
-        const id = randomUUID();
-        const nonce = randomBytes(32).toString('base64url');
-        const expiresAt = new Date(now().getTime() + await confirmWindowSeconds(repo) * 1000);
-        await repo.confirmations.create({ id, actorId, channel: 'api', deviceSessionId: null, operation: 'cleanup', targetType: 'task', targetId: task.id, requestHash, nonceHash: hash(nonce), issuedAt: now(), expiresAt });
-        return response(409, { code: 'confirmation_required', confirmation_id: id, nonce, expires_at: expiresAt.toISOString() });
-      }
-      const match = /^([0-9a-f-]{36})\.([A-Za-z0-9_-]+)$/i.exec(confirmHeader);
-      if (!match) return response(409, { code: 'confirmation_invalid' });
-      const confirmation = await repo.confirmations.get(match[1]!);
-      const expected = confirmation?.nonceHash;
-      const actual = hash(match[2]!);
-      const nonceMatches = !!expected && expected.length === actual.length && timingSafeEqual(Buffer.from(expected), Buffer.from(actual));
-      if (!nonceMatches || !await repo.confirmations.consume({ id: match[1]!, actorId, channel: 'api', deviceSessionId: null, operation: 'cleanup', targetType: 'task', targetId: task.id, requestHash, now: now() })) return response(409, { code: 'confirmation_invalid' });
-    }
-
     const outboxId = randomUUID();
     const result = await repo.transaction(async tx => {
+      if (context.route.secondPress === 'forced-cleanup' && force) {
+        const press = await secondPress(tx, context, { actorId, operation: 'cleanup', targetType: 'task', targetId: task.id, requestHash, now: now() });
+        if (press) return { press };
+      }
       const claim = await tx.idempotencyKeys.claim({ actorId, key, requestHash, state: 'in_progress' });
       if (claim.replayed) {
         if (claim.row.requestHash !== requestHash) return { error: 'idempotency_conflict' as const };
@@ -57,6 +43,7 @@ export function registerCleanupHandlers(api: HandlerRegistrar, { repo, now = () 
       await tx.idempotencyKeys.complete(actorId, key, 202, body);
       return { body };
     });
+    if ('press' in result && result.press) return result.press;
     if ('error' in result) return response(409, { code: result.error });
     const body = 'replay' in result ? result.replay : result.body;
     return response(202, body, { location: `/tasks/${task.id}/cleanup`, ...('replay' in result ? { 'Idempotent-Replay': 'true' } : {}) });

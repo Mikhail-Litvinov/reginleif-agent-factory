@@ -1,4 +1,5 @@
-import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { ConfirmationSettingError, issueConfirmation, verifyConfirmation } from "../api/second-press.ts";
 import { isDeepStrictEqual } from "node:util";
 import type { Repo } from "../db/repo/index.ts";
 import { RegistryRefusedError } from "../db/repo/registry.ts";
@@ -64,23 +65,6 @@ function binding(actor: Actor, id: string, operation: Operation, context: Confir
 	};
 }
 
-async function consumeConfirmation(tx: Pick<Repo, "confirmations">, actor: Actor, id: string, operation: Operation, confirmation: Confirmation, now: Date) {
-	const [confirmationId, nonce, ...rest] = confirmation.confirm.split(".");
-	if (!confirmationId || !uuid.test(confirmationId) || !nonce || !/^[A-Za-z0-9_-]+$/u.test(nonce) || rest.length) {
-		return refuse("confirmation_invalid");
-	}
-	const row = await tx.confirmations.get(confirmationId);
-	const expected = row?.nonceHash;
-	const actual = hash(nonce);
-	if (!expected || !/^[0-9a-f]{64}$/u.test(expected) || !timingSafeEqual(Buffer.from(expected, "hex"), Buffer.from(actual, "hex"))) {
-		return refuse("confirmation_invalid");
-	}
-	if (!await tx.confirmations.consume({ ...binding(actor, id, operation, confirmation), id: confirmationId, now })) {
-		return refuse("confirmation_invalid");
-	}
-	return confirmationId;
-}
-
 async function scopedClauses(registry: Registry, version: Version | undefined, scope?: Scope) {
 	const clauses = clauseEntries(version?.clauses ?? []);
 	const ordered = [];
@@ -139,7 +123,7 @@ export function regulationService(repo: Repo, extraAssessment?: RegulationAssess
 		return repo.transaction(async tx => {
 			await tx.registry.lock();
 			const now = confirmation.now ?? new Date();
-			const confirmationId = await consumeConfirmation(tx, actor, id, operation, confirmation, now);
+			const confirmationId = await verifyConfirmation(tx, confirmation.confirm, binding(actor, id, operation, confirmation), now) ?? refuse("confirmation_invalid");
 			const version = await getVersion(tx.registry, id);
 			if (operation === "revoke") {
 				if (version.status !== "active") return refuse("validation_failed");
@@ -186,17 +170,12 @@ export function regulationService(repo: Repo, extraAssessment?: RegulationAssess
 				await tx.registry.lock("read");
 				const version = await getVersion(tx.registry, id);
 				if (version.status !== (operation === "activate" ? "draft" : "active")) return refuse("validation_failed");
-				const seconds = (await tx.settings.snapshot(["confirm.windowSeconds"]))["confirm.windowSeconds"];
-				if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds <= 0) return refuse("unavailable");
 				const conflictReport = operation === "activate" ? await assess(tx.registry, version) : null;
 				const now = context.now ?? new Date();
-				const expiresAt = new Date(now.getTime() + seconds * 1000);
-				const confirmationId = randomUUID();
-				const nonce = randomBytes(32).toString("base64url");
-				await tx.confirmations.create({
-					...binding(actor, id, operation, context), id: confirmationId, nonceHash: hash(nonce), issuedAt: now, expiresAt,
-				});
-				return { id: confirmationId, nonce, expiresAt, conflictReport };
+				let issued: Awaited<ReturnType<typeof issueConfirmation>>;
+				try { issued = await issueConfirmation(tx, binding(actor, id, operation, context), now); }
+				catch (error) { if (error instanceof ConfirmationSettingError) return refuse("unavailable"); throw error; }
+				return { id: issued.confirmation_id, nonce: issued.nonce, expiresAt: new Date(issued.expires_at), conflictReport };
 			});
 		},
 		activateRegulation: (actor: Actor, id: string, confirmation?: Confirmation) => changeRegulation(actor, id, "activate", confirmation),

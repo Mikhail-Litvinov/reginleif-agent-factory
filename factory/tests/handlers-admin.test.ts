@@ -6,7 +6,8 @@ import { migrate } from '../db/migrate.ts';
 import { createRepo, type Repo } from '../db/repo/index.ts';
 import { createApiServer } from '../api/server.ts';
 import { registerAdminHandlers } from '../api/handlers/index.ts';
-import { confirmWindowSeconds, pageLimits, tokenOverlapSeconds } from '../api/handlers/settings.ts';
+import { pageLimits, tokenOverlapSeconds } from '../api/handlers/settings.ts';
+import { confirmationWindow } from '../api/second-press.ts';
 import { routes } from '../contracts/routes.ts';
 import { connectBench, databaseBench } from './database-bench.ts';
 
@@ -103,11 +104,11 @@ after(async () => {
   await client?.end();
 });
 
-test('the documented settings default to named values and are read from settings', async () => {
-  // api.md names the four settings but gives no values; the defaults are named constants in settings.ts.
+test('settings use configured values and the confirmation window must be configured', async () => {
   assert.deepEqual(await pageLimits(repo), { defaultLimit: 50, maxLimit: 100 });
   assert.equal(await tokenOverlapSeconds(repo), 60);
-  assert.equal(await confirmWindowSeconds(repo), 60);
+  await assert.rejects(confirmationWindow(repo));
+  await repo.settings.set('confirm.windowSeconds', 60, null);
   await repo.settings.set('page.maxLimit', 7, null);
   await repo.settings.set('page.defaultLimit', 3, null);
   try { assert.deepEqual(await pageLimits(repo), { defaultLimit: 3, maxLimit: 7 }); }

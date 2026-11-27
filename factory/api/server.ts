@@ -7,6 +7,7 @@ import { routes, type Route } from '../contracts/routes.ts';
 import { databaseUnavailable } from '../db/repo/errors.ts';
 import { createLogger, type Logger } from '../lib/log.ts';
 import { BadCursorError } from './cursor.ts';
+import { ConfirmationSettingError } from './second-press.ts';
 
 type Identity = { id: string; role: string | null; prefix: string | null; tokenHash: string | null; workerId: string | null; ownerId?: string | null; runId?: string | null; revokedAt: Date | null; expiresAt: Date | null; validUntil: Date | null };
 type AuthorizeScope = (context: { identity: Identity; route: Route; params: Record<string, string>; body: unknown; scope: string }) => Promise<boolean>;
@@ -190,6 +191,7 @@ export function createApiServer(deps: Dependencies) {
       // A malformed or foreign cursor is the caller's mistake (api.md:385, :667), whichever handler read the stream.
       if (res.headersSent) res.destroy();
       else if (error instanceof BadCursorError) await problem(400, 'bad_cursor', 'Invalid cursor');
+      else if (error instanceof ConfirmationSettingError) await problem(503, 'unavailable', 'Confirmation setting unavailable');
       else if (databaseUnavailable(error)) await problem(503, 'unavailable', 'Database unavailable', { retry_after: 1 }, { 'Retry-After': '1' });
       else await problem(500, 'internal', 'Request failed');
     }
