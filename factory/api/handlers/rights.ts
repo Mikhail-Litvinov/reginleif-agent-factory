@@ -4,6 +4,7 @@ import type { HandlerContext } from '../server.ts';
 import type { HandlerDeps, HandlerRegistrar } from './shared.ts';
 import { apiRow, apiRows, query, response } from './shared.ts';
 import { consumeConfirmationAct } from '../second-press.ts';
+import { principalOf } from '../../db/repo/audit.ts';
 import { checkForSubject, type Right } from '../../rights/check.ts';
 import { answerOwnerRequest, answerState, createRightRequest } from '../../rights/requests.ts';
 
@@ -168,7 +169,7 @@ export function registerRightsHandlers(api: HandlerRegistrar, { repo, now = () =
           if (result.error === 'not_found') return failure(404);
           return response(409, { code: result.error });
         }
-        await tx.audit.append({ id: randomUUID(), actorId: ownerId, tokenId: context.identity!.id, deviceSessionId: null, requestId: context.requestId, action: `rights.${input.answer}`, targetType: 'right_request', targetId: request.id, outcome: 'ok', requestHash: sha([context.request.method, context.request.url, input]), details: { route: context.route.path, answer_id: result.answer.id } });
+        await tx.audit.append({ id: randomUUID(), actorId: ownerId, principal: principalOf(context.identity), requestId: context.requestId, action: `rights.${input.answer}`, targetType: 'right_request', targetId: request.id, outcome: 'ok', requestHash: sha([context.request.method, context.request.url, input]), details: { route: context.route.path, answer_id: result.answer.id } });
         const grant = 'grant' in result && result.grant ? { grant: apiRow(result.grant) } : {};
         return response(201, { ...answerRow(result.answer), ...grant });
       });
@@ -209,7 +210,7 @@ export function registerRightsHandlers(api: HandlerRegistrar, { repo, now = () =
         if (!held) continue;
         await tx.outbox.create({ id: randomUUID(), kind: 'stop_run', taskId: run.taskId, decisionId: null, payload: { run_id: run.id, reason: 'right_revoked', grant_id: grant.id }, state: 'pending', attempts: 0, nextAttemptAt: at });
       }
-      await tx.audit.append({ id: randomUUID(), actorId: ownerId, tokenId: context.identity!.id, deviceSessionId: null, requestId: context.requestId, action: 'rights.revoke', targetType: 'right_grant', targetId: grant.id, outcome: 'ok', requestHash: sha([context.request.method, context.request.url]), details: { route: context.route.path } });
+      await tx.audit.append({ id: randomUUID(), actorId: ownerId, principal: principalOf(context.identity), requestId: context.requestId, action: 'rights.revoke', targetType: 'right_grant', targetId: grant.id, outcome: 'ok', requestHash: sha([context.request.method, context.request.url]), details: { route: context.route.path } });
       return response(200, apiRow(ended));
     });
   });
@@ -252,7 +253,7 @@ export function registerRightsHandlers(api: HandlerRegistrar, { repo, now = () =
       } else return failure(403);
       if (suspension.endedAt) return response(409, { code: 'request_closed' });
       const restoreAuditId = randomUUID();
-      await tx.audit.append({ id: restoreAuditId, actorId: identity.ownerId ?? identity.id, tokenId: identity.id, deviceSessionId: null, requestId: context.requestId, action: 'rights.restore', targetType: 'rights_suspension', targetId: suspension.id, outcome: 'ok', requestHash: sha([context.request.method, context.request.url, input]), details: { route: context.route.path, restored_by: restoredBy } });
+      await tx.audit.append({ id: restoreAuditId, actorId: identity.ownerId ?? identity.id, principal: principalOf(identity), requestId: context.requestId, action: 'rights.restore', targetType: 'rights_suspension', targetId: suspension.id, outcome: 'ok', requestHash: sha([context.request.method, context.request.url, input]), details: { route: context.route.path, restored_by: restoredBy } });
       const restored = await tx.rightsSuspensions.restore(suspension.id, { restoredBy, restoreReason: input.restore_reason, restoreAuditId });
       if (!restored) return response(409, { code: 'request_closed' });
       return response(200, suspensionRow(restored));

@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { HandlerDeps, HandlerRegistrar } from './shared.ts';
 import { query, response } from './shared.ts';
 import { secondPress } from '../second-press.ts';
+import { principalOf } from '../../db/repo/audit.ts';
 
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 
@@ -38,7 +39,7 @@ export function registerCleanupHandlers(api: HandlerRegistrar, { repo, now = () 
       }
       await tx.taskEvents.persist({ id: randomUUID(), taskId: task.id, runId: null, eventType: 'cleanup_requested', actorType: 'owner', actorId: context.identity?.ownerId ?? null, payload: { force }, correlationId: context.requestId, dedupeKey: context.requestId });
       await tx.outbox.create({ id: outboxId, kind: 'cleanup', taskId: task.id, decisionId: null, payload: { task_id: task.id, force }, state: 'pending', attempts: 0 });
-      await tx.audit.append({ id: randomUUID(), actorId: context.identity?.ownerId ?? null, tokenId: context.identity?.id ?? null, deviceSessionId: null, requestId: context.requestId, action: 'task.cleanup', targetType: 'task', targetId: task.id, outcome: 'ok', requestHash, details: { route: '/tasks/{id}/cleanup' } });
+      await tx.audit.append({ id: randomUUID(), actorId: context.identity?.ownerId ?? null, principal: principalOf(context.identity), requestId: context.requestId, action: 'task.cleanup', targetType: 'task', targetId: task.id, outcome: 'ok', requestHash, details: { route: '/tasks/{id}/cleanup' } });
       const body = { id: outboxId, delivery_state: 'recorded' };
       await tx.idempotencyKeys.complete(actorId, key, 202, body);
       return { body };

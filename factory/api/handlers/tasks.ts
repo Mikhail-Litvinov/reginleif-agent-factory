@@ -7,6 +7,7 @@ import { DependencyCreate } from '../../contracts/schemas/requests.ts';
 import { routes } from '../../contracts/routes.ts';
 import { phaseTwoBlockKinds } from '../../contracts/states.ts';
 import { driverError } from '../../db/repo/errors.ts';
+import { principalOf } from '../../db/repo/audit.ts';
 import type { Repo } from '../../db/repo/index.ts';
 import { DependencyRefusedError, TaskDeleteRefusedError } from '../../db/repo/tasks.ts';
 import { DecisionProblem, recordDecision, requestFingerprint, type DecisionKind } from '../decisions.ts';
@@ -114,7 +115,7 @@ function ifMatch(context: HandlerContext, current?: bigint) {
 }
 
 function auditOf(context: HandlerContext, principal: string | undefined, requestHash: string, outcome: 'ok' | 'failed' | 'denied', targetId?: string) {
-  return { id: randomUUID(), actorId: principal, tokenId: context.identity?.id, deviceSessionId: sessionId(context),
+  return { id: randomUUID(), actorId: principal, principal: principalOf(context.identity),
     requestId: context.requestId, action: `${context.route.method} ${context.route.path}`, targetType: context.route.path.split('/')[1],
     targetId, requestHash, outcome };
 }
@@ -398,7 +399,7 @@ export function registerTasks(api: Api, repo: Repo, { clock = () => new Date(), 
         channel: telegram ? 'telegram' : identity.role === 'device' ? 'client' : 'api',
         deviceSessionId: sessionId(context), pressId: telegram ? press as string : null, idempotencyKey: header(context, 'idempotency-key') ?? '',
         confirm: confirmationHeader(context), now: clock(),
-        http: { requestId: context.requestId, tokenId: identity.id, workerId: worker ? identity.workerId! : undefined },
+        http: { requestId: context.requestId, principal: principalOf(identity), workerId: worker ? identity.workerId! : undefined },
       });
       const headers: Record<string, string> = {};
       if (result.replayed) headers['Idempotent-Replay'] = 'true';

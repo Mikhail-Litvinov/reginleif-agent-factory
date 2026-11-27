@@ -2,6 +2,7 @@ import { randomBytes, randomUUID, createHash } from 'node:crypto';
 import type { Route } from '../../contracts/routes.ts';
 import type { Repo } from '../../db/repo/index.ts';
 import type { HandlerContext } from '../server.ts';
+import { principalOf } from '../../db/repo/audit.ts';
 import { MAX_PAGE_LIMIT } from './settings.ts';
 
 export type HandlerRegistrar = { register(method: Route['method'], path: string, handler: (context: HandlerContext) => Promise<{ status: number; body?: unknown; headers?: Record<string, string> }>, options?: { authorizeScope?: (context: { identity: NonNullable<HandlerContext['identity']>; route: Route; params: Record<string, string>; body: unknown; scope: string }) => Promise<boolean> }): void };
@@ -42,6 +43,6 @@ export const id = () => randomUUID();
 export async function writeAudit(tx: Pick<Repo, 'audit'>, context: HandlerContext, action: string, targetType: string, targetId: string | null, outcome: string, request: unknown): Promise<void> {
   const requestHash = createHash('sha256').update(JSON.stringify([context.request.method, context.request.url, request])).digest('hex');
   await tx.audit.append({ id: id(), actorId: context.identity?.ownerId ?? context.identity?.id ?? null,
-    tokenId: context.identity?.id ?? null, deviceSessionId: null, requestId: context.requestId, action, targetType, targetId,
+    principal: principalOf(context.identity), requestId: context.requestId, action, targetType, targetId,
     outcome, requestHash, details: { route: context.route.path } });
 }
