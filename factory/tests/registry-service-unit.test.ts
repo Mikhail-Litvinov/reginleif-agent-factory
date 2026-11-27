@@ -59,7 +59,13 @@ test("facts and precedents require evidence", async () => {
 
 test("opening an inquiry stores search results in the same transaction", async () => {
 	const calls: string[] = [];
-	const transaction = { registry: { inquiries: { create: async () => { calls.push("inquiry"); return { id: "inquiry" }; } }, results: { create: async (input: object) => { calls.push("result"); return input; } } } };
+	const transaction = { registry: {
+		lock: async () => {},
+		regulations: { active: async () => undefined },
+		records: { ruleIds: async () => [] },
+		inquiries: { create: async () => { calls.push("inquiry"); return { id: "inquiry" }; } },
+		results: { create: async (input: object) => { calls.push("result"); return input; } },
+	} };
 	const repo = { transaction: async (fn: (tx: typeof transaction) => Promise<unknown>) => { calls.push("transaction"); return fn(transaction); } } as unknown as Repo;
 	const service = createRegistryService(repo, async () => {
 		calls.push("search");
