@@ -17,11 +17,6 @@ const laterPackages: Record<string, string> = {
   ...later('run artifacts and proposals handlers (api/handlers artifacts, proposals; phase 2 routes, phase 4 upload activities)', [
     'POST /runs/{run_id}/artifacts', 'PUT /artifacts/{id}/content', 'HEAD /artifacts/{id}/content', 'GET /artifacts/{id}/content', 'POST /runs/{run_id}/proposals',
   ]),
-  ...later('rights handlers (api/handlers/rights.ts, phase 2)', [
-    'GET /roles', 'GET /roles/{id}', 'GET /tasks/{id}/participants', 'POST /rights/requests', 'GET /rights/requests',
-    'GET /rights/requests/{id}', 'POST /rights/requests/{id}/answer', 'GET /rights/grants', 'POST /rights/grants/{id}/revoke',
-    'GET /rights/suspensions', 'GET /rights/suspensions/{id}', 'POST /rights/suspensions/{id}/restore',
-  ]),
   ...later('personnel handlers (api/handlers/personnel.ts, phase 5 reads, phase 8 the rest)', [
     'GET /personnel/positions', 'GET /personnel/positions/{id}', 'GET /personnel/profiles', 'GET /personnel/profiles/{agent_id}',
     'GET /personnel/assessments', 'GET /personnel/assessments/{id}', 'GET /personnel/incidents', 'GET /personnel/incidents/{id}',
