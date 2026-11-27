@@ -34,6 +34,9 @@ before(async () => {
   await admin`INSERT INTO workers (id, machine_id) VALUES (${worker!}, 'rights-suspended')`;
   await admin`INSERT INTO agents(id) VALUES (${suspendedAgent!}), (${chiefAgent!})`;
   await admin`INSERT INTO tasks(id,project_id,status,origin_type,depth,workflow_id) VALUES (${task!},${project!},'RUNNING','owner',0,${'task-' + task})`;
+  // The run guard (migration 0007) admits a chief engineer run only for a task that handles a right request or is a BLOCKED
+  // task handled by the chief engineer; the chief engineer here handles a request.
+  await admin`INSERT INTO right_requests(id,task_id,handling_task_id,action,target) VALUES (${randomUUID()},${task!},${task!},'read','work')`;
   await admin`INSERT INTO task_runs(id,task_id,role,agent_id,worker_id,participant,status,execution_id) VALUES
     (${suspendedRun!},${task!},'implementer',${suspendedAgent!},${worker!},'builder','running',${randomUUID()}),
     (${chiefRun!},${task!},'chief_engineer',${chiefAgent!},${worker!},'chief','running',${randomUUID()})`;
