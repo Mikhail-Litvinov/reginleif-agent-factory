@@ -16,8 +16,10 @@ export const projectRepo = (db: PostgresJsDatabase<any>) => ({
 		if (q !== undefined) conditions.push(sql`strpos(lower(${projects.name}), lower(${q}::text)) > 0`);
 		return db.select().from(projects).where(and(...conditions)).orderBy(projects.name);
 	},
-	get: async (id: string, { includeDeleted = false }: { includeDeleted?: boolean } = {}): Promise<Project | undefined> =>
-		(await db.select().from(projects).where(and(eq(projects.id, id), ...(includeDeleted ? [] : [isNull(projects.deletedAt)]))).limit(1))[0],
+	get: async (id: string, { includeDeleted = false, lock = false }: { includeDeleted?: boolean; lock?: boolean } = {}): Promise<Project | undefined> => {
+		const query = db.select().from(projects).where(and(eq(projects.id, id), ...(includeDeleted ? [] : [isNull(projects.deletedAt)]))).limit(1);
+		return (await (lock ? query.for("update") : query))[0];
+	},
 	create: async (input: ProjectInsert): Promise<Project> => (await db.insert(projects).values(input).returning())[0]!,
 	update: async (id: string, expectedVersion: bigint, patch: ProjectPatch): Promise<Project | null> =>
 		(await db.update(projects).set({ ...patch, updatedAt: new Date(), rowVersion: expectedVersion + 1n }).where(and(eq(projects.id, id), eq(projects.rowVersion, expectedVersion), isNull(projects.deletedAt))).returning())[0] ?? null,

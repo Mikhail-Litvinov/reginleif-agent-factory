@@ -674,6 +674,7 @@ Every error is `application/problem+json` with `type`, `title`, `status`, `code`
 | `idempotency_conflict`, `idempotency_in_progress` | 409 | See Idempotency. |
 | `dependency_cycle`, `depth_exceeded`, `project_active`, `task_active` | 409 | A fact of PostgreSQL forbids it. |
 | `queue_isolation_required` | 409 | A second machine registers while no gateway binds certificates to queues (D28). |
+| `machine_mismatch`, `machine_conflict` | 409 | A worker registers a `machine_id` other than the one it is bound to; or registers one that another worker already holds. |
 | `checksum_mismatch`, `payload_too_large` | 422, 413 | Upload checks. |
 | `guard_conflict` | 409 | A draft record, regulation version or `permission` record conflicts with the list of guards in "Order of authority" ([governance.md](governance.md)); refused also for the owner. |
 | `right_invalid` | 422 | A right (in a role or a `permission` record) that is not a valid structure: action, target and conditions against the schema, or free text. |

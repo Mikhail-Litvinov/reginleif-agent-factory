@@ -49,12 +49,22 @@ export const taskRepo = (db: PostgresJsDatabase<any>) => ({
 	create: async (input: TaskCreateInput, initialRevision: InitialRevision): Promise<Task> => db.transaction(async (tx) => {
 		const task = (await tx.insert(tasks).values({
 			...input, status: "CREATED", currentRevision: 1, workflowId: ["task", input.id].join("-"), depth: 0,
+			originType: "owner", pauseRequested: false, stopping: false, endUnconfirmed: false,
 		}).returning())[0]!;
 		await tx.insert(taskRevisions).values({ ...initialRevision, taskId: task.id, revisionNumber: 1, changeReason: "initial", authorId: input.createdBy ?? null });
 		return task;
 	}),
-	get: async (id: string, { includeDeleted = false }: { includeDeleted?: boolean } = {}): Promise<Task | undefined> =>
-		(await db.select().from(tasks).where(and(eq(tasks.id, id), ...(includeDeleted ? [] : [isNull(tasks.deletedAt)]))).limit(1))[0],
+	createStanding: async (input: { id: string; projectId: string; createdBy: string; revisionId: string }): Promise<void> => db.transaction(async tx => {
+		await tx.insert(tasks).values({ id: input.id, projectId: input.projectId, createdBy: input.createdBy,
+			title: "Standing task", description: "", priority: 0, status: "RUNNING", currentRevision: 1,
+			workflowId: `task-${input.id}`, depth: 0, originType: "standing", pauseRequested: false, stopping: false, endUnconfirmed: false });
+		await tx.insert(taskRevisions).values({ id: input.revisionId, taskId: input.id, revisionNumber: 1,
+			requirements: "", acceptanceCriteria: [], constraints: {}, changeReason: "initial", authorId: input.createdBy });
+	}),
+	get: async (id: string, { includeDeleted = false, lock = false }: { includeDeleted?: boolean; lock?: boolean } = {}): Promise<Task | undefined> => {
+		const query = db.select().from(tasks).where(and(eq(tasks.id, id), ...(includeDeleted ? [] : [isNull(tasks.deletedAt)]))).limit(1);
+		return (await (lock ? query.for("no key update") : query))[0];
+	},
 	cleanupItems: async (taskId: string): Promise<{ kind: "log" | "artifact" | "execution_folder" | "worktree"; ref: string; size: number | null }[]> => {
 		const artifacts = await db.select({ id: taskArtifacts.id, type: taskArtifacts.artifactType, size: taskArtifacts.size }).from(taskArtifacts).where(and(eq(taskArtifacts.taskId, taskId), isNull(taskArtifacts.removedAt)));
 		const runs = await db.select({ id: taskRuns.id, executionId: taskRuns.executionId }).from(taskRuns).where(eq(taskRuns.taskId, taskId));
@@ -67,11 +77,11 @@ export const taskRepo = (db: PostgresJsDatabase<any>) => ({
 	},
 	list: async ({
 		includeDeleted = false, projectId, status, priorityGte, agentId, parentId, createdAfter, createdBefore, updatedAfter,
-		awaitingApproval, q, sort = "created_at", direction = "desc",
+		awaitingApproval, q, originType, sort = "created_at", direction = "desc",
 	}: {
 		includeDeleted?: boolean; projectId?: string; status?: TaskState | readonly TaskState[]; priorityGte?: number;
 		agentId?: string; parentId?: string; createdAfter?: Date; createdBefore?: Date; updatedAfter?: Date;
-		awaitingApproval?: boolean; q?: string; sort?: TaskSort; direction?: "asc" | "desc";
+		awaitingApproval?: boolean; q?: string; originType?: string; sort?: TaskSort; direction?: "asc" | "desc";
 	} = {}): Promise<Task[]> => {
 		const conditions: SQL[] = [];
 		if (!includeDeleted) conditions.push(isNull(tasks.deletedAt));
@@ -85,13 +95,15 @@ export const taskRepo = (db: PostgresJsDatabase<any>) => ({
 		if (updatedAfter !== undefined) conditions.push(gte(tasks.updatedAt, updatedAfter));
 		if (awaitingApproval === true) conditions.push(eq(tasks.status, "AWAITING_APPROVAL"));
 		if (q !== undefined) conditions.push(sql`strpos(lower(coalesce(${tasks.title}, '')), lower(${q}::text)) > 0`);
+		if (originType !== undefined) conditions.push(eq(tasks.originType, originType));
 		const orderColumn = sort === "updated_at" ? tasks.updatedAt : sort === "priority" ? tasks.priority : tasks.createdAt;
 		return db.select().from(tasks).where(and(...conditions)).orderBy(direction === "asc" ? asc(orderColumn) : desc(orderColumn));
 	},
 	transition: async (id: string, expectedVersion: bigint, to: TaskState, patch: TransitionPatch = {}): Promise<Task | null> => {
 		const current = await db.select().from(tasks).where(and(eq(tasks.id, id), eq(tasks.rowVersion, expectedVersion), isNull(tasks.deletedAt))).limit(1);
 		if (!current[0]) return null;
-		if (!TransitionGuard.allows(current[0].status as TaskState, to, (current[0].blockKind ?? undefined) as BlockKind | undefined)) throw new TransitionRefusedError("illegal task transition");
+		const handoff = current[0].status === "BLOCKED" && to === "BLOCKED" && current[0].blockHandler === "chief_engineer" && patch.blockHandler === "owner";
+		if (!handoff && !TransitionGuard.allows(current[0].status as TaskState, to, (current[0].blockKind ?? undefined) as BlockKind | undefined)) throw new TransitionRefusedError("illegal task transition");
 		const clearBlock = current[0].status === "BLOCKED" && to !== "BLOCKED" ? { blockKind: null, blockHandler: null } : {};
 		const clearPause = current[0].status === "PAUSED" && to !== "PAUSED" ? { resumeTo: null } : {};
 		return refusing((reason) => new TransitionRefusedError(reason), async () =>
