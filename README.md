@@ -44,6 +44,7 @@ A feature is a set of rules, hooks, plugins and programs under one name. The fea
 | `volunteers` | off | Windows only | Delegating routine work to volunteer models. Allowed folders are listed in `~/.agent-rig/volunteer-projects.json`: `{"allowed": ["<folder>"]}`. Which claude-swap accounts may use volunteers is set under the `volunteers` key of `~/.agent-rig/account-allowlist.json` (`{"codex": [1, 4], "volunteers": [1, 4]}`); a missing file or key means no restriction. |
 | `pwsh` | off | Windows only | PowerShell command in the Telegram hub (needs `telegram`). |
 | `cmd` | off | Windows only | Command Prompt command in the Telegram hub (needs `telegram`). |
+| `factory` | off | Linux, Windows, macOS | Delivers the active Factory regulation to Claude sessions and keeps in-progress sessions current. |
 
 Default values apply only at the first install. New features that appear in updates stay off until you turn them on.
 

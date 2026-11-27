@@ -111,5 +111,6 @@
 | Hook | `SessionStart` | factory | — | all | `factory` on | — | `bun` | `{{CLONE}}/features/factory/hooks/regulation.ts SessionStart` | 10 | `Loading active Factory regulation` | — |
 | Hook | `UserPromptSubmit` | factory | — | all | `factory` on | — | `bun` | `{{CLONE}}/features/factory/hooks/regulation.ts UserPromptSubmit` | 10 | `Checking for Factory regulation changes` | — |
 | Hook | `PreToolUse` | factory | — | all | `factory` on | — | `bun` | `{{CLONE}}/features/factory/hooks/regulation.ts PreToolUse` | 10 | `Checking for Factory regulation changes` | — |
+| Hook | `PreToolUse` | factory | — | all | `factory` on | — | `bun` | `{{CLONE}}/features/factory/hooks/permission.ts` | 60 | `Checking the Factory rights` | — |
 
 Hook commands run from the clone. In a hook `command`, `{{PYTHON}}`, `{{BASH}}` and `rtk` become absolute paths at apply time (Git Bash on Windows). Elsewhere `{{PYTHON}}` is `python3` on Linux and `python` on Windows. Rule and hook paths use `{{CLONE}}` when rig needs an absolute path.

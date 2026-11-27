@@ -80,6 +80,18 @@ and the import work before Temporal exists ([governance.md](governance.md)).
 | raf-hub (separate repository): gate command, poll registration, buttons | The hub's own question hook runs the gate command first, registers the poll (a failure or the timeout sends it unregistered), and only then sends it (hooks run in parallel, so a separate hook cannot go first); the generic button mechanism with per-client keys (D5) for confirming drafts; for the polls of ordinary sessions the hub is the arbiter: it takes the answer requests the API stored (each with its idempotency key, retried until the hub confirms), refuses a late one itself, and reports the result through the hub token's result route; a catch-up at start reads the requests and Factory results it missed, so Telegram works with the API down; generic, off by default | gate command |
 | `F/telegram/client.ts`, `F/telegram/relay-role.ts` | The part the registry needs before Temporal: relay token, mapping of a Telegram user to an owner, polls, presses, the list of drafts with buttons; idempotent send, button ids, replay refusal | contracts, api |
 
+Environment of the Rig `factory` hooks (the owner enables the feature at the PC; it is off by default):
+
+| Variable | Used by | Meaning |
+|---|---|---|
+| `AF_API_URL` | both hooks | Base URL of the Factory API (http or https). |
+| `AF_READER_TOKEN` | `regulation.ts` | Reader token for the regulation. |
+| `AF_PROJECT_ID` | `regulation.ts` | Optional project whose clauses apply. |
+| `AF_REGISTRY_TOKEN` | `permission.ts` | The `registry` token bound to the session (or run). |
+| `AF_TASK_RUN_ID` | `permission.ts` | Set only for a Factory run (`claude -p`): the check is made for this run, and with no usable answer the hook denies, because such a run has no prompt. |
+
+The permission hook asks `POST /rights/check` for each tool call (`action` `tool`, `target` the tool name, `conditions.tool_input`); with `none` it sends `POST /rights/requests` and polls `GET /rights/requests/{id}` until the answer. It fails safe: Factory not configured, unreachable, registry off (503) or a malformed answer never allows. An ordinary session gets `ask` and one line on stderr; a Factory run gets `deny`.
+
 Boundary interfaces (names and purpose): `RouteTable` (contracts to api, client, openapi); `Repo` (api and control to
 database); `DecisionService` (record, confirm, enqueue, one transaction); `TransitionGuard` (state table in code and
 in the database, same source, tested for equality); `SettingsReader` (named settings, snapshot per task run);
