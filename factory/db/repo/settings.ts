@@ -1,6 +1,7 @@
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import type { PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import { settings } from "../schema/settings.ts";
+import { StaleVersionError } from "./errors.ts";
 
 type SettingInsert = typeof settings.$inferInsert;
 type Setting = typeof settings.$inferSelect;
@@ -11,12 +12,19 @@ export const settingsRepo = (db: PostgresJsDatabase<any>) => ({
 		const rows = await db.select().from(settings).where(inArray(settings.key, [...keys]));
 		return Object.fromEntries(rows.map(({ key, value }) => [key, value]));
 	},
-	set: async (key: string, value: unknown, updatedBy: string | null, expectedVersion?: bigint): Promise<Setting | null> => {
+	// Without a version the write is an upsert; with one it is a compare-and-set. Either the row is written
+	// and returned, or StaleVersionError says the row is not at that version (changed or absent).
+	set: async (key: string, value: unknown, updatedBy: string | null, expectedVersion?: bigint): Promise<Setting> => {
 		if (expectedVersion === undefined) {
 			const inserted: SettingInsert = { key, value, updatedBy };
-			return (await db.insert(settings).values(inserted).onConflictDoNothing({ target: settings.key }).returning())[0] ?? null;
+			return (await db.insert(settings).values(inserted).onConflictDoUpdate({
+				target: settings.key,
+				set: { value, updatedBy, updatedAt: new Date(), rowVersion: sql`${settings.rowVersion} + 1` },
+			}).returning())[0]!;
 		}
-		return (await db.update(settings).set({ value, updatedBy, updatedAt: new Date(), rowVersion: expectedVersion + 1n }).where(and(eq(settings.key, key), eq(settings.rowVersion, expectedVersion))).returning())[0] ?? null;
+		const updated = (await db.update(settings).set({ value, updatedBy, updatedAt: new Date(), rowVersion: expectedVersion + 1n }).where(and(eq(settings.key, key), eq(settings.rowVersion, expectedVersion))).returning())[0];
+		if (!updated) throw new StaleVersionError(["setting", key].join(" "), expectedVersion);
+		return updated;
 	},
 });
 

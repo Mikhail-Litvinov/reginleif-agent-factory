@@ -1,32 +1,30 @@
 import assert from "node:assert/strict";
 import { after, before, it } from "node:test";
-import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { migrate } from "../db/migrate.ts";
 import { createRepo } from "../db/repo/index.ts";
-import { settings } from "../db/schema/settings.ts";
 import { createRegistrySearch } from "../registry/search.ts";
 import { connectBench, databaseBench } from "./database-bench.ts";
 
 const bench = databaseBench(import.meta.url);
 let client: ReturnType<typeof postgres>;
 let repo: ReturnType<typeof createRepo>;
-// settings.set without a row version only inserts a missing key; changing an existing key needs its current rowVersion.
 let setting: (key: string, value: unknown) => Promise<void>;
 const id = (n: number) => `00000000-0000-7000-8000-${String(n).padStart(12, "0")}`;
 const vector = Array.from({ length: 1024 }, (_, i) => i === 0 ? 1 : 0);
+// Russian test data is written as escapes (sources stay free of Cyrillic): record 1 is "green lighthouse lights the harbour".
+const greenLighthouse = "\u0417\u0435\u043b\u0451\u043d\u044b\u0439 \u043c\u0430\u044f\u043a \u043e\u0441\u0432\u0435\u0449\u0430\u0435\u0442 \u0433\u0430\u0432\u0430\u043d\u044c";
+const lighthouse = "\u043c\u0430\u044f\u043a";
 before(async () => {
 	const b = await bench;
 	await migrate({ url: b.migratorUrl });
 	client = connectBench(b.migratorUrl);
-	const db = drizzle(client);
-	repo = createRepo(db);
+	repo = createRepo(drizzle(client));
 	setting = async (key, value) => {
-		const [row] = await db.select().from(settings).where(eq(settings.key, key));
-		assert.ok(await repo.settings.set(key, value, null, row?.rowVersion), `setting ${key} saved`);
+		assert.ok(await repo.settings.set(key, value, null), `setting ${key} saved`);
 	};
-	for (const [n, problem, category] of [[1, "Зелёный маяк освещает гавань", "sea"], [2, "Amber lantern illuminates harbor", "sea"], [3, "Amber lantern illuminates harbor", "land"]] as const) {
+	for (const [n, problem, category] of [[1, greenLighthouse, "sea"], [2, "Amber lantern illuminates harbor", "sea"], [3, "Amber lantern illuminates harbor", "land"]] as const) {
 		await repo.registry.records.create({ id: id(n), kind: "decision", authority: "owner", status: "draft", scopeType: "global", category, problem, decision: problem, reuse: "standing", source: "import", createdBy: {} });
 		await repo.registry.records.changeStatus(id(n), "active", new Date(), {});
 	}
@@ -37,7 +35,7 @@ after(async () => { await client?.end(); });
 
 it("searches both languages, typos, vectors, filters and live thresholds", async () => {
 	const text = createRegistrySearch(repo, () => undefined);
-	const ru = await text({ query: "маяк", category: "sea" });
+	const ru = await text({ query: lighthouse, category: "sea" });
 	assert.equal(ru.degraded, true);
 	assert.ok(ru.items.some(x => x.record.id === id(1) && x.ranking === "fulltext"));
 	const en = await text({ query: "amber lantern", category: "sea" });

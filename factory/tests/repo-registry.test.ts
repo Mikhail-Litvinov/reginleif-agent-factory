@@ -110,6 +110,13 @@ describe("registry repositories", () => {
 		assert.equal((await repo.registry.records.searchTrigram({ query: "tungsten registry phrase", limit: 5, threshold: trigram[0]!.score })).length >= 1, true);
 	});
 
+	it("scores trigram similarity over problem, decision and summary as one passage, as measured", async () => {
+		const created = await repo.registry.records.create({ ...record(40, "alpha granite", "bravo basalt"), summary: "charlie quartz" });
+		const hits = await repo.registry.records.searchTrigram({ query: "alpha granite bravo basalt charlie quartz", limit: 5, threshold: 0.9 });
+		assert.deepEqual(hits.map((hit) => hit.record.id), [created.id]);
+		assert.ok(hits[0]!.score > 0.99);
+	});
+
 	it("creates inquiry results and records a verdict once", async () => {
 		const inquiry = await repo.registry.inquiries.create({ id: id(14), problem: "problem", category: "general", reuseIntent: "standing" });
 		const found = await repo.registry.records.create(record(15, "result", "result"));

@@ -4,6 +4,18 @@
 
 const RAISE_EXCEPTION = "P0001";
 
+// A versioned write found no row at the version the caller read: the row changed, or never existed.
+export class StaleVersionError extends Error {
+	readonly subject: string;
+	readonly expectedVersion: bigint;
+	constructor(subject: string, expectedVersion: bigint) {
+		super([subject, "is not at version", String(expectedVersion)].join(" "));
+		this.name = "StaleVersionError";
+		this.subject = subject;
+		this.expectedVersion = expectedVersion;
+	}
+}
+
 export interface DatabaseRefusal { reason: string; sqlstate: string }
 
 const driverError = (error: unknown): { code: string; message: string } | undefined => {

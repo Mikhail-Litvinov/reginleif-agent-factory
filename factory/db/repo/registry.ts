@@ -109,8 +109,10 @@ export const registryRepo = (db: PostgresJsDatabase<any>) => ({
 				.orderBy(desc(score), asc(registryRecords.id)).limit(input.limit);
 		},
 		searchTrigram: async (input: SearchInput): Promise<SearchHit[]> => {
-			const score = sql<number>`greatest(similarity(coalesce(${registryRecords.problem}, ''), ${input.query}), similarity(coalesce(${registryRecords.decision}, ''), ${input.query}))`;
-			const matchedFields = sql<string[]>`array_remove(ARRAY[CASE WHEN similarity(coalesce(${registryRecords.problem}, ''), ${input.query}) >= ${input.threshold} THEN 'problem' END, CASE WHEN similarity(coalesce(${registryRecords.decision}, ''), ${input.query}) >= ${input.threshold} THEN 'decision' END], NULL)`;
+			// The same passage the threshold was measured on (docs/reports/registry-search-measurement.md, trigram row):
+			// similarity over problem, decision and summary joined by a space. matchedFields lists the fields sharing a trigram with the query.
+			const score = sql<number>`similarity(concat_ws(' ', ${registryRecords.problem}, ${registryRecords.decision}, ${registryRecords.summary}), ${input.query})`;
+			const matchedFields = sql<string[]>`array_remove(ARRAY[CASE WHEN similarity(coalesce(${registryRecords.problem}, ''), ${input.query}) > 0 THEN 'problem' END, CASE WHEN similarity(coalesce(${registryRecords.decision}, ''), ${input.query}) > 0 THEN 'decision' END, CASE WHEN similarity(coalesce(${registryRecords.summary}, ''), ${input.query}) > 0 THEN 'summary' END], NULL)`;
 			return db.select({ record: registryRecords, score, matchedFields }).from(registryRecords)
 				.where(and(...recordFilters(input), gte(score, input.threshold)))
 				.orderBy(desc(score), asc(registryRecords.id)).limit(input.limit);

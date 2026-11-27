@@ -6,6 +6,7 @@ import { after, before, describe, it } from "node:test";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { migrate } from "../db/migrate.ts";
+import { StaleVersionError } from "../db/repo/errors.ts";
 import { createRepo } from "../db/repo/index.ts";
 import { owners } from "../db/schema/owners.ts";
 import { connectBench, databaseBench } from "./database-bench.ts";
@@ -65,8 +66,19 @@ describe("migration 0001 repositories", () => {
 		const snapshot = await repo.settings.snapshot(["repo.setting", "repo.missing"]);
 		assert.deepEqual(snapshot, { "repo.setting": { value: 1 } });
 		assert.equal((await repo.settings.set("repo.setting", { value: 2 }, id(1), 1n))?.rowVersion, 2n);
-		assert.equal(await repo.settings.set("repo.setting", { value: 3 }, id(1), 1n), null);
+		await assert.rejects(repo.settings.set("repo.setting", { value: 3 }, id(1), 1n), StaleVersionError);
 		assert.deepEqual(snapshot, { "repo.setting": { value: 1 } });
+		assert.deepEqual(await repo.settings.snapshot(["repo.setting"]), { "repo.setting": { value: 2 } });
+	});
+
+	it("a settings write either takes effect or reports why it did not", async () => {
+		const first = await repo.settings.set("repo.upsert", { value: 1 }, id(1));
+		assert.equal(first.rowVersion, 1n);
+		const second = await repo.settings.set("repo.upsert", { value: 2 }, id(1));
+		assert.equal(second.rowVersion, 2n);
+		assert.deepEqual(await repo.settings.snapshot(["repo.upsert"]), { "repo.upsert": { value: 2 } });
+		await assert.rejects(repo.settings.set("repo.never-created", { value: 1 }, id(1), 1n), StaleVersionError);
+		assert.deepEqual(await repo.settings.snapshot(["repo.never-created"]), {});
 	});
 
 	it("reads and appends immutable policy versions and routing rules", async () => {
