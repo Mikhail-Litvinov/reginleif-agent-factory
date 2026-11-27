@@ -1,0 +1,57 @@
+{
+  "name": "factory",
+  "description": "Delivers the active Factory regulation to Claude sessions and keeps in-progress sessions current.",
+  "enabledByDefault": false,
+  "platforms": [
+    "linux",
+    "windows",
+    "darwin"
+  ],
+  "dependencies": [],
+  "rules": [],
+  "hooks": [
+    {
+      "event": "SessionStart",
+      "matcher": "",
+      "command": "bun",
+      "args": [
+        "{{CLONE}}/features/factory/hooks/regulation.ts",
+        "SessionStart"
+      ],
+      "timeout": 10,
+      "statusMessage": "Loading active Factory regulation"
+    },
+    {
+      "event": "UserPromptSubmit",
+      "matcher": "",
+      "command": "bun",
+      "args": [
+        "{{CLONE}}/features/factory/hooks/regulation.ts",
+        "UserPromptSubmit"
+      ],
+      "timeout": 10,
+      "statusMessage": "Checking for Factory regulation changes"
+    },
+    {
+      "event": "PreToolUse",
+      "matcher": "",
+      "command": "bun",
+      "args": [
+        "{{CLONE}}/features/factory/hooks/regulation.ts",
+        "PreToolUse"
+      ],
+      "timeout": 10,
+      "statusMessage": "Checking for Factory regulation changes"
+    }
+  ],
+  "settings": [],
+  "plugins": [],
+  "files": [
+    "hooks/regulation.ts"
+  ],
+  "assets": [],
+  "agents": [],
+  "skills": [],
+  "hubCommands": [],
+  "programs": []
+}
