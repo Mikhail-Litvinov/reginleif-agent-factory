@@ -10,9 +10,9 @@ it("passes filters and settings to each ranking and merges without comparing unl
 	const repo = {
 		settings: { snapshot: async () => values },
 		registry: { records: {
-			searchFullText: async (x: any) => { calls.push(x); return x.language === "ru" ? [hit("text", 0.03)] : [hit("text", 0.04)]; },
-			searchTrigram: async (x: any) => { calls.push(x); return [hit("text", 0.9), hit("typo", 0.2)]; },
-		}, embeddings: { searchVector: async (x: any) => { calls.push(x); return [hit("vector", 0.5)]; } } },
+			searchFullText: async (x: any) => { calls.push(x); return (x.language === "ru" ? [hit("text", 0.03)] : [hit("text", 0.04)]).filter(h => h.score >= x.threshold); },
+			searchTrigram: async (x: any) => { calls.push(x); return [hit("text", 0.9), hit("typo", 0.2)].filter(h => h.score >= x.threshold); },
+		}, embeddings: { searchVector: async (x: any) => { calls.push(x); return [hit("vector", 0.5)].filter(h => h.score >= x.threshold); } } },
 	} as unknown as Pick<Repo, "settings" | "registry">;
 	const search = createRegistrySearch(repo, async () => [1, 0]);
 	const result = await search({ query: "query", projectId: "project", category: "general", limit: 3 });
@@ -23,9 +23,11 @@ it("passes filters and settings to each ranking and merges without comparing unl
 	assert.deepEqual(calls[3].embedding, [1, 0]);
 	values["registry.vectorThreshold"] = 0.8;
 	values["registry.embeddingModel"] = "new-model";
-	await search({ query: "query" });
+	const dropped = await search({ query: "query" });
 	assert.equal(calls[7].threshold, 0.8);
 	assert.equal(calls[7].modelVersion, "new-model");
+	assert.ok(result.items.some(x => x.record.id === "vector"), "vector 0.5 is kept at the default 0.47");
+	assert.ok(!dropped.items.some(x => x.record.id === "vector"), "vector 0.5 is dropped at 0.8");
 });
 
 it("marks unavailable embeddings degraded and omits the vector call", async () => {
