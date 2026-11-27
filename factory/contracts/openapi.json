@@ -16720,6 +16720,7 @@
           "409": {
             "description": "Error",
             "x-error-codes": [
+              "token_already_issued",
               "idempotency_conflict",
               "idempotency_in_progress"
             ],
@@ -17048,6 +17049,7 @@
           "409": {
             "description": "Error",
             "x-error-codes": [
+              "token_already_issued",
               "idempotency_conflict",
               "idempotency_in_progress"
             ],
