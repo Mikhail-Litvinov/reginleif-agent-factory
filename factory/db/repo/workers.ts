@@ -15,10 +15,12 @@ export const workerRepo = (db: PostgresJsDatabase<any>) => ({
 		return db.select().from(workers).where(and(...conditions)).orderBy(workers.name);
 	},
 	get: async (id: string): Promise<Worker | undefined> => (await db.select().from(workers).where(eq(workers.id, id)).limit(1))[0],
-	register: async (input: RegisterWorker): Promise<Worker> => (await db.insert(workers).values({ ...input, lastSeenAt: new Date() }).onConflictDoUpdate({
-		target: workers.machineId,
-		set: { name: input.name, platform: input.platform, capabilities: input.capabilities, version: input.version, contractVersion: input.contractVersion, status: input.status, concurrencyLimit: input.concurrencyLimit, lastSeenAt: new Date(), updatedAt: new Date(), rowVersion: sql`${workers.rowVersion} + 1` },
-	}).returning())[0]!,
+	// Registration updates the worker row the token was issued for and binds it to its machine. It never inserts a row (the
+		// old upsert by machine_id could leave one machine with two rows). Null when no worker has that id.
+		register: async (input: RegisterWorker): Promise<Worker | null> => (await db.update(workers).set({
+			machineId: input.machineId,
+			name: input.name, platform: input.platform, capabilities: input.capabilities, version: input.version, contractVersion: input.contractVersion, status: input.status, concurrencyLimit: input.concurrencyLimit, lastSeenAt: new Date(), updatedAt: new Date(), rowVersion: sql`${workers.rowVersion} + 1`,
+		}).where(eq(workers.id, input.id)).returning())[0] ?? null,
 	heartbeat: async (id: string, capabilities?: unknown, now = new Date()): Promise<Worker | null> =>
 		(await db.update(workers).set({ ...(capabilities === undefined ? {} : { capabilities }), lastSeenAt: now, updatedAt: now, rowVersion: sql`${workers.rowVersion} + 1` }).where(eq(workers.id, id)).returning())[0] ?? null,
 	update: async (id: string, expectedVersion: bigint, patch: WorkerPatch): Promise<Worker | null> =>

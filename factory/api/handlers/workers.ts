@@ -28,23 +28,30 @@ export function registerWorkerHandlers(api: HandlerRegistrar, { repo, now = () =
   });
   api.register('POST', '/workers/register', async context => {
     const input = context.body as { machine_id: string; name: string; platform: string; capabilities: unknown; version: string; contract_version: number };
+    const ownId = context.identity?.workerId;
+    if (!ownId) return response(403, { code: 'forbidden' });
+    // Registration updates the worker the token was issued for (never inserts), so one machine cannot get two rows.
     const known = await repo.workers.list();
-    const existing = known.find(worker => worker.machineId === input.machine_id);
+    const own = known.find(worker => worker.id === ownId);
+    if (!own) return response(404, { code: 'not_found' });
+    if (own.machineId !== null && own.machineId !== input.machine_id) return response(409, { code: 'machine_mismatch' });
+    if (known.some(worker => worker.id !== ownId && worker.machineId === input.machine_id)) return response(409, { code: 'machine_conflict' });
     // api.md:149, :676 and security.md:72 (T26): one machine only; a second one is refused with
     // 409 queue_isolation_required until the deployment declares the queue gateway (D28). Registering
-    // an already known machine again is safe (api.md:149), so only a new machine is refused.
-    const firstMachine = !known.some(worker => worker.machineId !== null);
-    if (!existing && !firstMachine && !queueGatewayEnabled) return response(409, { code: 'queue_isolation_required' });
+    // an already bound machine again is safe (api.md:149), so only a new machine binding is refused.
+    const firstMachine = !known.some(worker => worker.id !== ownId && worker.machineId !== null);
+    if (own.machineId === null && !firstMachine && !queueGatewayEnabled) return response(409, { code: 'queue_isolation_required' });
     const worker = await repo.transaction(async tx => {
       const registered = await tx.workers.register({
-      id: existing?.id ?? id(), machineId: input.machine_id,
-      name: input.name, platform: input.platform, capabilities: input.capabilities, version: input.version,
-        // New workers default to one slot until an owner sets the documented concurrency limit.
-        contractVersion: input.contract_version, status: 'online', concurrencyLimit: existing?.concurrencyLimit ?? 1,
+        id: ownId, machineId: input.machine_id,
+        name: input.name, platform: input.platform, capabilities: input.capabilities, version: input.version,
+        contractVersion: input.contract_version, status: 'online', concurrencyLimit: own.concurrencyLimit,
       });
+      if (!registered) return null;
       await writeAudit(tx, context, 'worker.register', 'worker', registered.id, 'ok', { machine_id: input.machine_id });
       return registered;
     });
+    if (!worker) return response(404, { code: 'not_found' });
     return response(200, { worker_id: worker.id, contract_range: { min: String(worker.contractVersion), max: String(worker.contractVersion) } });
   });
   api.register('POST', '/workers/{id}/heartbeat', async context => {

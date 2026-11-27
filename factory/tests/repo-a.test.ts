@@ -50,13 +50,16 @@ describe("migration 0001 repositories", () => {
 
 	it("registers workers idempotently and applies optimistic updates", async () => {
 		const input = { id: id(3), machineId: "machine-a", name: "worker", platform: "linux", capabilities: {}, version: "1", contractVersion: 1, status: "online", concurrencyLimit: 2 };
-		const first = await repo.workers.register(input);
-		const second = await repo.workers.register({ ...input, name: "worker-renamed" });
+		// Registration updates the worker row the token was issued for; it never inserts one.
+		assert.equal(await repo.workers.register(input), null);
+		await client`INSERT INTO workers (id, name, platform, status, concurrency_limit) VALUES (${input.id}, 'worker', 'linux', 'online', 2)`;
+		const first = (await repo.workers.register(input))!;
+		const second = (await repo.workers.register({ ...input, name: "worker-renamed" }))!;
 		assert.equal(first.id, second.id);
 		assert.equal(second.name, "worker-renamed");
 		assert.equal((await repo.workers.get(first.id))?.machineId, "machine-a");
 		assert.equal((await repo.workers.list({ status: "online", platform: "linux" })).length, 1);
-		assert.equal(second.rowVersion, 2n);
+		assert.equal(second.rowVersion, first.rowVersion + 1n);
 		assert.equal((await repo.workers.update(first.id, second.rowVersion, { status: "disabled" }))?.status, "disabled");
 		assert.equal(await repo.workers.update(first.id, second.rowVersion, { status: "online" }), null);
 	});

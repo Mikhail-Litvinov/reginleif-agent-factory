@@ -221,18 +221,37 @@ test('second-machine-refused: a second machine needs the queue gateway; never a 
   const again = await call(off, 'POST', '/workers/register', worker, { body: machine('machine-a') });
   assert.equal(again.status, 200);
   assert.equal(again.json.worker_id, first.json.worker_id);
-  const second = await call(off, 'POST', '/workers/register', worker, { body: machine('machine-b') });
-  assert.equal(second.status, 409);
-  assert.equal(second.json.code, 'queue_isolation_required');
+  // Registration updates the worker the token was issued for and binds it to its machine; it never adds a row.
+  assert.equal(first.json.worker_id, workerId);
+  assert.equal((await client`SELECT count(*)::int AS n FROM workers`)[0]!.n, 1);
+  assert.equal((await client`SELECT machine_id FROM workers WHERE id = ${workerId}`)[0]!.machine_id, 'machine-a');
+  // A token stays bound to its one machine.
+  const rebound = await call(off, 'POST', '/workers/register', worker, { body: machine('machine-b') });
+  assert.equal(rebound.status, 409);
+  assert.equal(rebound.json.code, 'machine_mismatch');
+  assert.equal((await client`SELECT count(*)::int AS n FROM workers`)[0]!.n, 1);
+  // A second worker token: its own row, never a second row for a machine another worker holds.
+  const secondId = randomUUID();
+  await client`INSERT INTO workers (id, name, platform, status, concurrency_limit) VALUES (${secondId}, 'second', 'linux', 'online', 1)`;
+  const second = await credential('worker', { workerId: secondId });
+  const taken = await call(on, 'POST', '/workers/register', second, { body: machine('machine-a') });
+  assert.equal(taken.status, 409);
+  assert.equal(taken.json.code, 'machine_conflict');
+  const refused = await call(off, 'POST', '/workers/register', second, { body: machine('machine-b') });
+  assert.equal(refused.status, 409);
+  assert.equal(refused.json.code, 'queue_isolation_required');
   assert.equal((await client`SELECT count(*)::int AS n FROM workers WHERE machine_id = 'machine-b'`)[0]!.n, 0);
-  const allowed = await call(on, 'POST', '/workers/register', worker, { body: machine('machine-b') });
+  const allowed = await call(on, 'POST', '/workers/register', second, { body: machine('machine-b') });
   assert.equal(allowed.status, 200);
-  assert.notEqual(allowed.json.worker_id, first.json.worker_id);
-  assert.equal((await client`SELECT count(*)::int AS n FROM audit_log WHERE action = 'worker.register'`)[0]!.n, 3);
+  assert.equal(allowed.json.worker_id, secondId);
+  assert.equal((await call(on, 'POST', '/workers/register', second, { body: machine('machine-b') })).json.worker_id, secondId);
+  assert.equal((await client`SELECT count(*)::int AS n FROM workers`)[0]!.n, 2);
+  assert.equal((await client`SELECT machine_id FROM workers WHERE id = ${secondId}`)[0]!.machine_id, 'machine-b');
+  assert.equal((await client`SELECT count(*)::int AS n FROM audit_log WHERE action = 'worker.register'`)[0]!.n, 4);
 });
 
 test('heartbeat is for the worker own id only and is audited', async () => {
-  const other = (await client`SELECT id FROM workers WHERE machine_id = 'machine-a'`)[0]!.id as string;
+  const other = (await client`SELECT id FROM workers WHERE machine_id = 'machine-b'`)[0]!.id as string;
   const own = await call(off, 'POST', `/workers/${workerId}/heartbeat`, worker, { body: { run_ids: [] } });
   assert.equal(own.status, 200);
   assert.ok(own.json.server_time);
@@ -384,10 +403,60 @@ test('project policy can be written by an owner and read back', async () => {
     max_child_depth: null, max_children_per_task: null, max_cost: null, currency: null, auto_accept_low_risk: false,
   };
   assert.equal((await call(off, 'GET', `/projects/${projectId}/policy`, reader)).status, 404);
-  const put = await call(off, 'PUT', `/projects/${projectId}/policy`, owner, { body, headers: { 'if-match': '"1"' } });
+  // If-Match is the version being replaced: a project without a policy has version 0.
+  assert.equal((await call(off, 'PUT', `/projects/${projectId}/policy`, owner, { body })).status, 422);
+  const wrong = await call(off, 'PUT', `/projects/${projectId}/policy`, owner, { body, headers: { 'if-match': '"1"' } });
+  assert.equal(wrong.status, 409);
+  assert.equal(wrong.json.code, 'version_conflict');
+  const put = await call(off, 'PUT', `/projects/${projectId}/policy`, owner, { body, headers: { 'if-match': '"0"' } });
   assert.equal(put.status, 201);
   const read = await call(off, 'GET', `/projects/${projectId}/policy`, reader);
   assert.equal(read.status, 200);
   assert.deepEqual(read.json.allowed_commands, ['npm test']);
-  assert.equal((await call(off, 'PUT', `/projects/${randomUUID()}/policy`, owner, { body, headers: { 'if-match': '"1"' } })).status, 404);
+  assert.equal((await call(off, 'PUT', `/projects/${randomUUID()}/policy`, owner, { body, headers: { 'if-match': '"0"' } })).status, 404);
+});
+
+test('policy loosening needs the second press, a tightening does not, every change is audited', async () => {
+  const path = `/projects/${projectId}/policy`;
+  const current = (await call(off, 'GET', path, reader)).json;
+  const base = {
+    allowed_commands: current.allowed_commands, allowed_directories: current.allowed_directories, allowed_repositories: current.allowed_repositories,
+    git_operations: current.git_operations, confirmation_required: current.confirmation_required, allowed_tools: current.allowed_tools, network: current.network,
+    max_concurrent_tasks: null, max_tasks_per_agent: null, max_run_seconds: null, max_tokens: null, max_auto_fixes: null, max_attempts: null,
+    max_rework_rounds: null, max_child_depth: null, max_children_per_task: null, max_cost: null, currency: null, auto_accept_low_risk: false,
+  };
+  const version = Number(current.version);
+  const count = async (action: string) => (await client`SELECT count(*)::int AS n FROM audit_log WHERE action = ${action} AND target_id = ${projectId}`)[0]!.n as number;
+  const versions = async () => (await client`SELECT count(*)::int AS n FROM execution_policies WHERE project_id = ${projectId}`)[0]!.n as number;
+
+  // Tightening: a limit replaces "unlimited" and an allowed element is removed. No second press.
+  const tight = { ...base, allowed_commands: [], max_tokens: 1000 };
+  const tightened = await call(off, 'PUT', path, owner, { body: tight, headers: { 'if-match': `"${version}"` } });
+  assert.equal(tightened.status, 201);
+  assert.equal(await count('policy.create'), 2);
+  assert.equal(await count('policy.loosen'), 0);
+
+  // Loosening: an added allowed element and a raised limit.
+  const loose = { ...tight, allowed_commands: ['rm -rf build'], max_tokens: 5000 };
+  const header = { 'if-match': `"${version + 1}"` };
+  const before = await versions();
+  const first = await call(off, 'PUT', path, owner, { body: loose, headers: header });
+  assert.equal(first.status, 409);
+  assert.equal(first.json.code, 'confirmation_required');
+  assert.equal(await versions(), before);
+  const confirm = `${first.json.confirmation_id}.${first.json.nonce}`;
+  // The press is bound to the request: another body, another version or another actor do not satisfy it.
+  assert.equal((await call(off, 'PUT', path, owner, { body: { ...loose, max_tokens: 9000 }, headers: { ...header, 'x-confirm': confirm } })).json.code, 'confirmation_invalid');
+  assert.equal(await versions(), before);
+  const second = await call(off, 'PUT', path, owner, { body: loose, headers: { ...header, 'x-confirm': confirm } });
+  assert.equal(second.status, 201);
+  assert.equal(await versions(), before + 1);
+  assert.equal(await count('policy.loosen'), 1);
+  assert.equal(await count('policy.create'), 2);
+  // A used press does not carry over to a new loosening (the repeated same body is no longer a loosening at all).
+  const replay = await call(off, 'PUT', path, owner, { body: { ...loose, max_tokens: 9000 }, headers: { 'if-match': `"${version + 2}"`, 'x-confirm': confirm } });
+  assert.equal(replay.json.code, 'confirmation_invalid');
+  // A stale If-Match is a conflict before any press is asked.
+  const stale409 = await call(off, 'PUT', path, owner, { body: { ...loose, max_tokens: 99999 }, headers: header });
+  assert.equal(stale409.json.code, 'version_conflict');
 });
