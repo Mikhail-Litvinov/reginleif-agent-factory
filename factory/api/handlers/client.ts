@@ -3,6 +3,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
 import { BadCursorError, decodeCursor, encodeCursor, readStreamPage, streamSource, streams, type Stream } from '../cursor.ts';
 import { DecisionProblem, hash, mutationHash, recordDecision, type DecisionKind } from '../decisions.ts';
+import { confirmationHeader, secondPress } from '../second-press.ts';
 import { decisionRequestSchemas } from '../../contracts/schemas/index.ts';
 import * as Q from '../../contracts/schemas/requests.ts';
 import * as R from '../../contracts/schemas/resources.ts';
@@ -100,7 +101,6 @@ async function positiveSettings(repo: Repo, defaults: Record<string, number>) {
 }
 
 // Phase 2 has no seeded values for these API settings. Read overrides for each request.
-const confirmationSeconds = { 'confirm.windowSeconds': 60 };
 const enrollmentSeconds = { 'device.codeTtlSeconds': 300, 'device.sessionTtlSeconds': 2_592_000 };
 const pageDefaults = { 'page.default': 50, 'page.max': 200 };
 const failureDefaults = { 'rate.failedAuth.limit': 10, 'rate.failedAuth.windowSeconds': 60 };
@@ -146,7 +146,7 @@ function page<T extends { id: string; createdAt: Date }>(rows: T[], bounds: { si
 async function keyed(repo: Repo, context: HandlerContext, actorKey: string, effect: (tx: Tx) => Promise<Result>, secret = false): Promise<Result> {
   const key = mutationKey(context);
   const digest = requestHash(context);
-  const confirm = context.request.headers['x-confirm'];
+  const confirm = confirmationHeader(context);
   return repo.transaction(async tx => {
     await tx.decisions.lockKey(actorKey, key);
     if (await tx.decisions.byActorKey(actorKey, key)) throw new DecisionProblem('idempotency_conflict');
@@ -164,29 +164,6 @@ async function keyed(repo: Repo, context: HandlerContext, actorKey: string, effe
     await tx.idempotencyKeys.complete(actorKey, key, result.status, body);
     return result;
   });
-}
-
-async function confirm(tx: Tx, context: HandlerContext, actor: Principal, operation: string, targetId: string, windowSeconds: number): Promise<Result | undefined> {
-  const value = context.request.headers['x-confirm'];
-  const bindings = {
-    actorId: actor.ownerId, channel: actor.deviceSessionId ? 'client' : 'api',
-    deviceSessionId: actor.deviceSessionId, operation, targetType: operation === 'device.create' ? 'owner' : 'system',
-    targetId, requestHash: requestHash(context),
-  };
-  if (value === undefined) {
-    const id = randomUUID();
-    const nonce = randomSecret();
-    const expiresAt = expires(context.now, windowSeconds);
-    await tx.confirmations.create({ id, ...bindings, nonceHash: hash(nonce), issuedAt: context.now, expiresAt });
-    await audit(tx, context, actor, operation, bindings.targetType, targetId, {}, 'needs_confirmation');
-    return { status: 409, body: { code: 'confirmation_required', confirmation_id: id, nonce, expires_at: expiresAt.toISOString() } };
-  }
-  const [id, nonce, extra] = (typeof value === 'string' ? value : '').split('.');
-  if (!uuid.safeParse(id).success || !nonce || extra !== undefined) throw new DecisionProblem('confirmation_invalid');
-  const row = await tx.confirmations.get(id!);
-  const expected = row?.nonceHash;
-  if (!expected || !/^[a-f0-9]{64}$/.test(expected) || !timingSafeEqual(Buffer.from(expected, 'hex'), Buffer.from(hash(nonce), 'hex')) ||
-      !await tx.confirmations.consume({ id: id!, ...bindings, now: context.now })) throw new DecisionProblem('confirmation_invalid');
 }
 
 export async function readClientEvents(repo: Repo, stream: Stream, options: { cursor?: string; limit: number; horizon?: () => Promise<string>; conversationId?: string }) {
@@ -248,11 +225,15 @@ async function events(repo: Repo, context: HandlerContext, options: Options): Pr
 function registerDevices(register: Register, repo: Repo) {
   register('POST', '/devices', async context => {
     const actor = principal(context);
-    const settings = await positiveSettings(repo, { ...confirmationSeconds, ...enrollmentSeconds });
+    const settings = await positiveSettings(repo, enrollmentSeconds);
     const body = context.body as z.infer<typeof Q.DeviceCreate>;
     return keyed(repo, context, actor.ownerId, async tx => {
-      const first = await confirm(tx, context, actor, 'device.create', actor.ownerId, settings['confirm.windowSeconds']!);
-      if (first) return first;
+      const first = await secondPress(tx, context, { actorId: actor.ownerId, channel: 'api', deviceSessionId: null, operation: 'device.create', targetType: 'owner', targetId: actor.ownerId, requestHash: requestHash(context), now: context.now });
+      if (first) {
+        if (first.body.code === 'confirmation_invalid') throw new DecisionProblem('confirmation_invalid');
+        if (first.body.code === 'confirmation_required') await audit(tx, context, actor, 'device.create', 'owner', actor.ownerId, {}, 'needs_confirmation');
+        return first;
+      }
       const code = randomSecret();
       const row = await tx.devices.create({ id: randomUUID(), ownerId: actor.ownerId, ...body, codeHash: hash(code), codeExpiresAt: expires(context.now, settings['device.codeTtlSeconds']!) });
       await audit(tx, context, actor, 'device.create', 'devices', row.id);
@@ -473,12 +454,11 @@ function registerPolls(register: Register, repo: Repo) {
     const key = mutationKey(context);
     const poll = await getPoll(repo, context);
     if (poll.arbiter === 'api') {
-      const settings = await positiveSettings(repo, confirmationSeconds);
       const input = await decisionInput(repo, poll, answerKey);
       const result = await recordDecision(repo, {
         ...input, actorId: actor.ownerId, deviceSessionId: actor.deviceSessionId, channel: actor.deviceSessionId ? 'client' : 'api',
-        idempotencyKey: key, windowSeconds: settings['confirm.windowSeconds']!, now: context.now,
-        confirm: typeof context.request.headers['x-confirm'] === 'string' ? context.request.headers['x-confirm'] : undefined,
+        idempotencyKey: key, now: context.now,
+        confirm: confirmationHeader(context),
         path: `/conversations/${poll.conversationId}/polls/${poll.id}/answer`, poll: { id: poll.id, answerKey },
       });
       return { status: result.status, body: result.body, headers: {
@@ -567,10 +547,13 @@ function registerPolls(register: Register, repo: Repo) {
 async function stopAll(repo: Repo, context: HandlerContext): Promise<Result> {
   for await (const chunk of context.request) if (Buffer.byteLength(chunk) > 0) throw invalid();
   const actor = principal(context);
-  const settings = await positiveSettings(repo, confirmationSeconds);
   return keyed(repo, context, actor.deviceSessionId ?? actor.ownerId, async tx => {
-    const first = await confirm(tx, context, actor, 'stop-all', actor.ownerId, settings['confirm.windowSeconds']!);
-    if (first) return first;
+    const first = await secondPress(tx, context, { actorId: actor.ownerId, channel: actor.deviceSessionId ? 'client' : 'api', deviceSessionId: actor.deviceSessionId, operation: 'stop-all', targetType: 'system', targetId: actor.ownerId, requestHash: requestHash(context), now: context.now });
+    if (first) {
+      if (first.body.code === 'confirmation_invalid') throw new DecisionProblem('confirmation_invalid');
+      if (first.body.code === 'confirmation_required') await audit(tx, context, actor, 'stop-all', 'system', actor.ownerId, {}, 'needs_confirmation');
+      return first;
+    }
     await tx.decisions.lockKey('system', 'stop-all');
     const { live, grants } = await tx.rightsSuspensions.stopTargets();
     const targets = new Map<string, { agentId: string | null; sessionRef?: string | null; taskId?: string | null }>();

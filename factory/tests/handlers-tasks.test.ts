@@ -39,7 +39,8 @@ before(async () => {
   await sql`INSERT INTO agents (id, name, provider) VALUES (${agent}, 'agent', 'claude'), (${reviewer}, 'reviewer', 'codex')`;
   await sql`INSERT INTO execution_policies (id, version, allowed_commands, allowed_directories, allowed_repositories, network,
     git_operations, confirmation_required, allowed_tools, created_by) VALUES (${policy}, 1, '{}', '{}', '{}', '{}', '{}', '{}', '{}', ${owner})`;
-  await sql`INSERT INTO settings ${sql(Object.entries(settings).map(([key, value]) => ({ key, value })), 'key', 'value')}`;
+  // confirm.windowSeconds is already seeded by migration 0008; the bench value replaces it.
+  await sql`INSERT INTO settings ${sql(Object.entries(settings).map(([key, value]) => ({ key, value })), 'key', 'value')} ON CONFLICT (key) DO UPDATE SET value = excluded.value`;
   await sql`INSERT INTO devices (id, owner_id) VALUES (${device}, ${owner})`;
   for (const role of ['owner', 'reader', 'relay', 'worker', 'otherWorker', 'registry', 'hub', 'device'] as const) {
     const prefix = `test-${role}`, secret = randomUUID();

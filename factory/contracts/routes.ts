@@ -26,6 +26,7 @@ export interface Route {
   responses: Readonly<Record<string, Body>>;
   errors: Readonly<Record<number, readonly string[]>>;
   idempotent: boolean;
+  secondPress?: 'always' | 'policy-loosening' | 'forced-cleanup' | 'decision-kind' | 'zone-change' | 'robot-release';
   parameters: readonly { name: string; in: 'query' | 'header'; required?: boolean; repeatable?: boolean; schema?: z.ZodType }[];
 }
 
@@ -283,7 +284,16 @@ const secondPress = new Set([
   'POST /regulation/versions/{id}/revoke', 'POST /personnel/chief-engineer',
   'DELETE /personnel/chief-engineer', 'PUT /personnel/replacement-procedure', 'PUT /personnel/mode',
   'POST /robot-start-confirmations', 'POST /robots/{id}/release',
+  'PATCH /robot-zones/{id}',
+  'POST /tasks/{id}/reject', 'POST /tasks/{id}/cancel', 'POST /tasks/{id}/force-close',
 ]);
+const secondPressCases: Record<string, NonNullable<Route['secondPress']>> = {
+  'PUT /projects/{id}/policy': 'policy-loosening',
+  'POST /tasks/{id}/cleanup': 'forced-cleanup',
+  'POST /conversations/{id}/polls/{poll_id}/answer': 'decision-kind',
+  'PATCH /robot-zones/{id}': 'zone-change',
+  'POST /robots/{id}/release': 'robot-release',
+};
 const lists = new Set(['/projects', '/tasks', '/tasks/{id}/revisions', '/tasks/{id}/runs', '/tasks/{id}/events', '/tasks/{id}/artifacts', '/tasks/{id}/reviews', '/tasks/{id}/decisions', '/agents', '/workers', '/tokens', '/notifications', '/devices', '/devices/{id}/sessions', '/conversations', '/conversations/{id}/messages', '/hub/poll-answers', '/hub/polls', '/registry/search', '/registry/records', '/registry/drafts', '/regulation/versions', '/roles', '/tasks/{id}/participants', '/rights/requests', '/rights/grants', '/rights/suspensions', '/personnel/positions', '/personnel/profiles', '/personnel/assessments', '/personnel/incidents', '/personnel/measures', '/robots', '/robots/{id}/configurations', '/robots/{id}/leases', '/robot-zones', '/unattended-policies', '/robot-skills', '/robots/{id}/maintenance', '/inventory', '/robot-experiments', '/robot-stages', '/system/audit']);
 
 type Shape = { request?: Body; requestOptional?: boolean; responses: Route['responses'] };
@@ -389,6 +399,7 @@ function toRoute(entry: Input): Route {
 
 export const routes: readonly Route[] = [...decisionRoutes, ...entries.map(toRoute)].map((route) => ({
   ...route,
+  ...(secondPress.has(`${route.method} ${route.path}`) ? { secondPress: secondPressCases[`${route.method} ${route.path}`] ?? 'always' } : {}),
   responses: {
     ...route.responses,
     ...Object.fromEntries(Object.entries(route.errors).map(([status, codes]) => {

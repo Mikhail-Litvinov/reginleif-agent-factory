@@ -21,6 +21,7 @@ before(async () => {
   client = connectBench(bench.migratorUrl);
   repo = createRepo(drizzle(client));
   await client`INSERT INTO owners (id, name) VALUES (${owner}, 'decision owner')`;
+  await repo.settings.set('confirm.windowSeconds', 60, owner);
   await client`INSERT INTO tasks (id, depth) VALUES (${task}, 0)`;
 });
 after(async () => { await client?.end(); });

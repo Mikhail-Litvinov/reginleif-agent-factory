@@ -1,8 +1,7 @@
 import type { HandlerDeps, HandlerRegistrar } from './shared.ts';
 import { apiRow, id, response, version, writeAudit } from './shared.ts';
 import { loosenedColumns } from './policy-loosening.ts';
-import { canonicalJson, requestHash, secondPress } from './second-press.ts';
-import { confirmWindowSeconds } from './settings.ts';
+import { canonicalJson, requestHash, secondPress } from '../second-press.ts';
 import { StaleVersionError } from '../../db/repo/errors.ts';
 
 export function registerPolicyHandlers(api: HandlerRegistrar, { repo, now = () => new Date() }: HandlerDeps): void {
@@ -20,16 +19,15 @@ export function registerPolicyHandlers(api: HandlerRegistrar, { repo, now = () =
     if (expected === undefined) return response(422, { code: 'validation_failed' });
     const actorId = identity?.ownerId ?? identity?.id ?? null;
     if (!actorId) return response(403, { code: 'forbidden' });
-    const windowSeconds = await confirmWindowSeconds(repo);
     return repo.transaction(async tx => {
       const effective = await tx.policies.effective(params.id);
       const own = effective && effective.projectId === params.id ? effective : undefined;
       if (BigInt(own?.version ?? 0) !== expected) throw new StaleVersionError(["policy", params.id].join(" "), expected, BigInt(own?.version ?? 0));
       // database.md: a change that loosens a security column or raises a limit takes the second press (D23).
       const loosened = loosenedColumns(effective ? apiRow(effective) : undefined, input);
-      if (loosened.length > 0) {
+      if (context.route.secondPress === 'policy-loosening' && loosened.length > 0) {
         const hash = requestHash(canonicalJson({ method: 'PUT', path: `/projects/${params.id}/policy`, if_match: String(expected), body: input }));
-        const press = await secondPress(tx, context, { actorId,operation: 'policy_loosen', targetType: 'project', targetId: params.id, requestHash: hash, now: now(), windowSeconds });
+        const press = await secondPress(tx, context, { actorId,operation: 'policy_loosen', targetType: 'project', targetId: params.id, requestHash: hash, now: now() });
         if (press) return press;
       }
       const created = await tx.policies.create({

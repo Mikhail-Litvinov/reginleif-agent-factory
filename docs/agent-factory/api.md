@@ -124,7 +124,9 @@ a regulation version, changing the chief engineer or the replacement procedure, 
 (`robot_start`, one row with its `reasons`)) takes two
 presses in the same channel and by the same actor. The first request records a `confirmations` row (actor, channel,
 operation, target, request hash) and answers `409 confirmation_required` with `confirmation_id`, a one-time `nonce`
-and `expires_at` (`confirm.windowSeconds`). The second request repeats the same body with the header
+and `expires_at` (`confirm.windowSeconds`, seeded at 300 s by migration 0008: the owner confirms from a phone, reads
+the prompt in Telegram or the client and then presses, and 300 s matches the device code TTL
+`device.codeTtlSeconds`; a missing or non-positive value refuses every second press with `503 unavailable`). The second request repeats the same body with the header
 `X-Confirm: <confirmation_id>.<nonce>`; it is accepted once, only for the same actor, channel, operation, target and
 body hash, and its decision carries the `confirmation_id`. The press is bound to the operation and its parameters by
 that hash: a changed parameter, a used or expired confirmation, a revoked device session or another channel is refused
@@ -386,7 +388,7 @@ the columns once, and the route index after them points at the entries and never
 - **Problem** (every 4xx and 5xx, `application/problem+json`, one definition): `{type: string, title: string,
   status: int, code: string, detail: string, request_id: uuid, errors: [{pointer, code, message}], retry_after?: number,
   current_row_version?: int}`. `code` is one of the Errors table for that status; `current_row_version` is present on
-  `409 stale_version` and every other conflict on a versioned row. A response lists a failure by status and refers to
+  `409 version_conflict` and every other conflict on a versioned row. A response lists a failure by status and refers to
   this entry.
 - **Created row**: a create answers `201` with the resource, plus `Location` of the new row. **Changed row**: `PATCH`,
   the state actions (`archive`, `activate`, `revoke`, `restore`, `ack`) and `PUT` of a versioned row answer `200`

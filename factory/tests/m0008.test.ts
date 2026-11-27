@@ -13,6 +13,10 @@ it("applies migration 0008 once and lets an owner message carry the owner as its
 	assert.deepEqual(await migrate({ url: db.migratorUrl }), []);
 	const sql = connectBench(db.migratorUrl);
 	try {
+		// The second-press window is seeded (300 s: an owner on a phone reads the prompt, then presses; same as device.codeTtlSeconds),
+		// because a missing value refuses every second press. Migrating twice keeps it a single row.
+		const window = await sql<{ value: unknown }[]>`SELECT value FROM settings WHERE key = 'confirm.windowSeconds'`;
+		assert.deepEqual(window.map((row) => row.value), [300]);
 		const owner = randomUUID();
 		await sql`INSERT INTO owners (id, name) VALUES (${owner}, 'owner for 0008')`;
 		await assert.rejects(

@@ -47254,6 +47254,13 @@
               "maxLength": 128,
               "pattern": "^[A-Za-z0-9_-]+$"
             }
+          },
+          {
+            "name": "X-Confirm",
+            "in": "header",
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
@@ -47309,12 +47316,21 @@
             "description": "Error",
             "x-error-codes": [
               "idempotency_conflict",
-              "idempotency_in_progress"
+              "idempotency_in_progress",
+              "confirmation_required",
+              "confirmation_invalid"
             ],
             "content": {
               "application/problem+json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ProblemDetails"
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ProblemDetails"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ConfirmationRequired"
+                    }
+                  ]
                 }
               }
             }

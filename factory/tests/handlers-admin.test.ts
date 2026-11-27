@@ -6,7 +6,8 @@ import { migrate } from '../db/migrate.ts';
 import { createRepo, type Repo } from '../db/repo/index.ts';
 import { createApiServer } from '../api/server.ts';
 import { registerAdminHandlers } from '../api/handlers/index.ts';
-import { confirmWindowSeconds, pageLimits, tokenOverlapSeconds } from '../api/handlers/settings.ts';
+import { pageLimits, tokenOverlapSeconds } from '../api/handlers/settings.ts';
+import { confirmationWindow } from '../api/second-press.ts';
 import { routes } from '../contracts/routes.ts';
 import { connectBench, databaseBench } from './database-bench.ts';
 
@@ -106,11 +107,14 @@ after(async () => {
   await client?.end();
 });
 
-test('the documented settings default to named values and are read from settings', async () => {
-  // api.md names the four settings but gives no values; the defaults are named constants in settings.ts.
+test('settings use configured values and the confirmation window must be configured', async () => {
   assert.deepEqual(await pageLimits(repo), { defaultLimit: 50, maxLimit: 100 });
   assert.equal(await tokenOverlapSeconds(repo), 60);
-  assert.equal(await confirmWindowSeconds(repo), 60);
+  // Migration 0008 seeds the window, so "not configured" is a stored value that is not a positive integer (the row cannot be deleted).
+  assert.equal(await confirmationWindow(repo), 300);
+  await repo.settings.set('confirm.windowSeconds', 0, null);
+  await assert.rejects(confirmationWindow(repo));
+  await repo.settings.set('confirm.windowSeconds', 60, null);
   await repo.settings.set('page.maxLimit', 7, null);
   await repo.settings.set('page.defaultLimit', 3, null);
   try { assert.deepEqual(await pageLimits(repo), { defaultLimit: 3, maxLimit: 7 }); }
@@ -280,7 +284,8 @@ test('workers list, read and patch', async () => {
   const lost = await call(stale, 'PATCH', `/workers/${workerId}`, owner, { body: { status: 'disabled' } });
   assert.equal(lost.status, 409);
   assert.equal(lost.json.code, 'version_conflict');
-  assert.equal(lost.json.current_row_version, (await repo.workers.get(workerId))?.rowVersion);
+  // The API reports the version as a JSON number; the repository row carries a bigint.
+  assert.equal(lost.json.current_row_version, Number((await repo.workers.get(workerId))?.rowVersion));
 });
 
 test('cleanup dry run reports unknown sizes as null, not zero', async () => {

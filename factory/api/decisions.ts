@@ -1,14 +1,16 @@
-import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { confirmationId as checkedConfirmationId, issueConfirmation, verifyConfirmation } from './second-press.ts';
 import type { Repo } from '../db/repo/index.ts';
 import { databaseRefusal } from '../db/repo/errors.ts';
 import { decisionRequestSchemas } from '../contracts/schemas/index.ts';
+import { routes as contractRoutes } from '../contracts/routes.ts';
 
 export type DecisionKind = keyof typeof decisionRequestSchemas;
 export const decisionKinds = Object.keys(decisionRequestSchemas) as DecisionKind[];
 type Channel = 'client' | 'telegram' | 'api';
 export type DecisionInput = {
   taskId: string; kind: DecisionKind; channel: Channel; body: Record<string, unknown>;
-  idempotencyKey: string; windowSeconds: number; actorId?: string; engineerRunId?: string;
+  idempotencyKey: string; actorId?: string; engineerRunId?: string;
   deviceSessionId?: string | null; pressId?: string | null; confirm?: string; now?: Date;
   /** The actual request path, when it differs from the standard task decision route. */
   path?: string;
@@ -39,7 +41,6 @@ const canonical = (value: unknown): string => {
 };
 export const requestFingerprint = (method: string, path: string, body: unknown) => hash(canonical([method, path, body ?? null]));
 const routes: Record<DecisionKind, string> = { approve: 'approve', reject: 'reject', request_changes: 'request-changes', cancel: 'cancel', pause: 'pause', resume: 'resume', add_feedback: 'feedback', change_priority: 'priority', revise_requirements: 'revisions', resolve_block: 'resolve-block', force_close: 'force-close', allow_agent: 'allow-agent' };
-const dangerous = new Set<DecisionKind>(['cancel', 'reject', 'force_close']);
 const finalStates = new Set(['ACCEPTED', 'REJECTED', 'CANCELLED', 'FAILED']);
 export const mutationHash = (method: string, path: string, body: unknown) => hash(canonical([method, path, body]));
 const answer = (row: { id: string; kind: string | null; deliveryState: string | null; refusalReason: string | null }, replayed: boolean): DecisionResult => ({ status: 202, body: { id: row.id, kind: row.kind!, delivery_state: row.deliveryState!, refusal_reason: row.refusalReason }, location: `/decisions/${row.id}`, replayed });
@@ -73,7 +74,7 @@ export async function recordDecision(repo: Repo, input: DecisionInput): Promise<
       if (key.state !== 'done') throw new DecisionProblem('idempotency_in_progress');
       const first = key.responseBody as ConfirmationRequired | null;
       if (first?.code !== 'confirmation_required' || key.responseStatus !== 409) throw new DecisionProblem('idempotency_conflict');
-      if (!input.confirm) {
+      if (input.confirm === undefined) {
         await audit('needs_confirmation');
         return { status: 409, body: first, replayed: true };
       }
@@ -100,30 +101,22 @@ export async function recordDecision(repo: Repo, input: DecisionInput): Promise<
     if (input.poll && (!selectedPoll || selectedPoll.arbiter !== 'api' || selectedPoll.taskId !== input.taskId)) throw new DecisionProblem('not_found', 404);
     if (decisionPolls.length !== 0 && decisionPolls.every(poll => poll.state !== 'open')) throw closed(decisionPolls[0]!);
     let confirmationId: string | undefined;
-    if (dangerous.has(input.kind)) {
+    if (contractRoutes.find(route => route.method === 'POST' && route.path === `/tasks/{id}/${routes[input.kind]}`)?.secondPress === 'always') {
       if (!input.actorId) throw new DecisionProblem('owner_only', 422);
-      if (!input.confirm) {
+      if (input.confirm === undefined) {
         const claim = await tx.idempotencyKeys.claim({ actorId: input.actorId, key: input.idempotencyKey, requestHash, state: 'in_progress' });
         if (claim.replayed) {
           if (claim.row.requestHash !== requestHash) throw new DecisionProblem('idempotency_conflict');
           if (claim.row.state !== 'done') throw new DecisionProblem('idempotency_in_progress');
           return { status: 409, body: claim.row.responseBody as ConfirmationRequired, replayed: true };
         }
-        const id = randomUUID(), nonce = randomBytes(32).toString('base64url');
-        const expiresAt = new Date(now.getTime() + input.windowSeconds * 1000);
-        await tx.confirmations.create({ id, actorId: input.actorId, channel: input.channel, deviceSessionId: input.deviceSessionId ?? null, operation: input.kind, targetType: 'task', targetId: input.taskId, requestHash: confirmationHash, nonceHash: hash(nonce), issuedAt: now, expiresAt });
-        const body: ConfirmationRequired = { code: 'confirmation_required', confirmation_id: id, nonce, expires_at: expiresAt.toISOString() };
+        const body = await issueConfirmation(tx, { actorId: input.actorId, channel: input.channel, deviceSessionId: input.deviceSessionId ?? null, operation: input.kind, targetType: 'task', targetId: input.taskId, requestHash: confirmationHash }, now);
         await tx.idempotencyKeys.complete(input.actorId, input.idempotencyKey, 409, body);
         await audit('needs_confirmation');
         return { status: 409, body, replayed: false };
       }
-      const match = /^([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\.([A-Za-z0-9_-]+)$/i.exec(input.confirm);
-      if (!match) throw new DecisionProblem('confirmation_invalid');
-      const confirmation = await tx.confirmations.get(match[1]!);
-      const expected = confirmation?.nonceHash;
-      const actual = hash(match[2]!);
-      if (!expected || expected.length !== actual.length || !timingSafeEqual(Buffer.from(expected), Buffer.from(actual))) throw new DecisionProblem('confirmation_invalid');
-      confirmationId = match[1];
+      confirmationId = await checkedConfirmationId(tx, input.confirm);
+      if (!confirmationId) throw new DecisionProblem('confirmation_invalid');
     }
     const decisionId = randomUUID(), outboxId = randomUUID();
     const result = await tx.decisions.insertPair({ decision: { id: decisionId, taskId: input.taskId, kind: input.kind, actorId: input.actorId ?? null, engineerRunId: input.engineerRunId ?? null, channel: input.channel, deviceSessionId: input.deviceSessionId ?? null, pressId: input.pressId ?? null, revisionNumber, payload: input.body, confirmationId: confirmationId ?? null, idempotencyKey: input.idempotencyKey, requestHash, deliveryState: 'recorded', outboxId }, outbox: { id: outboxId, kind: 'deliver_decision', taskId: input.taskId, decisionId, payload: { decision_id: decisionId }, state: 'pending', attempts: 0 } });
@@ -131,7 +124,7 @@ export async function recordDecision(repo: Repo, input: DecisionInput): Promise<
       const updated = await tx.polls.answer(poll.id, { answerKey: input.poll?.answerKey ?? input.kind, answeredVia: input.channel, answeredSessionId: input.deviceSessionId ?? null, arbiter: 'api', decisionId, now });
       if (!updated) throw closed(await tx.polls.get(poll.id) ?? poll);
     }
-    if (confirmationId && !await tx.confirmations.consume({ id: confirmationId, actorId: input.actorId!, channel: input.channel, deviceSessionId: input.deviceSessionId ?? null, operation: input.kind, targetType: 'task', targetId: input.taskId, requestHash: confirmationHash, now, decisionId })) throw new DecisionProblem('confirmation_invalid');
+    if (confirmationId && !await verifyConfirmation(tx, input.confirm!, { actorId: input.actorId!, channel: input.channel, deviceSessionId: input.deviceSessionId ?? null, operation: input.kind, targetType: 'task', targetId: input.taskId, requestHash: confirmationHash }, now, decisionId)) throw new DecisionProblem('confirmation_invalid');
     if (input.kind === 'revise_requirements') {
       const revision = decisionRequestSchemas.revise_requirements.parse(input.body);
       if (!await tx.tasks.appendRevision(input.taskId, { id: randomUUID(), decisionId, authorId: input.actorId,

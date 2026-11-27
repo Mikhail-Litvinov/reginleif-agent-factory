@@ -170,6 +170,15 @@ describe("a scratch server whose rules the tests set", () => {
 		const written = await asPostgres(`printf '%s\\n' ${lines.map((line) => `'${line}'`).join(" ")} > ${dir}/data/pg_hba.conf`);
 		assert.equal(written.code, 0, written.stderr);
 	};
+	// The file changed after the server loaded it. pg_stat_file reports the modification time in whole seconds while
+	// pg_conf_load_time has microseconds, so a write in the same second as the restart is not seen as newer (a race this
+	// test would lose about once in a few hundred runs). The change therefore carries a modification time one minute
+	// ahead, which is what "modified after the last load" means, whatever the second boundary does.
+	const changeAfterLoad = async (lines: readonly string[]): Promise<void> => {
+		await writeFile(lines);
+		const touched = await asPostgres(`touch -d 'now + 1 minute' ${dir}/data/pg_hba.conf`);
+		assert.equal(touched.code, 0, touched.stderr);
+	};
 	// The file, then a restart: the server really uses these rules.
 	const load = async (lines: readonly string[]): Promise<void> => {
 		await writeFile(lines);
@@ -249,7 +258,7 @@ describe("a scratch server whose rules the tests set", () => {
 
 	it("the file on disk is intended but the server still runs an older rule set: the rule comparison reports the file as newer than the load, and the logins see it too", async () => {
 		await load([LOCAL, LEGACY_BOOTSTRAP, APPLICATION]);
-		await writeFile(INTENDED);
+		await changeAfterLoad(INTENDED);
 		assert.match((await checkActiveHba(stack.container, { port: PORT })).join("\n"), /modified after the server last loaded it/);
 		assert.match((await refusedBootstrap()) ?? "", /accepted a login as af_bootstrap/);
 	});
@@ -268,7 +277,7 @@ describe("a scratch server whose rules the tests set", () => {
 
 	it("a loaded rule that lets one role in with any password, the file on disk being intended: the probe of that role reports it, the others pass", async () => {
 		await load([LOCAL, BOOTSTRAP_REJECT, "host agent_factory af_reader samenet trust", APPLICATION]);
-		await writeFile(INTENDED);
+		await changeAfterLoad(INTENDED);
 		assert.match((await wrongPassword("af_reader")) ?? "", /accepted/);
 		for (const role of APPLICATION_ROLES.filter((r) => r !== "af_reader")) assert.equal(await wrongPassword(role), null, role);
 	});

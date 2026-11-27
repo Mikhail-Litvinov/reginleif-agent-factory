@@ -10,6 +10,7 @@ import { driverError } from '../../db/repo/errors.ts';
 import type { Repo } from '../../db/repo/index.ts';
 import { DependencyRefusedError, TaskDeleteRefusedError } from '../../db/repo/tasks.ts';
 import { DecisionProblem, recordDecision, requestFingerprint, type DecisionKind } from '../decisions.ts';
+import { confirmationHeader } from '../second-press.ts';
 import type { createApiServer, Handler, HandlerContext } from '../server.ts';
 
 type Api = ReturnType<typeof createApiServer>;
@@ -23,7 +24,7 @@ const date = z.iso.datetime({ offset: true }).transform(value => new Date(value)
 const versionLimit = 9223372036854775807n; // PostgreSQL bigint
 const origins = z.enum(['owner', 'decomposition', 'agent_proposal', 'continuation', 'standing']);
 const finalStates = new Set(['ACCEPTED', 'REJECTED', 'CANCELLED', 'FAILED']);
-const fallback = { 'page.default': 50, 'page.max': 200, 'confirm.windowSeconds': 60 } as const;
+const fallback = { 'page.default': 50, 'page.max': 200 } as const;
 
 const fail = (code: string, status: number): never => { throw new DecisionProblem(code, status); };
 const validate = <T>(schema: z.ZodType<T>, input: unknown): T => {
@@ -396,7 +397,7 @@ export function registerTasks(api: Api, repo: Repo, { clock = () => new Date(), 
       const result = await recordDecision(repo, { taskId, kind, body, wireBody: telegram ? context.body : undefined, actorId: owner, engineerRunId: engineer?.id,
         channel: telegram ? 'telegram' : identity.role === 'device' ? 'client' : 'api',
         deviceSessionId: sessionId(context), pressId: telegram ? press as string : null, idempotencyKey: header(context, 'idempotency-key') ?? '',
-        confirm: header(context, 'x-confirm'), windowSeconds: await setting(repo, 'confirm.windowSeconds'), now: clock(),
+        confirm: confirmationHeader(context), now: clock(),
         http: { requestId: context.requestId, tokenId: identity.id, workerId: worker ? identity.workerId! : undefined },
       });
       const headers: Record<string, string> = {};
