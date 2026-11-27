@@ -208,6 +208,13 @@ const textIdColumns: Record<string, string> = {
   session_id: 'database.md:188 conversations.session_ref text (the hub session id; database.md:45 task_runs.session_id states no type)',
 };
 const textIdFields = new Set(Object.keys(textIdColumns));
+// On the draft press routes `press_id` is not the hub's text press id: it is the registration the factory itself issues
+// with randomUUID() (api.md, POST /registry/drafts/{id}/presses) and the relay sends back to confirm. It is a uuid by
+// construction, so these two places are the only ones where the name may be uuid-typed.
+// The confirm response is a RegistryRecord, whose press_id is the hub's text one, so only these two places are exempt.
+const factoryIssuedPressPlaces = ['.paths./registry/drafts/{id}/presses.post.responses.201.', '.paths./registry/drafts/{id}/confirm.post.requestBody.'];
+const isFactoryIssuedPress = (name: string, where: string): boolean =>
+  name === 'press_id' && factoryIssuedPressPlaces.some((place) => where.startsWith(place));
 
 test('a *_id field backed by a text column is not typed as a uuid in the generated contract', () => {
   const document: unknown = JSON.parse(generateOpenApi(routes));
@@ -219,6 +226,7 @@ test('a *_id field backed by a text column is not typed as a uuid in the generat
   };
   const seen = new Set<string>();
   const uuidTyped: string[] = [];
+  const issued: string[] = [];
   const visit = (node: unknown, where: string): void => {
     if (Array.isArray(node)) {
       node.forEach((item, index) => visit(item, `${where}[${index}]`));
@@ -229,6 +237,11 @@ test('a *_id field backed by a text column is not typed as a uuid in the generat
     const properties = record.properties && typeof record.properties === 'object' ? record.properties as Record<string, unknown> : {};
     for (const [name, schema] of Object.entries(properties)) {
       if (!textIdFields.has(name)) continue;
+      if (isFactoryIssuedPress(name, where)) {
+        issued.push(`${where}.${name}`);
+        if (!isUuid(schema)) uuidTyped.push(`${where}.${name} (must be a uuid: the factory issues it)`);
+        continue;
+      }
       seen.add(name);
       if (isUuid(schema)) uuidTyped.push(`${where}.${name}`);
     }
@@ -240,6 +253,11 @@ test('a *_id field backed by a text column is not typed as a uuid in the generat
   };
   visit(document, '');
   assert.deepEqual(uuidTyped, []);
+  // The exemption must itself be exercised: the issued registration is found in the response and the request.
+  assert.deepEqual(issued.map((item) => item.split('.').slice(0, 5).join('.')).sort(), [
+    '.paths./registry/drafts/{id}/confirm.post.requestBody',
+    '.paths./registry/drafts/{id}/presses.post.responses',
+  ]);
   // Every text column must be found in the document, so the walk cannot pass vacuously.
   assert.deepEqual([...seen].sort(), [...textIdFields].sort());
 });

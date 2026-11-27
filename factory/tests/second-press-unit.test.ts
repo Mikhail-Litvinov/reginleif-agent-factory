@@ -63,7 +63,10 @@ test('confirmation headers and repository writes stay in the shared mechanism', 
   }
   for (const path of await scan(fileURLToPath(new URL('..', import.meta.url)))) {    if (!path.endsWith('.ts') || /[\\/]tests[\\/]/.test(path) || /[\\/]api[\\/]second-press\.ts$/.test(path)) continue;
     const source = await readFile(path, 'utf8');
-    const withoutDeclarations = source.replace(/name:\s*['"]X-Confirm['"]/g, 'name: declaredHeader');
+    // The relay client is a caller of the API, not part of the mechanism: it may only send the header the server issued.
+    const relayClient = /[\\/]telegram[\\/]relay-role\.ts$/.test(path);
+    const withoutDeclarations = source.replace(/name:\s*['"]X-Confirm['"]/g, 'name: declaredHeader')
+      .replace(relayClient ? /headers:\s*\{\s*'X-Confirm':\s*confirmation\s*\}/g : /(?!)/g, 'headers: sentHeader');
     assert.doesNotMatch(withoutDeclarations, /x-confirm|\.confirmations\.(?:create|consume)\s*\(/i, path);
     if (!/[\\/]db[\\/]repo[\\/]decisions\.ts$/.test(path)) {
       assert.doesNotMatch(source, /\.insert\(\s*confirmations\s*\)|\binsert\s+into\s+confirmations\b/i, path);
