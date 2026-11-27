@@ -21,13 +21,14 @@ export function createRegistrySearch(repo: Pick<Repo, "registry" | "settings">, 
 		const common = { ...input, status: input.status ?? "active", reuse: "standing", limit };
 		const embedding = await embed(input.query);
 		const degraded = embedding == null;
-		const [ru, en, trigrams, vectors] = await Promise.all([
+		// Trigram stays out of the ranking path (docs/reports/registry-search-measurement.md): it is the typo fallback of degraded mode only.
+		const [ru, en, vectors, trigrams] = await Promise.all([
 			repo.registry.records.searchFullText({ ...common, threshold: number(keys[0], defaults.text), language: "ru" }),
 			repo.registry.records.searchFullText({ ...common, threshold: number(keys[0], defaults.text), language: "en" }),
-			repo.registry.records.searchTrigram({ ...common, threshold: number(keys[1], defaults.trigram) }),
 			embedding == null ? Promise.resolve([]) : repo.registry.embeddings.searchVector({ ...common, threshold: number(keys[2], defaults.vector), embedding, modelVersion: model }),
+			degraded ? repo.registry.records.searchTrigram({ ...common, threshold: number(keys[1], defaults.trigram) }) : Promise.resolve([]),
 		]);
-		// Scores have different scales; vector and text take precedence over the typo fallback.
+		// Scores have different scales; vector takes precedence over text, text over the degraded-mode typo fallback.
 		const merged = new Map<string, { record: Hit["record"]; score: number; ranking: Ranking; matchedFields: string[] }>();
 		for (const [ranking, hits] of [["vector", vectors], ["fulltext", ru], ["fulltext", en], ["trigram", trigrams]] as [Ranking, Hit[]][]) {
 			for (const hit of hits) {
