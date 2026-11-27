@@ -52,7 +52,7 @@ export const confirmationRepo = (db: PostgresJsDatabase<any>) => ({
 	create: async (input: ConfirmationInsert): Promise<Confirmation> => (await db.insert(confirmations).values(input).returning())[0]!,
 	get: async (id: string): Promise<Confirmation | undefined> => (await db.select().from(confirmations).where(eq(confirmations.id, id)).limit(1))[0],
 	consume: async (input: { id: string; actorId: string; channel: string; deviceSessionId: string | null; operation: string; targetType: string; targetId: string; requestHash: string; now: Date; decisionId?: string }): Promise<Confirmation | null> =>
-		(await db.update(confirmations).set({ usedAt: sql`now()`, decisionId: input.decisionId ?? null, updatedAt: sql`now()`, rowVersion: sql`${confirmations.rowVersion} + 1` }).where(and(
+		(await db.update(confirmations).set({ usedAt: input.now, decisionId: input.decisionId ?? null, updatedAt: sql`now()`, rowVersion: sql`${confirmations.rowVersion} + 1` }).where(and(
 			eq(confirmations.id, input.id), eq(confirmations.actorId, input.actorId), eq(confirmations.channel, input.channel),
 			eq(confirmations.operation, input.operation), eq(confirmations.targetType, input.targetType), eq(confirmations.targetId, input.targetId),
 			eq(confirmations.requestHash, input.requestHash), isNull(confirmations.usedAt), gt(confirmations.expiresAt, input.now),

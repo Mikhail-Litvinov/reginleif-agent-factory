@@ -1,15 +1,28 @@
 services:
   embedder:
     build: .
+    image: af-embedder:local
     restart: unless-stopped
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     volumes:
       - ${AF_EMBEDDER_MODEL_DIR:?set AF_EMBEDDER_MODEL_DIR}:/model:ro
+    networks: [embedder]
+  # Docker never publishes the ports of an internal network, so this relay is the only published part. The model
+  # container itself stays on the internal network and has no route out.
+  entry:
+    image: af-embedder:local
+    entrypoint: ["python", "/app/forward.py"]
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    depends_on: [embedder]
     ports:
       - "127.0.0.1:${AF_EMBEDDER_PORT:-8088}:8080"
-    networks: [embedder]
+    networks: [embedder, edge]
 networks:
   embedder:
     internal: true
+  edge: {}

@@ -1,14 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { test } from "node:test";
 import { importRegistryDrafts } from "../registry/import.ts";
 import type { Repo } from "../db/repo/index.ts";
+import { ownedTempDir } from "./owned-temp.ts";
 
 test("imports only supplied sections as named drafts and repeated runs add nothing", async t => {
-	const directory = await mkdtemp(path.join(tmpdir(), "registry-import-"));
-	t.after(() => rm(directory, { recursive: true, force: true }));
+	const directory = await ownedTempDir(t, "registry-import-");
 	const factoryDoc = path.join(directory, "factory.md");
 	const projectMemory = path.join(directory, "memory.md");
 	const ignored = path.join(directory, "ignored.md");
@@ -48,8 +47,7 @@ test("imports only supplied sections as named drafts and repeated runs add nothi
 });
 
 test("the same source-relative paths keep their IDs across checkout roots", async t => {
-	const directory = await mkdtemp(path.join(tmpdir(), "registry-import-roots-"));
-	t.after(() => rm(directory, { recursive: true, force: true }));
+	const directory = await ownedTempDir(t, "registry-import-roots-");
 	const firstRoot = path.join(directory, "checkout-a");
 	const secondRoot = path.join(directory, "checkout-b");
 	const firstProjectRoot = path.join(firstRoot, "projects", "project-1");
@@ -79,8 +77,7 @@ test("the same source-relative paths keep their IDs across checkout roots", asyn
 });
 
 test("Factory decision authority follows the table Source column", async t => {
-	const directory = await mkdtemp(path.join(tmpdir(), "registry-import-authority-"));
-	t.after(() => rm(directory, { recursive: true, force: true }));
+	const directory = await ownedTempDir(t, "registry-import-authority-");
 	const source = path.join(directory, "decisions.md");
 	await writeFile(source, "| # | Decision | Source |\n|---|---|---|\n| D1 | Owner decision. | Owner |\n| D2 | Non-owner decision. | Call |\n", "utf8");
 	const rows = new Map<string, any>();
@@ -96,8 +93,7 @@ test("Factory decision authority follows the table Source column", async t => {
 });
 
 test("project memory sections use agent authority", async t => {
-	const directory = await mkdtemp(path.join(tmpdir(), "registry-import-memory-authority-"));
-	t.after(() => rm(directory, { recursive: true, force: true }));
+	const directory = await ownedTempDir(t, "registry-import-memory-authority-");
 	const source = path.join(directory, "memory.md");
 	await writeFile(source, "# Memory\n\nProject memory text.\n", "utf8");
 	let inserted: any;
@@ -111,8 +107,7 @@ test("project memory sections use agent authority", async t => {
 });
 
 test("preserves non-ASCII fixture text while source code stays ASCII", async t => {
-	const directory = await mkdtemp(path.join(tmpdir(), "registry-import-unicode-"));
-	t.after(() => rm(directory, { recursive: true, force: true }));
+	const directory = await ownedTempDir(t, "registry-import-unicode-");
 	const source = path.join(directory, "memory.md");
 	await writeFile(source, `# Note\n\n\u041f\u0430\u043c\u044f\u0442\u044c.\n`, "utf8");
 	let inserted: any;

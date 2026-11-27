@@ -1,6 +1,6 @@
 # CPU embedder
 
-Stage the `onnx` directory from `BAAI/bge-m3` revision `5617a9f61b028005a4858fdac845db406aefb181` outside this repository. Set `AF_EMBEDDER_MODEL_DIR` to that directory and start this compose file. The graph, external weights, external constant and tokenizer are checked before the HTTP listener starts. The image never loads PyTorch weights. The internal Docker network has no external route; the published endpoint binds to loopback.
+Stage the `onnx` directory from `BAAI/bge-m3` revision `5617a9f61b028005a4858fdac845db406aefb181` outside this repository. Set `AF_EMBEDDER_MODEL_DIR` to that directory and start this compose file. The graph, external weights, external constant and tokenizer are checked before the HTTP listener starts. The image never loads PyTorch weights. The model container sits on an internal Docker network and has no external route. Docker never publishes the ports of an internal network, so a second service, `entry` (`forward.py`, a plain TCP relay, same image), sits on that network and a normal one and is the only published part; it binds to `127.0.0.1:${AF_EMBEDDER_PORT:-8088}`. The server hashes the 2.2 GB of weights before it listens, so the first request after start can take several seconds to half a minute.
 
 POST `/embed` with `{"texts":["text"]}` returns the model, revision, external weights SHA-256, and normalized vectors. The service uses CPU execution and four intra-op threads, matching the measurement configuration. The model directory must be readable by UID 65532.
 

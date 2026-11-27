@@ -2,3 +2,5 @@
 factory/contracts/openapi.json text eol=lf
 factory/contracts/openapi-questions.md text eol=lf
 factory/db/migrations/** text eol=lf
+# Deploy sources are copied into Linux images and read by Linux tools.
+factory/deploy/** text eol=lf

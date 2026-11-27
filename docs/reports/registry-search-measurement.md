@@ -90,3 +90,22 @@ Scores of the other models are not comparable: e5 compresses everything into 0.6
 - Embedding long records (the 8192-token maximum of bge-m3) was not exercised; record length of the real registry is unknown.
 - Whether `ts_rank` thresholds hold on records of other lengths is not known; the text threshold is the least reliable number in this report.
 - Latency of the degraded mode (PostgreSQL side) was not measured; at 40 records it is not informative.
+
+## ONNX re-measurement
+
+Conditions: the production container (`factory/deploy/embedder`): python 3.12-slim, onnxruntime 1.20.1 on CPU, 4 intra-op threads, tokenizers 0.21.0, numpy 2.2.1; ONNX export from `BAAI/bge-m3` revision `5617a9f61b028005a4858fdac845db406aefb181` (`onnx/` only, fp32 with external weights). All pinned sha256 values in the server matched the downloaded files. Same dataset as above (40 records, 120 related and 30 unrelated questions), same passage rule, the same pessimistic tie ranking. Queries went through the host, the loopback relay and the internal network (HTTP, batch 1); the desktop was again not idle. Scripts: `factory/deploy/embedder/benchmark.py` for the vector numbers, `factory/tests/registry-search-embedder.test.ts` for the complete search.
+
+| | torch (above) | ONNX container |
+|---|---|---|
+| recall@1 / @3 / @5 | 0.850 / 0.967 / 0.975 | 0.850 / 0.967 / 0.975 |
+| Found / false hit at 0.47 | 0.88 / 0.033 | 0.883 / 0.033 |
+| Unrelated top-1 median / max | 0.365 / 0.496 | 0.367 / 0.496 |
+| Right record in top 5, score p10 / median | 0.474 / 0.557 | 0.4735 / 0.557 |
+| Best threshold (plateau) | 0.4735 (0.464 to 0.4735) | 0.4735 (0.464 to 0.4735) |
+| Strict 0.50: found / false hit | 0.81 / 0.00 | 0.80 / 0.00 |
+| Query latency, batch 1: median / p95 | 110.5 / 139.6 ms | 38.1 / 49.3 ms (includes HTTP and the relay) |
+| Memory | 2.31 GB peak process | 1.43 GB container (`docker stats` snapshot; not the same measure) |
+
+The quality is the same as with torch on every number; the 0.47 vector threshold holds without change. Latency is about three times lower. Memory is not strictly comparable (peak working set against a container snapshot).
+
+Complete search (`createRegistrySearch`: vector, both full-text configs and trigram merged, the real database, default thresholds): the right record is found for 0.90 of the 120 related questions, and 0.133 of the 30 unrelated questions return at least one item. The degraded mode (no embedding) returned `degraded: true` for every question. The unrelated rate is higher than the vector-only 0.033 because the code also merges trigram hits at the `similarity` threshold 0.1846, and the section "Degraded mode" measured that signal alone at 0.10 false hits; the text above (Chosen text threshold) said trigram stays out of the ranking path, which the code does not do. This is a difference between the measurement and the code, not an embedder difference; the decision on the trigram signal is open.

@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { after, before, test } from "node:test";
 import { drizzle } from "drizzle-orm/postgres-js";
@@ -9,6 +8,7 @@ import { migrate } from "../../db/migrate.ts";
 import { createRepo } from "../../db/repo/index.ts";
 import { importRegistryDrafts } from "../../registry/import.ts";
 import { connectBench, databaseBench } from "../database-bench.ts";
+import { ownedTempDir } from "../owned-temp.ts";
 
 const benchPromise = databaseBench(import.meta.url);
 let client: ReturnType<typeof postgres>;
@@ -23,8 +23,7 @@ before(async () => {
 after(async () => { await client?.end(); });
 
 test("Factory documents and project memories import as source-named drafts once", async t => {
-	const directory = await mkdtemp(path.join(tmpdir(), "registry-import-bench-"));
-	t.after(() => rm(directory, { recursive: true, force: true }));
+	const directory = await ownedTempDir(t, "registry-import-bench-");
 	const factoryDocument = path.join(directory, "factory.md");
 	const projectRoot = path.join(directory, "project");
 	const projectMemory = path.join(projectRoot, "memory.md");

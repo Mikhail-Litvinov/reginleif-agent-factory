@@ -27,7 +27,9 @@ test("registry search with the ONNX container and in degraded mode", async () =>
 	for (const row of dataset.records) {
 		const id = randomUUID(); ids.set(row.id, id);
 		// Search uses these passage fields; the measurement set also has kinds absent from this schema.
-		await repo.registry.records.create({ id, kind: "decision", authority: "owner", status: "active", scopeType: "global", category: "general", problem: row.problem, decision: row.decision, summary: row.summary, reuse: "standing", source: "import", createdBy: { type: "test" } });
+		// The insert trigger admits an active record only from a poll or the orchestrator, so activate a draft.
+		await repo.registry.records.create({ id, kind: "decision", authority: "owner", status: "draft", scopeType: "global", category: "general", problem: row.problem, decision: row.decision, summary: row.summary, reuse: "standing", source: "import", createdBy: { type: "test" } });
+		await repo.registry.records.changeStatus(id, "active", new Date(), {});
 	}
 	for (let i = 0; i < dataset.records.length; i += 8) {
 		const rows = dataset.records.slice(i, i + 8);

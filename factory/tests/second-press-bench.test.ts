@@ -33,6 +33,9 @@ before(async () => {
   // Explicit bench settings; api.md specifies the confirmation window, but does not prescribe its value.
   await repo.settings.set('confirm.windowSeconds', 60, owner);
   await repo.settings.set('device.codeTtlSeconds', 300, owner);
+  // The registry routes are refused while the feature is off; the clause limit is read when a regulation is activated.
+  await repo.settings.set('registry.enabled', true, owner);
+  await repo.settings.set('registry.clauseMaxBytes', 4096, owner);
   api = createApiServer({ tokens: repo.tokens, clock: () => clock });
   registerAllHandlers(api, repo, { now: () => clock });
   base = `http://127.0.0.1:${(await api.listen(0)).port}`;
@@ -40,11 +43,11 @@ before(async () => {
 after(async () => { await api?.close(); await sql?.end(); });
 
 type Fixture = { path: string; body?: unknown; headers?: Record<string, string> };
-async function call(route: Route, fixture: Fixture, key: string, confirmation?: string) {
+async function call(route: Pick<Route, 'method'>, fixture: Fixture, key: string, confirmation?: string, method: string = route.method) {
   const headers: Record<string, string> = { authorization: `Bearer afk_press_${secret}`, 'idempotency-key': key, ...fixture.headers };
   if (fixture.body !== undefined) headers['content-type'] = 'application/json';
   if (confirmation) headers['X-Confirm'] = confirmation;
-  const res = await fetch(base + fixture.path, { method: route.method, headers, body: fixture.body === undefined ? undefined : JSON.stringify(fixture.body) });
+  const res = await fetch(base + fixture.path, { method, headers, body: fixture.body === undefined ? undefined : JSON.stringify(fixture.body) });
   // A 204 answer (stop-all) has no body.
   const text = await res.text();
   return { status: res.status, body: (text ? JSON.parse(text) : {}) as Record<string, any> };
@@ -76,6 +79,20 @@ async function fixture(route: Route): Promise<Fixture> {
   if (/^POST \/tasks\/\{id\}\/(reject|cancel|force-close)$/.test(routeKey)) {
     const suffix = route.path.split('/').at(-1);
     return { path: `/tasks/${await task()}/${suffix}`, body: { reason: 'Bench', ...(suffix === 'reject' ? { revision_number: 1 } : {}) } };
+  }
+  const regulation = /^POST \/regulation\/versions\/\{id\}\/(activate|revoke)$/.exec(routeKey);
+  if (regulation) {
+    // A regulation version in the state the operation needs: a draft to activate, an active one (activated through the API) to revoke.
+    const created = await call(route, { path: '/regulation/versions', body: { clauses: [] } }, randomUUID(), undefined, 'POST');
+    assert.equal(created.status, 201, JSON.stringify(created.body));
+    const path = `/regulation/versions/${created.body.id}/activate`;
+    if (regulation[1] === 'revoke') {
+      const first = await call(route, { path }, randomUUID(), undefined, 'POST');
+      assert.equal(first.status, 409, JSON.stringify(first.body));
+      const second = await call(route, { path }, randomUUID(), `${first.body.confirmation_id}.${first.body.nonce}`, 'POST');
+      assert.equal(second.status, 200, JSON.stringify(second.body));
+    }
+    return { path: `/regulation/versions/${created.body.id}/${regulation[1]}` };
   }
   // Newly registered routes are exercised immediately; a failing assertion identifies any additional domain fixture needed.
   return { path: route.path.replace(/\{[^}]+\}/g, () => randomUUID()), ...(route.request === 'none' ? {} : { body: {} }) };

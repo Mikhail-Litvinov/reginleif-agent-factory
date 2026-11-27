@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import type { Repo } from '../../db/repo/index.ts';
 import { RegistryRefusedError } from '../../db/repo/registry.ts';
-import { ConfirmationSettingError } from '../second-press.ts';
+import { ConfirmationSettingError, confirmationHeader } from '../second-press.ts';
 import { createRegistryGate } from '../../registry/gate.ts';
 import { createRegistrySearch, type Embedder } from '../../registry/search.ts';
 import { createRegistryService, RegistryConflictError } from '../../registry/service.ts';
@@ -293,8 +293,8 @@ export function registerRegistryHandlers(api: HandlerRegistrar, repo: Repo, { no
     guarded('POST', `/regulation/versions/{id}/${operation}`, async context => {
       const actorValue = actor(context) as { type: 'owner'; id: string };
       const idValue = present(context.params.id);
-      const confirmHeader = context.request.headers['x-confirm'];
-      if (typeof confirmHeader !== 'string') {
+      const confirmHeader = confirmationHeader(context);
+      if (confirmHeader === undefined) {
         const requested = await service.requestRegulationConfirmation(actorValue, idValue, {
           channel: 'api', deviceSessionId: null, now: now(),
         }, operation);
