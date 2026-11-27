@@ -9,6 +9,7 @@ export type Embedder = (text: string) => Promise<number[] | undefined | null> | 
 
 // Defaults measured in docs/reports/registry-search-measurement.md.
 const defaults = { text: 0.025, trigram: 0.1846, vector: 0.47, model: "5617a9f61b028005a4858fdac845db406aefb181", limit: 5 };
+export const defaultEmbeddingModel = defaults.model;
 const keys = ["registry.textThreshold", "registry.trigramThreshold", "registry.vectorThreshold", "registry.embeddingModel", "registry.searchLimit"] as const;
 
 export function createRegistrySearch(repo: Pick<Repo, "registry" | "settings">, embed: Embedder) {
