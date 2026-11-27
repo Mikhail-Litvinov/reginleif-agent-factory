@@ -9,6 +9,7 @@ type NewToken = Omit<TokenInsert, "rowVersion" | "updatedAt" | "lastUsedAt" | "r
 
 export const tokenRepo = (db: PostgresJsDatabase<any>) => ({
 	list: async (): Promise<ListedToken[]> => db.select({ id: apiTokens.id, name: apiTokens.name, role: apiTokens.role, ownerId: apiTokens.ownerId, workerId: apiTokens.workerId, sessionRef: apiTokens.sessionRef, runId: apiTokens.runId, prefix: apiTokens.prefix, createdBy: apiTokens.createdBy, createdAt: apiTokens.createdAt, expiresAt: apiTokens.expiresAt, lastUsedAt: apiTokens.lastUsedAt, revokedAt: apiTokens.revokedAt, replacesTokenId: apiTokens.replacesTokenId, validUntil: apiTokens.validUntil, updatedAt: apiTokens.updatedAt, rowVersion: apiTokens.rowVersion }).from(apiTokens).orderBy(apiTokens.createdAt, apiTokens.id),
+	get: async (id: string): Promise<Token | undefined> => (await db.select().from(apiTokens).where(eq(apiTokens.id, id)).limit(1))[0],
 	byHash: async (tokenHash: string): Promise<Token | undefined> => (await db.select().from(apiTokens).where(eq(apiTokens.tokenHash, tokenHash)).limit(1))[0],
 	create: async (input: NewToken): Promise<Token> => (await db.insert(apiTokens).values(input).returning())[0]!,
 	rotate: async (id: string, expectedVersion: bigint, replacement: NewToken, validUntil: Date): Promise<Token | null> => db.transaction(async (tx) => {

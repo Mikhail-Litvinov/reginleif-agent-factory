@@ -5,6 +5,7 @@ import { refusing } from "./errors.ts";
 import { taskDependencies } from "../schema/task-dependencies.ts";
 import { taskRevisions } from "../schema/decisions.ts";
 import { tasks } from "../schema/tasks.ts";
+import { taskArtifacts, taskRuns, workspaces } from "../schema/runs.ts";
 
 type Task = typeof tasks.$inferSelect;
 type TaskInsert = typeof tasks.$inferInsert;
@@ -54,6 +55,16 @@ export const taskRepo = (db: PostgresJsDatabase<any>) => ({
 	}),
 	get: async (id: string, { includeDeleted = false }: { includeDeleted?: boolean } = {}): Promise<Task | undefined> =>
 		(await db.select().from(tasks).where(and(eq(tasks.id, id), ...(includeDeleted ? [] : [isNull(tasks.deletedAt)]))).limit(1))[0],
+	cleanupItems: async (taskId: string): Promise<{ kind: "log" | "artifact" | "execution_folder" | "worktree"; ref: string; size: number }[]> => {
+		const artifacts = await db.select({ id: taskArtifacts.id, type: taskArtifacts.artifactType, size: taskArtifacts.size }).from(taskArtifacts).where(and(eq(taskArtifacts.taskId, taskId), isNull(taskArtifacts.removedAt)));
+		const runs = await db.select({ id: taskRuns.id, executionId: taskRuns.executionId }).from(taskRuns).where(eq(taskRuns.taskId, taskId));
+		const trees = await db.select({ id: workspaces.id, state: workspaces.state }).from(workspaces).where(eq(workspaces.taskId, taskId));
+		return [
+			...artifacts.map(row => ({ kind: row.type === "log" || row.type === "check_log" ? "log" as const : "artifact" as const, ref: row.id, size: Number(row.size ?? 0) })),
+			...runs.map(row => ({ kind: "execution_folder" as const, ref: row.executionId ?? row.id, size: 0 })),
+			...trees.filter(row => row.state !== "cleaned" && row.state !== "kept").map(row => ({ kind: "worktree" as const, ref: row.id, size: 0 })),
+		];
+	},
 	list: async ({
 		includeDeleted = false, projectId, status, priorityGte, agentId, parentId, createdAfter, createdBefore, updatedAfter,
 		awaitingApproval, q, sort = "created_at", direction = "desc",

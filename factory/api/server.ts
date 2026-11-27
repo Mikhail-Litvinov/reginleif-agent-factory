@@ -5,8 +5,8 @@ import { z } from 'zod';
 import { routes, type Route } from '../contracts/routes.ts';
 import { createLogger, type Logger } from '../lib/log.ts';
 
-type Identity = { id: string; role: string | null; prefix: string | null; tokenHash: string | null; workerId: string | null; revokedAt: Date | null; expiresAt: Date | null; validUntil: Date | null };
-type Dependencies = { tokens: { byHash(hash: string): Promise<Identity | undefined> }; workers: { get(id: string): Promise<{ machineId: string | null } | undefined> }; authorizeScope?: (context: { identity: Identity; route: Route; params: Record<string, string>; body: unknown; scope: string }) => Promise<boolean>; logger?: Logger; clock?: () => Date };
+type Identity = { id: string; role: string | null; prefix: string | null; tokenHash: string | null; ownerId?: string | null; workerId: string | null; revokedAt: Date | null; expiresAt: Date | null; validUntil: Date | null };
+type Dependencies = { tokens: { byHash(hash: string): Promise<Identity | undefined> }; workers: { get(id: string): Promise<{ machineId: string | null } | undefined> }; queueGatewayEnabled?: boolean; authorizeScope?: (context: { identity: Identity; route: Route; params: Record<string, string>; body: unknown; scope: string }) => Promise<boolean>; logger?: Logger; clock?: () => Date };
 export type HandlerContext = { request: IncomingMessage; route: Route; params: Record<string, string>; body: unknown; identity: Identity | null; requestId: string; logger: Logger };
 export type Handler = (context: HandlerContext) => Promise<{ status: number; body?: unknown; headers?: Record<string, string> }>;
 
@@ -30,10 +30,10 @@ export function createApiServer(deps: Dependencies) {
     const requestId = typeof suppliedId === 'string' && uuid.safeParse(suppliedId).success ? suppliedId : randomUUID();
     const log = logger.child({ correlation_id: requestId });
     res.setHeader('X-Request-Id', requestId);
-    const problem = (status: number, code: string, detail: string) => {
+    const problem = (status: number, code: string, detail: string, extra: Record<string, unknown> = {}) => {
       log.info('API request failed');
       res.writeHead(status, { 'content-type': 'application/problem+json' });
-      res.end(JSON.stringify({ type: 'about:blank', title: code, status, code, detail, request_id: requestId, errors: [] }));
+      res.end(JSON.stringify({ type: 'about:blank', title: code, status, code, detail, request_id: requestId, errors: [], ...extra }));
     };
     try {
       const pathname = new URL(req.url ?? '/', 'http://localhost').pathname;
@@ -66,7 +66,7 @@ export function createApiServer(deps: Dependencies) {
       }
       if (identity?.role === 'worker' && route.path === '/workers/register') {
         const worker = await deps.workers.get(identity.workerId!);
-        if (!worker || worker.machineId !== (body as { machine_id: string }).machine_id) { problem(403, 'forbidden', 'Access denied'); return; }
+        if (!worker || (worker.machineId !== (body as { machine_id: string }).machine_id && !deps.queueGatewayEnabled)) { problem(409, 'queue_isolation_required', 'A second machine requires an isolated queue gateway'); return; }
       }
       if (identity) {
         const grants = route.roles.filter((role) => role.split(':')[0] === identity!.role);
@@ -78,10 +78,16 @@ export function createApiServer(deps: Dependencies) {
       const handler = handlers.get(`${route.method} ${route.path}`);
       if (!handler) { problem(501, 'not_implemented', 'Route is not implemented'); return; }
       const result = await handler({ request: req, route, params, body, identity, requestId, logger: log });
-      if (result.status >= 400) { problem(result.status, 'internal', 'Request failed'); return; }
+      if (result.status >= 400) {
+        const body = typeof result.body === 'object' && result.body !== null ? result.body as Record<string, unknown> : {};
+        const code = typeof body.code === 'string' ? body.code : 'internal';
+        problem(result.status, code, code, Object.fromEntries(Object.entries(body).filter(([key]) => key !== 'code')));
+        return;
+      }
       log.info('API request completed');
       res.writeHead(result.status, result.headers);
-      res.end(result.body === undefined ? undefined : JSON.stringify(result.body));
+      const contentType = result.headers?.['content-type'] ?? '';
+      res.end(result.body === undefined ? undefined : typeof result.body === 'string' && (contentType.startsWith('text/') || contentType.includes('application/octet-stream')) ? result.body : JSON.stringify(result.body));
     } catch { if (!res.headersSent) problem(500, 'internal', 'Request failed'); else res.destroy(); }
   });
   return {

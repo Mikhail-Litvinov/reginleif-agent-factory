@@ -19,6 +19,8 @@ export const workerRepo = (db: PostgresJsDatabase<any>) => ({
 		target: workers.machineId,
 		set: { name: input.name, platform: input.platform, capabilities: input.capabilities, version: input.version, contractVersion: input.contractVersion, status: input.status, concurrencyLimit: input.concurrencyLimit, lastSeenAt: new Date(), updatedAt: new Date(), rowVersion: sql`${workers.rowVersion} + 1` },
 	}).returning())[0]!,
+	heartbeat: async (id: string, capabilities?: unknown, now = new Date()): Promise<Worker | null> =>
+		(await db.update(workers).set({ ...(capabilities === undefined ? {} : { capabilities }), lastSeenAt: now, updatedAt: now, rowVersion: sql`${workers.rowVersion} + 1` }).where(eq(workers.id, id)).returning())[0] ?? null,
 	update: async (id: string, expectedVersion: bigint, patch: WorkerPatch): Promise<Worker | null> =>
 		(await db.update(workers).set({ ...patch, updatedAt: new Date(), rowVersion: expectedVersion + 1n }).where(and(eq(workers.id, id), eq(workers.rowVersion, expectedVersion))).returning())[0] ?? null,
 });
