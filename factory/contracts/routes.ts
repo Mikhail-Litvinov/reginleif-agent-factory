@@ -26,14 +26,12 @@ export interface Route {
   responses: Readonly<Record<string, Body>>;
   errors: Readonly<Record<number, readonly string[]>>;
   idempotent: boolean;
-  secondPress?: 'always' | 'policy-loosening' | 'forced-cleanup' | 'decision-kind' | 'zone-change' | 'robot-release' | 'sensitive-draft';
+  secondPress?: 'always' | 'policy-loosening' | 'forced-cleanup' | 'decision-kind' | 'zone-change' | 'robot-release' | 'sensitive-draft' | 'right-grant';
   parameters: readonly { name: string; in: 'query' | 'header'; required?: boolean; repeatable?: boolean; schema?: z.ZodType }[];
 }
 
 // api.md, Idempotency: 8–128 ASCII letters, digits, underscores or hyphens.
 const idempotencyKeySchema = z.string().min(8).max(128).regex(/^[A-Za-z0-9_-]+$/);
-// A missing owner_act_ref on a right answer is 400; the Errors table calls a
-// malformed request validation_failed, although its general status is 422.
 const decisions = [
   ['approve', 'approve'], ['reject', 'reject'], ['request-changes', 'request_changes'],
   ['cancel', 'cancel'], ['pause', 'pause'], ['resume', 'resume'],
@@ -188,7 +186,7 @@ const entries: Input[] = [
   { method: 'POST', path: '/rights/requests', roles: ['registry:own_session_or_run', 'worker'] },
   { method: 'GET', path: '/rights/requests', roles: [...readers, 'registry:own_session_or_run'] },
   { method: 'GET', path: '/rights/requests/{id}', roles: [...readers, 'registry:own_session_or_run'] },
-  { method: 'POST', path: '/rights/requests/{id}/answer', roles: owner, errors: { 400: ['validation_failed'], 409: ['confirmation_invalid', 'request_not_owner', 'request_closed'] } },
+  { method: 'POST', path: '/rights/requests/{id}/answer', roles: owner, errors: { 409: ['confirmation_invalid', 'request_not_owner', 'request_closed'] } },
   { method: 'GET', path: '/rights/grants', roles: readers },
   { method: 'POST', path: '/rights/grants/{id}/revoke', roles: owner },
   { method: 'GET', path: '/rights/suspensions', roles: readers },
@@ -288,13 +286,14 @@ const secondPress = new Set([
   'POST /robot-start-confirmations', 'POST /robots/{id}/release',
   'PATCH /robot-zones/{id}',
   'POST /tasks/{id}/reject', 'POST /tasks/{id}/cancel', 'POST /tasks/{id}/force-close',
-  'POST /registry/drafts/{id}/confirm',
+  'POST /registry/drafts/{id}/confirm', 'POST /rights/requests/{id}/answer',
 ]);
 const secondPressCases: Record<string, NonNullable<Route['secondPress']>> = {
   'PUT /projects/{id}/policy': 'policy-loosening',
   'POST /tasks/{id}/cleanup': 'forced-cleanup',
   'POST /conversations/{id}/polls/{poll_id}/answer': 'decision-kind',
   'POST /registry/drafts/{id}/confirm': 'sensitive-draft',
+  'POST /rights/requests/{id}/answer': 'right-grant',
   'PATCH /robot-zones/{id}': 'zone-change',
   'POST /robots/{id}/release': 'robot-release',
 };

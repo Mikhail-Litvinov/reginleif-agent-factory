@@ -84,6 +84,15 @@ async function fixture(route: Route): Promise<Fixture> {
   if (routeKey === 'POST /tasks/{id}/cleanup') return { path: `/tasks/${await task('ACCEPTED')}/cleanup?dry_run=false&force=true` };
   if (routeKey === 'POST /devices') return { path: '/devices', body: { name: 'Bench device', platform: 'android' } };
   if (routeKey === 'POST /system/stop-all') return { path: '/system/stop-all' };
+  if (routeKey === 'POST /rights/requests/{id}/answer') {
+    // A request waiting for the owner: the code step has already called the owner.
+    const taskId = await task(), agent = randomUUID(), run = randomUUID(), request = randomUUID();
+    await sql`INSERT INTO agents (id) VALUES (${agent})`;
+    await sql`INSERT INTO task_runs (id, task_id, agent_id, status, execution_id) VALUES (${run}, ${taskId}, ${agent}, 'running', ${randomUUID()})`;
+    await sql`INSERT INTO right_requests (id, task_id, run_id, handling_task_id, action, target, conditions, request_hash) VALUES (${request}, ${taskId}, ${run}, ${taskId}, 'read', 'fixture', '{}'::jsonb, ${createHash('sha256').update(request).digest('hex')})`;
+    await sql`INSERT INTO right_answers (id, request_id, step, step_kind, answer) VALUES (${randomUUID()}, ${request}, 1, 'code', 'call_owner')`;
+    return { path: `/rights/requests/${request}/answer`, body: { answer: 'grant' } };
+  }
   if (routeKey === 'POST /conversations/{id}/polls/{poll_id}/answer') {
     const taskId = await task(), conversation = randomUUID(), poll = randomUUID();
     await repo.conversations.create({ id: conversation, source: 'factory', state: 'active', title: 'Bench', taskId });

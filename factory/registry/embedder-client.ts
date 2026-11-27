@@ -45,13 +45,14 @@ export function createEmbedderClient(repo: Pick<Repo, "transaction">, transport:
 				if (count === 0) return total;
 			}
 		},
-		startBackground(version: string, limit: number, intervalMs: number, options: { schedule?: (callback: () => void, ms: number) => () => void; onError: (error: unknown) => void }): () => void {
+		startBackground(target: string | (() => Promise<string>), limit: number, intervalMs: number, options: { schedule?: (callback: () => void, ms: number) => () => void; onError: (error: unknown) => void }): () => void {
 			if (!Number.isSafeInteger(intervalMs) || intervalMs < 1) throw new RangeError("interval must be positive");
 			const schedule = options.schedule ?? ((callback, ms) => { const timer = setTimeout(callback, ms); return () => clearTimeout(timer); });
 			let stopped = false;
 			let cancel: () => void = () => {};
 			const tick = () => {
-				void this.reembedAll(version, limit).catch(options.onError).finally(() => { if (!stopped) cancel = schedule(tick, intervalMs); });
+				// The target is read at the start of each pass, so a setting changed while running takes effect on the next pass; a failed read is reported like a failed pass.
+					void (async () => this.reembedAll(typeof target === "string" ? target : await target(), limit))().catch(options.onError).finally(() => { if (!stopped) cancel = schedule(tick, intervalMs); });
 			};
 			cancel = schedule(tick, 0);
 			return () => { stopped = true; cancel(); };

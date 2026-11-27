@@ -41,6 +41,33 @@ test("HTTP transport sends a batch and store stamps the service version", async 
 	assert.equal(stored.createdAt.getTime(), 0);
 });
 
+test("background worker reads the target model again on every pass and survives a failed read", async () => {
+	// The target is a setting an owner can change while the process runs (registry.embeddingModel); a value read once at start would keep embedding toward the old model.
+	const asked: string[] = [];
+	const repo = { transaction: async (fn: any) => fn({ registry: { embeddings: { lockReembedding: async () => {}, pendingReembedding: async (version: string) => { asked.push(version); return []; } } } }) };
+	const client = createEmbedderClient(repo as any, async () => { throw Error("unexpected"); });
+	let target: string | Error = "rev-1";
+	const errors: unknown[] = [];
+	let scheduled = 0;
+	let run!: () => void;
+	const stop = client.startBackground(async () => { if (target instanceof Error) throw target; return target; }, 5, 100, {
+		schedule: callback => { scheduled++; run = callback; return () => {}; },
+		onError: error => { errors.push(error); },
+	});
+	const pass = async () => { run(); await new Promise(resolve => setImmediate(resolve)); };
+	await pass();
+	target = "rev-2";
+	await pass();
+	target = new Error("settings unavailable");
+	await pass();
+	target = "rev-3";
+	await pass();
+	stop();
+	assert.deepEqual(asked, ["rev-1", "rev-2", "rev-3"]);
+	assert.equal(errors.length, 1);
+	assert.equal(scheduled, 5, "the failed read still schedules the next pass");
+});
+
 test("background worker schedules work without overlapping and can stop", async () => {
 	let run: (() => void) | undefined;
 	let cancel = false;

@@ -105,7 +105,8 @@ export const startApi = async (config: ApiConfig, log = createLogger()): Promise
 				try { return (await client.embed([text], await modelSetting(repo)))[0]; }
 				catch (error) { log.warn(`embedder unavailable, search is degraded: ${error instanceof Error ? error.message : String(error)}`); return undefined; }
 			};
-			const target = config.embeddingTarget ?? await modelSetting(repo);
+			// An explicit AF_EMBEDDER_TARGET_VERSION pins the target; otherwise every pass reads the setting, the way query embedding does.
+				const target = config.embeddingTarget ?? (() => modelSetting(repo));
 			stopLoop = client.startBackground(target, config.reembedBatch, config.reembedIntervalMs, {
 				onError: (error) => log.warn(`re-embedding pass failed, the next pass tries again: ${error instanceof Error ? error.message : String(error)}`),
 			});

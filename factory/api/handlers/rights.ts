@@ -3,7 +3,7 @@ import type { Repo } from '../../db/repo/index.ts';
 import type { HandlerContext } from '../server.ts';
 import type { HandlerDeps, HandlerRegistrar } from './shared.ts';
 import { apiRow, apiRows, query, response } from './shared.ts';
-import { consumeConfirmationAct } from '../second-press.ts';
+import { confirmationHeader, confirmationId, secondPress } from '../second-press.ts';
 import { checkForSubject, type Right } from '../../rights/check.ts';
 import { answerOwnerRequest, answerState, createRightRequest } from '../../rights/requests.ts';
 
@@ -71,8 +71,6 @@ const suspensionRow = (row: Record<string, any>) => {
   const by = row.restoredBy as { id?: string } | null | undefined;
   return { ...apiRow(row), restored_by: by?.id ?? null, state: row.endedAt ? 'restored' : 'open' };
 };
-
-class ConfirmationLost extends Error {}
 
 const sha = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 
@@ -144,7 +142,7 @@ export function registerRightsHandlers(api: HandlerRegistrar, { repo, now = () =
   }), { authorizeScope: async ({ identity }) => identity.role === 'registry' });
 
   api.register('POST', '/rights/requests/{id}/answer', async context => {
-    const input = context.body as { answer: 'grant' | 'refuse'; owner_act_ref?: string; reason?: string };
+    const input = context.body as { answer: 'grant' | 'refuse'; reason?: string };
     const ownerId = context.identity?.ownerId;
     if (!ownerId) return failure(403);
     try {
@@ -156,13 +154,21 @@ export function registerRightsHandlers(api: HandlerRegistrar, { repo, now = () =
         if (input.answer === 'refuse') {
           result = await answerOwnerRequest(tx, { requestId: request.id, ownerId, answer: 'refuse', ...(input.reason !== undefined ? { reason: input.reason } : {}) });
         } else {
-          const act = input.owner_act_ref ? await tx.confirmations.get(input.owner_act_ref) : undefined;
-          result = await answerOwnerRequest(tx, { requestId: request.id, ownerId, answer: 'grant', ownerActRef: input.owner_act_ref ?? '', channel: act?.channel ?? '', deviceSessionId: act?.deviceSessionId ?? null, now: at, ...(input.reason !== undefined ? { reason: input.reason } : {}) });
-          if (!('error' in result)) {
-            // The owner act is single use: it is consumed in the transaction that records the grant.
-            const used = await consumeConfirmationAct(tx, input.owner_act_ref!, { actorId: ownerId, channel: act!.channel ?? '', deviceSessionId: act!.deviceSessionId ?? null, operation: 'right_request', targetType: 'right_request', targetId: request.id, requestHash: request.requestHash! }, at);
-            if (!used) throw new ConfirmationLost();
+          // A grant is an owner-only operation: the same second press as the other ones (D23). A confirmation is not
+          // issued for a request that can no longer be granted.
+          const state = answerState(await tx.rightAnswers.listForRequest(request.id));
+          if (state === 'granted' || state === 'refused') return response(409, { code: 'request_closed' });
+          if (state !== 'call_owner') return response(409, { code: 'request_not_owner' });
+          const scope = { actorId: ownerId, operation: 'right_request', targetType: 'right_request', targetId: request.id, requestHash: request.requestHash ?? '' };
+          const header = confirmationHeader(context);
+          const id = header === undefined ? undefined : await confirmationId(tx, header);
+          if (!id) {
+            const press = await secondPress(tx, context, { ...scope, now: at });
+            if (press) return press;
           }
+          // The database trigger consumes the confirmation (used_at) in the same statement that records the grant, so
+          // there is no separate consume here.
+          result = await answerOwnerRequest(tx, { requestId: request.id, ownerId, answer: 'grant', ownerActRef: id!, channel: 'api', deviceSessionId: null, now: at, ...(input.reason !== undefined ? { reason: input.reason } : {}) });
         }
         if ('error' in result) {
           if (result.error === 'not_found') return failure(404);
@@ -173,7 +179,10 @@ export function registerRightsHandlers(api: HandlerRegistrar, { repo, now = () =
         return response(201, { ...answerRow(result.answer), ...grant });
       });
     } catch (error) {
-      if (error instanceof ConfirmationLost) return response(409, { code: 'confirmation_invalid' });
+      // The trigger refuses a confirmation that was used or expired between the check and the insert.
+      for (let cause: unknown = error; cause instanceof Error; cause = cause.cause) {
+        if (cause.message.includes('invalid owner confirmation')) return response(409, { code: 'confirmation_invalid' });
+      }
       throw error;
     }
   });
