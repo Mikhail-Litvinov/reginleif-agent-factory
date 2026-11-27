@@ -317,6 +317,7 @@ export const createMemoryRuntime = (platform: RuntimePorts["platform"] = "linux"
 		},
 	};
 	const runtime: RuntimePorts = {
+		http: { request: async () => ({ status: 503, json: async () => ({ error: { code: "unavailable", message: "No fake response configured" } }) }) },
 		language: "en",
 		fs,
 		assetFs,

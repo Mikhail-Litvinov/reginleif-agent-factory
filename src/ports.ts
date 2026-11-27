@@ -14,6 +14,9 @@ export type ProcessOutput = {
 	exitCode: number;
 };
 
+export type HttpResponse = { status: number; json(): Promise<unknown> };
+export type HttpPort = { request(url: string, init: { method: "GET" | "POST"; headers: Record<string, string>; body?: string }): Promise<HttpResponse> };
+
 export type ProcessOptions = {
 	cwd?: string;
 	input?: string;
@@ -53,6 +56,7 @@ export type ProcessPorts = {
 };
 
 export type RuntimePorts = {
+	http: HttpPort;
 	fs: FileSystem;
 	assetFs: AssetFileSystem;
 	process: ProcessPorts;
