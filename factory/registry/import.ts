@@ -9,9 +9,11 @@ export type RegistryImportResult = { added: number; records: RegistryRecordInput
 
 type Section = { title: string | null; text: string; startLine: number; endLine: number; authority: "owner" | "agent" };
 
-const stableId = (relativePath: string, text: string): string => {
+// Identity covers everything that owns the record: scope, project, source authority, path and text.
+const stableId = (owner: { scopeType: string; projectId: string | null; authority: string }, relativePath: string, text: string): string => {
 	const normalizedText = text.normalize("NFC").replace(/\s+/gu, " ").trim();
-	const bytes = createHash("sha256").update(`registry-import\0${relativePath}\0${normalizedText}`).digest().subarray(0, 16);
+	const key = ["registry-import", owner.scopeType, owner.projectId ?? "", owner.authority, relativePath, normalizedText].join("\0");
+	const bytes = createHash("sha256").update(key).digest().subarray(0, 16);
 	bytes[6] = (bytes[6]! & 0x0f) | 0x50;
 	bytes[8] = (bytes[8]! & 0x3f) | 0x80;
 	const hex = bytes.toString("hex");
@@ -81,7 +83,7 @@ export async function importRegistryDrafts(repo: Pick<Repo, "registry">, sources
 		const importedSections = source.projectId ? sections(content) : decisionTableRows(content);
 		for (const section of importedSections) {
 			const record: RegistryRecordInput = {
-				id: stableId(relativePath, section.text),
+				id: stableId({ scopeType: source.projectId ? "project" : "global", projectId: source.projectId ?? null, authority: section.authority }, relativePath, section.text),
 				kind: "decision",
 				authority: section.authority,
 				status: "draft",

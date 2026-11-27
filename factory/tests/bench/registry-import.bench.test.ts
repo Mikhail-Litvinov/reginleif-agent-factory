@@ -44,3 +44,25 @@ test("Factory documents and project memories import as source-named drafts once"
 	assert.equal(second.added, 0);
 	assert.deepEqual(second.records.map(record => record.id), first.records.map(record => record.id));
 });
+
+test("two projects and the global scope importing the same path and text each get their own record", async t => {
+	const directory = await ownedTempDir(t, "registry-import-owners-");
+	const memory = path.join(directory, "memory.md");
+	await writeFile(memory, "# Shared\n\nSame section text in every project.\n", "utf8");
+	const projectA = "70000000-0000-4000-8000-0000000000a1";
+	const projectB = "70000000-0000-4000-8000-0000000000b1";
+	await repo.projects.create({ id: projectA, name: "registry-import-owner-a", workspacePolicy: "worktree" });
+	await repo.projects.create({ id: projectB, name: "registry-import-owner-b", workspacePolicy: "worktree" });
+	const a = await importRegistryDrafts(repo, [{ path: memory, rootPath: directory, projectId: projectA }]);
+	const b = await importRegistryDrafts(repo, [{ path: memory, rootPath: directory, projectId: projectB }]);
+	assert.equal(a.added, 1);
+	assert.equal(b.added, 1);
+	assert.equal(b.records[0]!.projectId, projectB);
+	assert.notEqual(a.records[0]!.id, b.records[0]!.id);
+	const again = await importRegistryDrafts(repo, [{ path: memory, rootPath: directory, projectId: projectB }]);
+	assert.equal(again.added, 0);
+	assert.equal(again.records[0]!.id, b.records[0]!.id);
+	// Repo level: an id held by another owner is refused, not returned as a hit.
+	const { id, kind, authority, status, scopeType, problem, decision, reuse, source, sourceRef, createdBy } = a.records[0]!;
+	await assert.rejects(repo.registry.records.createImportedIfAbsent({ id, kind, authority, status, scopeType, problem, decision, reuse, source, sourceRef, createdBy, projectId: projectB }), /import_identity_mismatch/);
+});

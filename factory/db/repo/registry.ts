@@ -111,6 +111,8 @@ export const registryRepo = (db: PostgresJsDatabase<any>) => ({
 			if (inserted) return { record: inserted, inserted: true };
 			const existing = (await db.select().from(registryRecords).where(eq(registryRecords.id, input.id)).limit(1))[0];
 			if (!existing) throw new RegistryRefusedError("import_conflict_missing");
+			// The id is derived from the owner, so a row with another owner is an identity collision, never a hit.
+			if (existing.scopeType !== input.scopeType || (existing.projectId ?? null) !== (input.projectId ?? null) || existing.authority !== input.authority) throw new RegistryRefusedError("import_identity_mismatch");
 			return { record: existing, inserted: false };
 		}),
 		get: async (id: string): Promise<Record | undefined> =>
