@@ -13,7 +13,7 @@ type InquiryInput = Parameters<R["inquiries"]["create"]>[0];
 type RecordInput = Parameters<R["records"]["create"]>[0];
 type FoundResult = Omit<Parameters<R["results"]["create"]>[0], "inquiryId">;
 type InquirySearch = (input: InquiryInput, registry: R) => Promise<FoundResult[]>;
-type Actor = { type: "owner" | "agent"; id: string; tokenId?: string; runId?: string; sessionRef?: string };
+type Actor = { type: "owner" | "agent"; id: string; tokenId?: string; runId?: string; sessionRef?: string; channel?: "telegram"; pressId?: string };
 type Relay = { type: "owner" | "agent" | "relay" };
 type PollPress = { pollId: string; pressId: string; telegramUserId: bigint | number; optionIndex: number; now?: Date };
 type PollOption = (typeof RegistryPoll.shape.options)["_output"][number];

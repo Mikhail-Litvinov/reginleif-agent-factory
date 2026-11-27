@@ -62,8 +62,11 @@ test('relay capture delegates the registered press and maps a replay refusal', a
   const service = {
     capturePoll: async (actor: unknown, input: unknown) => { calls.push([actor, input]); throw new RegistryRefusedError('press_replayed'); },
   };
-  const { call } = setup({ settings: { snapshot: async () => ({ 'registry.enabled': true }) } as never } as never, { service: service as never, now: () => new Date('2030-01-01T00:00:00.000Z') });
+  // The capture route is idempotent: it claims its key and checks the owner mapping inside one transaction before the service runs.
+  const tx = { idempotencyKeys: { claim: async () => ({ replayed: false }), complete: async () => {} }, owners: { byTelegramUserId: async () => ({ id: 'owner' }) }, registry: { records: { captureByPress: async () => undefined } } };
+  const { call } = setup({ settings: { snapshot: async () => ({ 'registry.enabled': true }) } as never, transaction: async (fn: any) => fn(tx) } as never, { service: service as never, now: () => new Date('2030-01-01T00:00:00.000Z') });
   const result = await call('POST /registry/captures', {
+    request: { url: '/', headers: { 'idempotency-key': 'capture-key-1' } } as unknown as HandlerContext['request'],
     body: { press_id: 'press', telegram_user_id: 123, poll_id: pollId, option_index: 1 },
     identity: { id: 'relay', role: 'relay', ownerId: null, runId: null } as never,
   });

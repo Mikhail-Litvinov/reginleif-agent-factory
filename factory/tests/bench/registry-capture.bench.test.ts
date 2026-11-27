@@ -46,16 +46,17 @@ test('registry-capture: relay press creates one immutable record and replay is r
   const question = 'Choose indentation';
   const options = [{ key: 'tabs', label: 'Use tabs' }, { key: 'spaces', label: 'Use spaces' }];
   const registered = await fetch(`${base}/registry/polls`, {
-    method: 'POST', headers: { authorization: `Bearer afk_registry-relay_${relaySecret}`, 'content-type': 'application/json' },
+    method: 'POST', headers: { authorization: `Bearer afk_registry-relay_${relaySecret}`, 'content-type': 'application/json', 'idempotency-key': 'poll-key-1' },
     body: JSON.stringify({ inquiry_id: inquiry.id, question, options }),
   });
   assert.equal(registered.status, 201);
   const pressId = randomUUID();
-  const capture = () => fetch(`${base}/registry/captures`, {
-    method: 'POST', headers: { authorization: `Bearer afk_registry-relay_${relaySecret}`, 'content-type': 'application/json' },
+  // The relay routes are idempotent: each delivery carries its own key, so a second delivery of the same press is a new request that the press rule refuses.
+  const capture = (key: string) => fetch(`${base}/registry/captures`, {
+    method: 'POST', headers: { authorization: `Bearer afk_registry-relay_${relaySecret}`, 'content-type': 'application/json', 'idempotency-key': key },
     body: JSON.stringify({ press_id: pressId, telegram_user_id: 7311001, poll_id: inquiry.id, option_index: 1 }),
   });
-  const first = await capture();
+  const first = await capture('capture-key-1');
   assert.equal(first.status, 200);
   const row = await first.json() as { id: string; problem: string; question: string; options: unknown; decision: string; pressed_option: string; source: string; press_id: string };
   assert.equal(row.problem, question);
@@ -65,7 +66,7 @@ test('registry-capture: relay press creates one immutable record and replay is r
   assert.equal(row.pressed_option, row.decision);
   assert.equal(row.source, 'poll_press');
   assert.equal(row.press_id, pressId);
-  const replay = await capture();
+  const replay = await capture('capture-key-2');
   assert.equal(replay.status, 409);
   assert.equal((await replay.json() as { code: string }).code, 'press_replayed');
   assert.equal((await repo.registry.records.get(row.id))?.pressId, pressId);

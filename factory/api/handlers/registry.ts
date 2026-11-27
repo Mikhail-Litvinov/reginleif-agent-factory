@@ -9,6 +9,7 @@ import { createRegistryService, RegistryConflictError } from '../../registry/ser
 import type { HandlerContext } from '../server.ts';
 import { apiRow, apiRows, id, query, response, writeAudit, type HandlerDeps, type HandlerRegistrar, type Row } from './shared.ts';
 import { pageLimits } from './settings.ts';
+import { draftsHandler, relayMutationHandler } from '../../telegram/relay-role.ts';
 
 type Search = ReturnType<typeof createRegistrySearch>;
 type Service = ReturnType<typeof createRegistryService>;
@@ -224,10 +225,7 @@ export function registerRegistryHandlers(api: HandlerRegistrar, repo: Repo, { no
     } as never);
     return response(201, selected(created));
   });
-  guarded('GET', '/registry/drafts', async context => {
-    const rows = await repo.registry.records.list({ status: 'draft' });
-    return list(rows as Row[], context, row => selected(row));
-  });
+  guarded('GET', '/registry/drafts', draftsHandler(repo));
   guarded('POST', '/registry/records/{id}/activate', async context => {
     const ids = ((context.body as Row | undefined)?.ids as string[] | undefined) ?? [context.params.id];
     const activated = await service.changeStatuses(actor(context) as never, ids.map(present), 'active', now());
@@ -252,16 +250,9 @@ export function registerRegistryHandlers(api: HandlerRegistrar, repo: Repo, { no
     } as never);
     return response(201, selected(created));
   });
-  guarded('POST', '/registry/polls', async context => {
-    const body = context.body as Row;
-    const answer = await service.registerPoll(actor(context) as never, present(body.inquiry_id), { question: body.question, options: body.options, now: now() });
-    return response(201, { poll_id: answer.pollId, display_line: answer.displayLine });
-  });
-  guarded('POST', '/registry/captures', async context => {
-    const body = context.body as Row;
-    const captured = await service.capturePoll(actor(context) as never, { pressId: body.press_id, telegramUserId: body.telegram_user_id, pollId: present(body.poll_id), optionIndex: body.option_index, now: now() });
-    return response(200, await record(captured.id));
-  });
+  // The relay routes are idempotent and transactional; their handlers live with the relay role.
+  guarded('POST', '/registry/polls', relayMutationHandler(repo, 'poll', injectedService));
+  guarded('POST', '/registry/captures', relayMutationHandler(repo, 'capture', injectedService));
 
   guarded('GET', '/regulation/versions', async context => {
     const params = queryInput(context);

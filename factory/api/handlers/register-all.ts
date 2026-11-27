@@ -5,6 +5,7 @@ import { registerAdminHandlers } from './index.ts';
 import { registerTasks } from './tasks.ts';
 import { registerRegistryHandlers } from './registry.ts';
 import { registerRightsHandlers } from './rights.ts';
+import { registerRelayHandlers } from '../../telegram/relay-role.ts';
 
 type Options = {
   now?: () => Date;
@@ -21,4 +22,5 @@ export function registerAllHandlers(api: ReturnType<typeof createApiServer>, rep
   registerClientHandlers(api, repo, client);
   registerRegistryHandlers(api, repo, { now });
   registerRightsHandlers(api, { repo, now });
+  registerRelayHandlers(api, repo);
 }
