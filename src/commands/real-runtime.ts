@@ -81,6 +81,7 @@ export const createRealRuntime = async (options: RealRuntimeOptions = {}): Promi
 	if (processStart.value === null) return err(startMessages.runtime.processNotFound());
 	const pythonCommand = platform === "windows" ? "python" : "python3";
 	const runtime: RuntimePorts = {
+		http: { request: async (url, init) => await fetch(url, init) },
 		fs: fileSystem,
 		assetFs: createNodeAssetFileSystem(startMessages),
 		process: processPorts,

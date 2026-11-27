@@ -13,6 +13,7 @@ import { installRig } from "./commands/install.js";
 import { setLanguage, showLanguage } from "./commands/language.js";
 import { createRealRuntime, readRealLanguage } from "./commands/real-runtime.js";
 import { readStatus } from "./commands/status.js";
+import { registryUsage, runRegistryCommand, type RegistryAction } from "./commands/registry.js";
 import { isSessionCommand, runSessionCommand } from "./commands/session.js";
 import { runExecCommand } from "./commands/exec.js";
 import { runExecRunner } from "./exec-core.js";
@@ -58,6 +59,10 @@ const USAGE: string[] = [
 	"rig exec status <id> [--from <byte offset> [--wait <ms>]]",
 	"rig exec stop <id>",
 	"rig exec list",
+	"rig factory registry find <problem> <category> [options]",
+	"rig factory registry verdict <inquiry-id> <record-id> <verdict> [options]",
+	"rig factory registry propose <record-json>",
+	"rig factory registry import <record-json-file>",
 ];
 const HELP: JsonValue = { usage: USAGE };
 
@@ -74,6 +79,7 @@ export type Command =
 	| { name: "info"; session: string }
 	| { name: "session"; subcommand: string; args: string[] }
 	| { name: "exec"; subcommand: string; args: string[] }
+	| { name: "factory-registry"; action: RegistryAction; args: string[] }
 	| { name: "exec-runner"; id: string }
 	| { name: "update-step"; step: UpdateStep; owner: LockOwner };
 // A parse error is a function of the catalog: the language is known only after the runtime is built, and parsing stays pure.
@@ -103,6 +109,10 @@ export const parseCommand = (args: string[]): ParsedCommand => {
 	if (head === "exec") return rest.length >= 1 && ["start", "status", "stop", "list"].includes(rest[0])
 		? { ok: true, command: { name: "exec", subcommand: rest[0], args: rest.slice(1) } }
 		: { ok: false, error: (messages) => messages.exec.usage() };
+	if (head === "factory" && rest[0] === "registry" && rest.length >= 2 && ["find", "verdict", "propose", "import"].includes(rest[1]!)) {
+		return { ok: true, command: { name: "factory-registry", action: rest[1] as RegistryAction, args: rest.slice(2) } };
+	}
+	if (head === "factory" && (rest[0] === "registry" || rest.length === 0)) return { ok: false, error: () => registryUsage() };
 	if (head === "exec-runner" && rest.length === 1) return { ok: true, command: { name: "exec-runner", id: rest[0] } };
 	if (head === "update-step") return parseUpdateStep(rest) ?? { ok: false, error: (messages) => messages.cli.usageUpdateStep() };
 	return { ok: false, error: (messages) => messages.cli.unknownCommand(args.join(" ")) };
@@ -171,6 +181,7 @@ const COMMAND_NAMES = {
 	"info": true,
 	"session": true,
 	"exec": true,
+	"factory-registry": true,
 	"exec-runner": true,
 	"update-step": true,
 } satisfies Record<Command["name"], true>;
@@ -258,6 +269,8 @@ const execute = async (command: Command, context: CommandContext): Promise<Comma
 			return { kind: "json", result: await runSessionCommand(runtime, command.subcommand, command.args, context.writeProgress) };
 		case "exec":
 			return { kind: "json", result: await runExecCommand(runtime, command.subcommand, command.args) };
+		case "factory-registry":
+			return { kind: "json", result: await runRegistryCommand(runtime, command) };
 		case "exec-runner":
 			return { kind: "internal", exitCode: await runExecRunner(runtime, command.id, buildShellLaunch) };
 		case "update-step":
