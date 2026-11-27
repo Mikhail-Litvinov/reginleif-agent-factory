@@ -57,12 +57,28 @@
           "statusMessage": "Проверка изменений регламента Factory"
         }
       }
+    },
+    {
+      "event": "PreToolUse",
+      "matcher": "",
+      "command": "bun",
+      "args": [
+        "{{CLONE}}/features/factory/hooks/permission.ts"
+      ],
+      "timeout": 60,
+      "statusMessage": "Checking the Factory rights",
+      "translations": {
+        "ru": {
+          "statusMessage": "Проверка прав Factory"
+        }
+      }
     }
   ],
   "settings": [],
   "plugins": [],
   "files": [
-    "hooks/regulation.ts"
+    "hooks/regulation.ts",
+    "hooks/permission.ts"
   ],
   "assets": [],
   "agents": [],
