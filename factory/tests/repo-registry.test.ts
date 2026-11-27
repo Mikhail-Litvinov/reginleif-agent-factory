@@ -98,7 +98,7 @@ describe("registry repositories", () => {
 		const first = await repo.registry.records.create(record(12, "tungsten registry phrase", "preserve the tungsten sample"));
 		const second = await repo.registry.records.create(record(13, "tungsten registry phrase", "preserve the tungsten sample carefully"));
 		const fullText = await repo.registry.records.searchFullText({ query: "tungsten registry", language: "en", limit: 5, threshold: 0 });
-		assert.equal(fullText.length, 2);
+		assert.ok(fullText.some(hit => hit.record.id === first.id) && fullText.some(hit => hit.record.id === second.id)); // questions are OR-ed: other records sharing one word also match (docs/reports/registry-search-measurement.md line 12)
 		assert.ok(fullText[0]!.score >= fullText[1]!.score);
 		const topFullText = fullText[0]!.score;
 		assert.equal((await repo.registry.records.searchFullText({ query: "tungsten registry", language: "en", limit: 5, threshold: topFullText })).length >= 1, true);
