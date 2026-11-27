@@ -47,7 +47,7 @@ export function registerAgentHandlers(api: HandlerRegistrar, { repo }: HandlerDe
       if (updated) await writeAudit(tx, context, 'agent.update', 'agent', updated.id, 'ok', input);
       return updated;
     });
-    return row ? response(200, apiRow(row)) : response(409, { code: 'version_conflict' });
+    return row ? response(200, apiRow(row)) : response(404, { code: 'not_found' });
   });
   api.register('DELETE', '/agents/{id}', async context => {
     const expected = version(context);
@@ -57,6 +57,6 @@ export function registerAgentHandlers(api: HandlerRegistrar, { repo }: HandlerDe
       if (deleted) await writeAudit(tx, context, 'agent.delete', 'agent', deleted.id, 'ok', null);
       return deleted;
     });
-    return row ? response(200, apiRow(row)) : response(409, { code: 'version_conflict' });
+    return row ? response(200, apiRow(row)) : response(404, { code: 'not_found' });
   });
 }

@@ -1,6 +1,7 @@
 import { and, eq, sql, type SQL } from "drizzle-orm";
 import type { PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import { workers } from "../schema/workers.ts";
+import { versionedUpdate } from "./errors.ts";
 
 type WorkerInsert = typeof workers.$inferInsert;
 type Worker = typeof workers.$inferSelect;
@@ -23,8 +24,11 @@ export const workerRepo = (db: PostgresJsDatabase<any>) => ({
 		}).where(eq(workers.id, input.id)).returning())[0] ?? null,
 	heartbeat: async (id: string, capabilities?: unknown, now = new Date()): Promise<Worker | null> =>
 		(await db.update(workers).set({ ...(capabilities === undefined ? {} : { capabilities }), lastSeenAt: now, updatedAt: now, rowVersion: sql`${workers.rowVersion} + 1` }).where(eq(workers.id, id)).returning())[0] ?? null,
-	update: async (id: string, expectedVersion: bigint, patch: WorkerPatch): Promise<Worker | null> =>
-		(await db.update(workers).set({ ...patch, updatedAt: new Date(), rowVersion: expectedVersion + 1n }).where(and(eq(workers.id, id), eq(workers.rowVersion, expectedVersion))).returning())[0] ?? null,
+	update: async (id: string, expectedVersion: bigint, patch: WorkerPatch): Promise<Worker | null> => versionedUpdate({
+		subject: ["worker", id].join(" "), expectedVersion,
+		update: async () => (await db.update(workers).set({ ...patch, updatedAt: new Date(), rowVersion: expectedVersion + 1n }).where(and(eq(workers.id, id), eq(workers.rowVersion, expectedVersion))).returning())[0],
+		current: async () => (await db.select({ rowVersion: workers.rowVersion }).from(workers).where(eq(workers.id, id)).limit(1))[0],
+	}),
 });
 
 export type WorkerRepository = ReturnType<typeof workerRepo>;

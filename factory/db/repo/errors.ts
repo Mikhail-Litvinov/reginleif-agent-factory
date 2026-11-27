@@ -8,13 +8,32 @@ const RAISE_EXCEPTION = "P0001";
 export class StaleVersionError extends Error {
 	readonly subject: string;
 	readonly expectedVersion: bigint;
-	constructor(subject: string, expectedVersion: bigint) {
+	readonly currentVersion?: bigint;
+	constructor(subject: string, expectedVersion: bigint, currentVersion?: bigint) {
 		super([subject, "is not at version", String(expectedVersion)].join(" "));
 		this.name = "StaleVersionError";
 		this.subject = subject;
 		this.expectedVersion = expectedVersion;
+		this.currentVersion = currentVersion;
 	}
 }
+
+export class RepositoryNotFoundError extends Error {
+	constructor(subject: string) { super([subject, "was not found"].join(" ")); this.name = "RepositoryNotFoundError"; }
+}
+
+export const versionedUpdate = async <T extends { rowVersion: bigint }>(input: {
+	subject: string;
+	expectedVersion: bigint;
+	update: () => Promise<T | undefined>;
+	current: () => Promise<{ rowVersion: bigint } | undefined>;
+}): Promise<T | null> => {
+	const updated = await input.update();
+	if (updated) return updated;
+	const current = await input.current();
+	if (!current) return null;
+	throw new StaleVersionError(input.subject, input.expectedVersion, current.rowVersion);
+};
 
 export interface DatabaseRefusal { reason: string; sqlstate: string }
 

@@ -1,7 +1,7 @@
 import { and, eq, inArray, sql } from "drizzle-orm";
 import type { PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import { settings } from "../schema/settings.ts";
-import { StaleVersionError } from "./errors.ts";
+import { StaleVersionError, versionedUpdate } from "./errors.ts";
 
 type SettingInsert = typeof settings.$inferInsert;
 type Setting = typeof settings.$inferSelect;
@@ -22,7 +22,11 @@ export const settingsRepo = (db: PostgresJsDatabase<any>) => ({
 				set: { value, updatedBy, updatedAt: new Date(), rowVersion: sql`${settings.rowVersion} + 1` },
 			}).returning())[0]!;
 		}
-		const updated = (await db.update(settings).set({ value, updatedBy, updatedAt: new Date(), rowVersion: expectedVersion + 1n }).where(and(eq(settings.key, key), eq(settings.rowVersion, expectedVersion))).returning())[0];
+		const updated = await versionedUpdate({
+			subject: ["setting", key].join(" "), expectedVersion,
+			update: async () => (await db.update(settings).set({ value, updatedBy, updatedAt: new Date(), rowVersion: expectedVersion + 1n }).where(and(eq(settings.key, key), eq(settings.rowVersion, expectedVersion))).returning())[0],
+			current: async () => (await db.select({ rowVersion: settings.rowVersion }).from(settings).where(eq(settings.key, key)).limit(1))[0],
+		});
 		if (!updated) throw new StaleVersionError(["setting", key].join(" "), expectedVersion);
 		return updated;
 	},

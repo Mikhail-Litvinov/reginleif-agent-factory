@@ -4,7 +4,7 @@ import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { migrate } from "../db/migrate.ts";
-import { databaseRefusal } from "../db/repo/errors.ts";
+import { databaseRefusal, StaleVersionError } from "../db/repo/errors.ts";
 import { createRepo } from "../db/repo/index.ts";
 import { DependencyRefusedError, TaskDeleteRefusedError, TransitionRefusedError } from "../db/repo/tasks.ts";
 import { taskRevisions } from "../db/schema/decisions.ts";
@@ -49,7 +49,10 @@ describe("migration 0002 and 0003 repositories", () => {
 		assert.equal((await repo.tasks.revisions(task.id))[0]?.changeReason, "initial");
 		assert.equal((await repo.tasks.list({ projectId: task.projectId!, priorityGte: 4, q: task.title! })).length, 1);
 		assert.equal((await repo.tasks.transition(task.id, 1n, "PLANNING"))?.rowVersion, 2n);
-		assert.equal(await repo.tasks.transition(task.id, 1n, "READY"), null);
+		await assert.rejects(repo.tasks.transition(task.id, 1n, "READY"), (error: unknown) =>
+			error instanceof StaleVersionError && error.currentVersion === 2n);
+		await assert.rejects(repo.tasks.softDelete(task.id, 1n), (error: unknown) =>
+			error instanceof StaleVersionError && error.currentVersion === 2n);
 		await assert.rejects(repo.tasks.softDelete(task.id, 2n), (error: unknown) =>
 			error instanceof TaskDeleteRefusedError && error.reason === "task cannot be deleted");
 		assert.equal((await repo.tasks.transition(task.id, 2n, "READY"))?.status, "READY");
@@ -64,6 +67,8 @@ describe("migration 0002 and 0003 repositories", () => {
 		assert.equal((await repo.tasks.softDelete(task.id, 9n))?.rowVersion, 10n);
 		assert.equal(await repo.tasks.get(task.id), undefined);
 		assert.equal((await repo.tasks.get(task.id, { includeDeleted: true }))?.deletedAt instanceof Date, true);
+		assert.equal(await repo.tasks.transition(id(999), 1n, "PLANNING"), null);
+		assert.equal(await repo.tasks.softDelete(id(999), 1n), null);
 	});
 
 	it("returns typed transition refusals with the database reason", async () => {
@@ -83,6 +88,8 @@ describe("migration 0002 and 0003 repositories", () => {
 		await assert.rejects(repo.tasks.addDependency(third.id, first.id, "requires_accepted"), (error: unknown) =>
 			error instanceof DependencyRefusedError && error.reason === "dependency_cycle");
 		assert.equal((await repo.tasks.dependencies(first.id)).length, 1);
+		await assert.rejects(repo.tasks.removeDependency(first.id, second.id, 0n), (error: unknown) =>
+			error instanceof StaleVersionError && error.currentVersion === 1n);
 		assert.equal((await repo.tasks.removeDependency(first.id, second.id, 1n))?.removedAt instanceof Date, true);
 		assert.equal(await repo.tasks.removeDependency(first.id, second.id, 1n), null);
 		assert.equal((await repo.tasks.dependencies(first.id)).length, 0);

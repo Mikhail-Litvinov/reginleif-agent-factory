@@ -33,8 +33,12 @@ describe("migration 0001 repositories", () => {
 		assert.equal(project.rowVersion, 1n);
 		assert.equal((await repo.projects.get(id(1)))?.name, "repo-project");
 		assert.equal((await repo.projects.update(id(1), 1n, { description: "updated" }))?.rowVersion, 2n);
-		assert.equal(await repo.projects.update(id(1), 1n, { description: "stale" }), null);
+		await assert.rejects(repo.projects.update(id(1), 1n, { description: "stale" }), (error: unknown) =>
+			error instanceof StaleVersionError && error.currentVersion === 2n);
 		assert.equal((await repo.projects.archive(id(1), 2n))?.rowVersion, 3n);
+		await assert.rejects(repo.projects.archive(id(1), 2n), (error: unknown) => error instanceof StaleVersionError && error.currentVersion === 3n);
+		assert.equal(await repo.projects.update(id(999), 1n, { description: "missing" }), null);
+		assert.equal(await repo.projects.archive(id(999), 1n), null);
 		assert.equal((await repo.projects.list({ archived: true, q: "repo-proj" })).length, 1);
 		assert.equal((await repo.projects.list()).some((row) => row.id === id(1)), true);
 
@@ -42,8 +46,12 @@ describe("migration 0001 repositories", () => {
 		assert.equal((await repo.agents.get(id(2)))?.name, "repo-agent");
 		assert.equal((await repo.agents.list({ provider: "test", enabled: true })).length, 1);
 		assert.equal((await repo.agents.update(id(2), 1n, { enabled: false }))?.rowVersion, 2n);
-		assert.equal(await repo.agents.update(id(2), 1n, { enabled: true }), null);
+		await assert.rejects(repo.agents.update(id(2), 1n, { enabled: true }), (error: unknown) =>
+			error instanceof StaleVersionError && error.currentVersion === 2n);
+		await assert.rejects(repo.agents.softDelete(id(2), 1n), (error: unknown) => error instanceof StaleVersionError && error.currentVersion === 2n);
 		assert.equal((await repo.agents.softDelete(id(2), 2n))?.rowVersion, 3n);
+		assert.equal(await repo.agents.update(id(999), 1n, { enabled: false }), null);
+		assert.equal(await repo.agents.softDelete(id(999), 1n), null);
 		assert.equal(await repo.agents.get(id(2)), undefined);
 		assert.equal((await repo.agents.list({ includeDeleted: true })).some((row) => row.id === id(2)), true);
 	});
@@ -61,7 +69,9 @@ describe("migration 0001 repositories", () => {
 		assert.equal((await repo.workers.list({ status: "online", platform: "linux" })).length, 1);
 		assert.equal(second.rowVersion, first.rowVersion + 1n);
 		assert.equal((await repo.workers.update(first.id, second.rowVersion, { status: "disabled" }))?.status, "disabled");
-		assert.equal(await repo.workers.update(first.id, second.rowVersion, { status: "online" }), null);
+		await assert.rejects(repo.workers.update(first.id, second.rowVersion, { status: "online" }), (error: unknown) =>
+			error instanceof StaleVersionError && error.currentVersion === second.rowVersion + 1n);
+		assert.equal(await repo.workers.update(id(999), 1n, { status: "online" }), null);
 	});
 
 	it("snapshots named settings and writes settings with optimistic versions", async () => {
@@ -69,7 +79,8 @@ describe("migration 0001 repositories", () => {
 		const snapshot = await repo.settings.snapshot(["repo.setting", "repo.missing"]);
 		assert.deepEqual(snapshot, { "repo.setting": { value: 1 } });
 		assert.equal((await repo.settings.set("repo.setting", { value: 2 }, id(1), 1n))?.rowVersion, 2n);
-		await assert.rejects(repo.settings.set("repo.setting", { value: 3 }, id(1), 1n), StaleVersionError);
+		await assert.rejects(repo.settings.set("repo.setting", { value: 3 }, id(1), 1n), (error: unknown) =>
+			error instanceof StaleVersionError && error.currentVersion === 2n);
 		assert.deepEqual(snapshot, { "repo.setting": { value: 1 } });
 		assert.deepEqual(await repo.settings.snapshot(["repo.setting"]), { "repo.setting": { value: 2 } });
 	});
@@ -110,11 +121,16 @@ describe("migration 0001 repositories", () => {
 		assert.equal((await repo.tokens.byHash("sha256:hash"))?.id, id(8));
 		const rotated = await repo.tokens.rotate(id(8), 1n, { id: id(9), name: "replacement", role: "owner", ownerId: id(7), prefix: "pfx2", tokenHash: "sha256:next", createdBy: id(7) }, new Date("2030-01-01T00:00:00Z"));
 		assert.equal(rotated?.replacesTokenId, id(8));
+		assert.equal(await repo.tokens.rotate(id(999), 1n, { id: id(10), name: "missing", role: "owner", ownerId: id(7), prefix: "pfx3", tokenHash: "sha256:missing", createdBy: id(7) }, new Date("2030-01-01T00:00:00Z")), null);
+		await assert.rejects(repo.tokens.rotate(id(8), 1n, { id: id(10), name: "unused", role: "owner", ownerId: id(7), prefix: "pfx3", tokenHash: "sha256:unused", createdBy: id(7) }, new Date("2030-01-01T00:00:00Z")), (error: unknown) =>
+			error instanceof StaleVersionError && error.currentVersion === 2n);
 		const listed = await repo.tokens.list();
 		assert.equal(listed.length, 2);
 		assert.equal("tokenHash" in listed[0]!, false);
+		await assert.rejects(repo.tokens.revoke(id(9), 0n), (error: unknown) => error instanceof StaleVersionError && error.currentVersion === 1n);
 		assert.equal((await repo.tokens.revoke(id(9), 1n))?.revokedAt instanceof Date, true);
 		assert.equal(await repo.tokens.revoke(id(9), 1n), null);
+		assert.equal(await repo.tokens.revoke(id(999), 1n), null);
 	});
 
 	it("appends and reads audit rows without an update surface", async () => {

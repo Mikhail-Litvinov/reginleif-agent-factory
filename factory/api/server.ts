@@ -4,7 +4,7 @@ import { createServer, type IncomingMessage } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { z } from 'zod';
 import { routes, type Route } from '../contracts/routes.ts';
-import { databaseUnavailable } from '../db/repo/errors.ts';
+import { databaseUnavailable, RepositoryNotFoundError, StaleVersionError } from '../db/repo/errors.ts';
 import { createLogger, type Logger } from '../lib/log.ts';
 import { BadCursorError } from './cursor.ts';
 
@@ -190,6 +190,8 @@ export function createApiServer(deps: Dependencies) {
       // A malformed or foreign cursor is the caller's mistake (api.md:385, :667), whichever handler read the stream.
       if (res.headersSent) res.destroy();
       else if (error instanceof BadCursorError) await problem(400, 'bad_cursor', 'Invalid cursor');
+      else if (error instanceof StaleVersionError) await problem(409, 'version_conflict', 'If-Match does not match row_version', error.currentVersion === undefined ? {} : { current_row_version: Number(error.currentVersion) });
+      else if (error instanceof RepositoryNotFoundError) await problem(404, 'not_found', 'Resource not found');
       else if (databaseUnavailable(error)) await problem(503, 'unavailable', 'Database unavailable', { retry_after: 1 }, { 'Retry-After': '1' });
       else await problem(500, 'internal', 'Request failed');
     }

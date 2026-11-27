@@ -1,7 +1,7 @@
 import { and, asc, desc, eq, gte, inArray, isNull, lte, sql, type SQL } from "drizzle-orm";
 import type { PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import { canTransition, type BlockKind, type TaskState } from "../../contracts/states.ts";
-import { refusing } from "./errors.ts";
+import { refusing, versionedUpdate } from "./errors.ts";
 import { taskDependencies } from "../schema/task-dependencies.ts";
 import { taskRevisions } from "../schema/decisions.ts";
 import { tasks } from "../schema/tasks.ts";
@@ -100,20 +100,36 @@ export const taskRepo = (db: PostgresJsDatabase<any>) => ({
 		return db.select().from(tasks).where(and(...conditions)).orderBy(direction === "asc" ? asc(orderColumn) : desc(orderColumn));
 	},
 	transition: async (id: string, expectedVersion: bigint, to: TaskState, patch: TransitionPatch = {}): Promise<Task | null> => {
-		const current = await db.select().from(tasks).where(and(eq(tasks.id, id), eq(tasks.rowVersion, expectedVersion), isNull(tasks.deletedAt))).limit(1);
+		const current = await db.select().from(tasks).where(and(eq(tasks.id, id), isNull(tasks.deletedAt))).limit(1);
 		if (!current[0]) return null;
+		if (current[0].rowVersion !== expectedVersion) {
+			await versionedUpdate({
+				subject: ["task", id].join(" "), expectedVersion,
+				update: async () => undefined,
+				current: async () => (await db.select({ rowVersion: tasks.rowVersion }).from(tasks).where(and(eq(tasks.id, id), isNull(tasks.deletedAt))).limit(1))[0],
+			});
+			return null;
+		}
 		const handoff = current[0].status === "BLOCKED" && to === "BLOCKED" && current[0].blockHandler === "chief_engineer" && patch.blockHandler === "owner";
 		if (!handoff && !TransitionGuard.allows(current[0].status as TaskState, to, (current[0].blockKind ?? undefined) as BlockKind | undefined)) throw new TransitionRefusedError("illegal task transition");
 		const clearBlock = current[0].status === "BLOCKED" && to !== "BLOCKED" ? { blockKind: null, blockHandler: null } : {};
 		const clearPause = current[0].status === "PAUSED" && to !== "PAUSED" ? { resumeTo: null } : {};
 		return refusing((reason) => new TransitionRefusedError(reason), async () =>
-			(await db.update(tasks).set({ ...clearBlock, ...clearPause, ...patch, status: to, updatedAt: new Date(), rowVersion: expectedVersion + 1n })
-				.where(and(eq(tasks.id, id), eq(tasks.rowVersion, expectedVersion), isNull(tasks.deletedAt))).returning())[0] ?? null);
+			versionedUpdate({
+				subject: ["task", id].join(" "), expectedVersion,
+				update: async () => (await db.update(tasks).set({ ...clearBlock, ...clearPause, ...patch, status: to, updatedAt: new Date(), rowVersion: expectedVersion + 1n })
+					.where(and(eq(tasks.id, id), eq(tasks.rowVersion, expectedVersion), isNull(tasks.deletedAt))).returning())[0],
+				current: async () => (await db.select({ rowVersion: tasks.rowVersion }).from(tasks).where(and(eq(tasks.id, id), isNull(tasks.deletedAt))).limit(1))[0],
+			}));
 	},
 	softDelete: async (id: string, expectedVersion: bigint): Promise<Task | null> =>
 		refusing((reason) => new TaskDeleteRefusedError(reason), async () =>
-			(await db.update(tasks).set({ deletedAt: new Date(), updatedAt: new Date(), rowVersion: expectedVersion + 1n })
-				.where(and(eq(tasks.id, id), eq(tasks.rowVersion, expectedVersion), isNull(tasks.deletedAt))).returning())[0] ?? null),
+			versionedUpdate({
+				subject: ["task", id].join(" "), expectedVersion,
+				update: async () => (await db.update(tasks).set({ deletedAt: new Date(), updatedAt: new Date(), rowVersion: expectedVersion + 1n })
+					.where(and(eq(tasks.id, id), eq(tasks.rowVersion, expectedVersion), isNull(tasks.deletedAt))).returning())[0],
+				current: async () => (await db.select({ rowVersion: tasks.rowVersion }).from(tasks).where(and(eq(tasks.id, id), isNull(tasks.deletedAt))).limit(1))[0],
+			})),
 	revisions: async (taskId: string): Promise<Revision[]> =>
 		db.select().from(taskRevisions).where(eq(taskRevisions.taskId, taskId)).orderBy(asc(taskRevisions.revisionNumber)),
 	getRevision: async (taskId: string, revisionNumber: number): Promise<Revision | undefined> =>
@@ -134,8 +150,13 @@ export const taskRepo = (db: PostgresJsDatabase<any>) => ({
 			(await db.insert(taskDependencies).values({ taskId, dependsOnTaskId, dependencyType }).returning())[0]!),
 	removeDependency: async (taskId: string, dependsOnTaskId: string, expectedVersion: bigint, removedBy?: string): Promise<Dependency | null> =>
 		refusing((reason) => new DependencyRefusedError(reason), async () =>
-			(await db.update(taskDependencies).set({ removedAt: new Date(), removedBy, updatedAt: new Date(), rowVersion: expectedVersion + 1n })
-				.where(and(eq(taskDependencies.taskId, taskId), eq(taskDependencies.dependsOnTaskId, dependsOnTaskId), eq(taskDependencies.rowVersion, expectedVersion), isNull(taskDependencies.removedAt))).returning())[0] ?? null),
+			versionedUpdate({
+				subject: ["task dependency", taskId, dependsOnTaskId].join(" "), expectedVersion,
+				update: async () => (await db.update(taskDependencies).set({ removedAt: new Date(), removedBy, updatedAt: new Date(), rowVersion: expectedVersion + 1n })
+					.where(and(eq(taskDependencies.taskId, taskId), eq(taskDependencies.dependsOnTaskId, dependsOnTaskId), eq(taskDependencies.rowVersion, expectedVersion), isNull(taskDependencies.removedAt))).returning())[0],
+				current: async () => (await db.select({ rowVersion: taskDependencies.rowVersion }).from(taskDependencies)
+					.where(and(eq(taskDependencies.taskId, taskId), eq(taskDependencies.dependsOnTaskId, dependsOnTaskId), isNull(taskDependencies.removedAt))).limit(1))[0],
+			})),
 });
 
 export type TaskRepository = ReturnType<typeof taskRepo>;
