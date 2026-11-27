@@ -142,6 +142,12 @@ export const registryRepo = (db: PostgresJsDatabase<any>) => ({
 				.orderBy(asc(registryLinks.createdAt), asc(registryLinks.id)),
 	},
 	embeddings: {
+		// Held until the surrounding transaction commits, including the model call and inserts.
+		lockReembedding: async (): Promise<void> => { await db.execute(sql`select pg_advisory_xact_lock(hashtextextended(${'factory:registry:reembedding'}, 0))`); },
+		pendingReembedding: async (modelVersion: string, limit: number): Promise<{ id: string; text: string }[]> => {
+			const result = await db.execute(sql`select r.id, concat_ws(' ', r.problem, r.decision, r.summary) as text from registry_records r where exists (select 1 from registry_embeddings e where e.record_id = r.id and e.model_version <> ${modelVersion}) and not exists (select 1 from registry_embeddings e where e.record_id = r.id and e.model_version = ${modelVersion}) order by r.id limit ${limit}`);
+			return result as unknown as { id: string; text: string }[];
+		},
 		create: async (input: EmbeddingInsert): Promise<Embedding> => refusing((reason) => new RegistryRefusedError(reason), async () =>
 			(await db.insert(registryEmbeddings).values(input).returning())[0]!),
 		forRecord: async (recordId: string, modelVersion?: string): Promise<Embedding[]> =>
