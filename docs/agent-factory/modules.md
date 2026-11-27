@@ -61,7 +61,7 @@ and the import work before Temporal exists ([governance.md](governance.md)).
 | `F/api/cursor.ts` | The one event cursor for every `after_seq`: opaque, names its stream, orders by `(commit_xid, seq)` and reads only rows with `commit_xid` below the oldest running transaction (`pg_snapshot_xmin`), so a row committed late is never skipped; a bad cursor is refused `bad_cursor`. Used by the event stream, the audit and task event lists, the notices and the messages | repo |
 | `F/control/` | Control Worker skeleton: connection, `LoadSettings`, `PersistTaskEvent` | repo |
 | `F/registry/service.ts` | Records, links, status changes under audit, inquiries and verdicts, the order of authority, the activation rules (G2, G8, sensitive categories, `guard_conflict`), regulation versions and their conflict check | repo |
-| `F/registry/search.ts` | Filters first, then full text (ru, en), trigrams and `pgvector` merged; `degraded` without the model | service |
+| `F/registry/search.ts` | Filters first, then full text (ru, en) and `pgvector` merged; without the model `degraded`, with trigrams as the typo fallback | service |
 | `F/deploy/embedder/` | The local embedding model on the CPU, no outward network (G3). First the `registry-search` measurement chooses the model, then it is pinned by checksum and its vector size goes into migration 0006 | compose |
 | `F/registry/embedder-client.ts` | Calls the embedder container; stores the model version with each vector; background re-embedding | service |
 | `F/registry/gate.ts` | The gate command (G9): inquiry id, verdicts, a second search by the real question text, fail open after `registry.gateTimeoutMs` | service |

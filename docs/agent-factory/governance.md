@@ -293,14 +293,15 @@ a clause that repeats one names it (call).
 
 ## Search
 
-Filters first (project or global, active, category, scope), then three rankings merged: full text (Russian and English
-configurations), trigrams, and the cosine distance of `pgvector` vectors. The answer carries id, kind, authority, scope,
+Filters first (project or global, active, category, scope), then two rankings merged: full text (Russian and English
+configurations) and the cosine distance of `pgvector` vectors. Trigrams are not part of this ranking: they run only in
+degraded mode, as a typo fallback. The answer carries id, kind, authority, scope,
 the matched fields and the ranking that found it. Similar text is not applicability: the verdict of the agent decides, and
 it is stored.
 
 The model runs in a container of the server contour on the CPU, pinned by checksum, with no outward network. A vector
 stores the model version; a new model re-embeds in the background and switches when complete. Without it the search uses
-the two text rankings and says `degraded`. The model and thresholds are chosen by a measurement on invented paraphrases in
+the full-text rankings plus the trigram typo fallback and says `degraded`. The model and thresholds are chosen by a measurement on invented paraphrases in
 Russian and English: the criterion is the right record among the first results, and no hit for an unrelated question.
 
 Search reads `registry.textThreshold`, `registry.trigramThreshold`, `registry.vectorThreshold`,
@@ -308,7 +309,7 @@ Search reads `registry.textThreshold`, `registry.trigramThreshold`, `registry.ve
 0.025, 0.1846, 0.47, `5617a9f61b028005a4858fdac845db406aefb181` and 5; see
 `docs/reports/registry-search-measurement.md` (the limit is the report's top-five criterion). The two full-text
 scores are combined by their maximum. Vector, full text and trigram scores have different scales: results are ordered
-by vector first, then full text, then trigram as a typo fallback, with descending score within each ranking. A record
+by vector first, then full text, then trigram (degraded mode only, the typo fallback), with descending score within each ranking. A record
 appears once, under its highest-priority ranking. Search excludes single-use records before ranking. Matched fields
 are collected from the text and trigram matches; vector similarity alone does not identify a field.
 
