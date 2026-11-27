@@ -18,6 +18,8 @@ export const decisionRepo = (db: PostgresJsDatabase<any>) => ({
 	lockKey: async (principal: string, key: string): Promise<void> => {
 		await db.execute(sql`select pg_advisory_xact_lock(hashtextextended(${principal + ':' + key}, 0))`);
 	},
+	tryLockKey: async (principal: string, key: string): Promise<boolean> =>
+		(await db.execute<{ locked: boolean }>(sql`select pg_try_advisory_xact_lock(hashtextextended(${principal + ':' + key}, 0)) as locked`))[0]!.locked,
 	record: async (input: { decision: DecisionInsert; outbox: OutboxInsert }): Promise<{ decision: Decision; outbox: OutboxEvent }> =>
 		db.transaction(async (tx) => {
 			return decisionRepo(tx).insertPair(input);
@@ -38,6 +40,7 @@ export const decisionRepo = (db: PostgresJsDatabase<any>) => ({
 });
 
 export const outboxRepo = (db: PostgresJsDatabase<any>) => ({
+	create: async (input: OutboxInsert): Promise<OutboxEvent> => (await db.insert(outboxEvents).values(input).returning())[0]!,
 	get: async (id: string): Promise<OutboxEvent | undefined> => (await db.select().from(outboxEvents).where(eq(outboxEvents.id, id)).limit(1))[0],
 	listPending: async (limit?: number): Promise<OutboxEvent[]> => {
 		const query = db.select().from(outboxEvents).where(and(or(eq(outboxEvents.state, "pending"), eq(outboxEvents.state, "sent")), or(isNull(outboxEvents.nextAttemptAt), sql`${outboxEvents.nextAttemptAt} <= now()`))).orderBy(asc(outboxEvents.seq));

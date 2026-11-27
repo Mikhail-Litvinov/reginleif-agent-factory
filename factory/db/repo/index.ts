@@ -10,6 +10,7 @@ import { registryRepo } from "./registry.ts";
 import { rightAnswerRepo, rightGrantRepo, rightRequestRepo, rightsSuspensionRepo, roleAssignmentRepo, roleRepo } from "./rights.ts";
 import { routingRuleRepo } from "./routing-rules.ts";
 import { settingsRepo } from "./settings.ts";
+import { taskReadRepo } from "./task-reads.ts";
 import { taskRepo } from "./tasks.ts";
 import { tokenRepo } from "./tokens.ts";
 import { workerRepo } from "./workers.ts";
@@ -25,6 +26,7 @@ type RepoParts = {
 	audit: ReturnType<typeof auditRepo>;
 	owners: ReturnType<typeof ownerRepo>;
 	tasks: ReturnType<typeof taskRepo>;
+	taskReads: ReturnType<typeof taskReadRepo>;
 	decisions: ReturnType<typeof decisionRepo>;
 	taskEvents: ReturnType<typeof taskEventRepo>;
 	outbox: ReturnType<typeof outboxRepo>;
@@ -59,6 +61,7 @@ export const createRepo = (db: PostgresJsDatabase<any>): Repo => ({
 	audit: auditRepo(db),
 	owners: ownerRepo(db),
 	tasks: taskRepo(db),
+	taskReads: taskReadRepo(db),
 	decisions: decisionRepo(db),
 	taskEvents: taskEventRepo(db),
 	outbox: outboxRepo(db),

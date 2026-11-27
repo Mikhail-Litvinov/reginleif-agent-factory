@@ -6,7 +6,7 @@ const RAISE_EXCEPTION = "P0001";
 
 export interface DatabaseRefusal { reason: string; sqlstate: string }
 
-const driverError = (error: unknown): { code: string; message: string } | undefined => {
+export const driverError = (error: unknown): { code: string; message: string } | undefined => {
 	for (let current: unknown = error, depth = 0; typeof current === "object" && current !== null && depth < 8; depth++) {
 		const candidate = current as { code?: unknown; message?: unknown; cause?: unknown };
 		if (typeof candidate.code === "string" && /^[0-9A-Z]{5}$/.test(candidate.code) && typeof candidate.message === "string") {
@@ -20,6 +20,17 @@ const driverError = (error: unknown): { code: string; message: string } | undefi
 export const databaseRefusal = (error: unknown): DatabaseRefusal | undefined => {
 	const driver = driverError(error);
 	return driver?.code === RAISE_EXCEPTION ? { reason: driver.message, sqlstate: driver.code } : undefined;
+};
+
+export const databaseUnavailable = (error: unknown): boolean => {
+	let current = error;
+	for (let depth = 0; current && typeof current === 'object' && depth < 8; depth++) {
+		const code = (current as { code?: unknown }).code;
+		if (typeof code === 'string' && (/^08\w{3}$|^57P0[123]$/.test(code) ||
+			['ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'CONNECT_TIMEOUT', 'CONNECTION_CLOSED', 'CONNECTION_ENDED', 'CONNECTION_DESTROYED'].includes(code))) return true;
+		current = (current as { cause?: unknown }).cause;
+	}
+	return false;
 };
 
 // Runs a repo operation; a database refusal becomes the typed error `make` builds, anything else passes through.

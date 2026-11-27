@@ -91,16 +91,16 @@ const entries: Input[] = [
   { method: 'POST', path: '/projects', roles: owner, request: projectCreateSchema, responses: { 201: projectSchema } },
   { method: 'GET', path: '/projects/{id}', roles: readers, responses: { 200: projectDetailSchema } },
   { method: 'PATCH', path: '/projects/{id}', roles: owner, request: projectPatchSchema, responses: { 200: projectSchema }, errors: { 409: ['version_conflict'] } },
-  { method: 'POST', path: '/projects/{id}/archive', roles: owner, request: 'none', responses: { 200: projectSchema }, errors: { 409: ['project_active'] } },
+  { method: 'POST', path: '/projects/{id}/archive', roles: owner, request: 'none', responses: { 200: projectSchema }, errors: { 409: ['project_active', 'version_conflict'] } },
   { method: 'GET', path: '/projects/{id}/policy', roles: readers, responses: { 200: executionPolicySchema } },
   { method: 'PUT', path: '/projects/{id}/policy', roles: owner, request: policyPutSchema, responses: { 201: executionPolicySchema }, errors: { 409: ['confirmation_required'] } },
   { method: 'GET', path: '/projects/{id}/routing-rules', roles: readers, responses: { 200: pageSchema(routingRuleSchema) } },
   { method: 'POST', path: '/projects/{id}/routing-rules', roles: owner, request: routingRuleCreateSchema, responses: { 201: routingRuleSchema } },
   { method: 'DELETE', path: '/projects/{id}/routing-rules/{rule}', roles: owner, request: 'none', responses: { 200: routingRuleSchema } },
   { method: 'GET', path: '/tasks', roles: readers },
-  { method: 'POST', path: '/tasks', roles: owner, request: createTaskRequestSchema, responses: { 201: 'unspecified' } },
+  { method: 'POST', path: '/tasks', roles: owner, request: createTaskRequestSchema, responses: { 201: 'unspecified' }, errors: { 404: ['not_found'], 409: ['dependency_cycle'] } },
   { method: 'GET', path: '/tasks/{id}', roles: readers },
-  { method: 'DELETE', path: '/tasks/{id}', roles: owner, request: 'none', errors: { 409: ['task_active'] } },
+  { method: 'DELETE', path: '/tasks/{id}', roles: owner, request: 'none', errors: { 409: ['task_active', 'version_conflict'] } },
   { method: 'GET', path: '/tasks/{id}/revisions', roles: readers },
   { method: 'GET', path: '/tasks/{id}/revisions/{n}', roles: readers },
   { method: 'POST', path: '/tasks/{id}/dependencies', roles: owner, errors: { 409: ['dependency_cycle'] } },
@@ -260,7 +260,7 @@ const entries: Input[] = [
 
 const queryParameters: Readonly<Record<string, readonly string[]>> = {
   '/projects': ['archived', 'q'],
-  '/tasks': ['project_id', 'status', 'priority_gte', 'agent_id', 'parent_id', 'created_after', 'created_before', 'updated_after', 'awaiting_approval', 'q', 'origin_type'],
+  '/tasks': ['project_id', 'status', 'priority_gte', 'agent_id', 'parent_id', 'created_after', 'created_before', 'updated_after', 'awaiting_approval', 'q', 'origin_type', 'sort', 'direction'],
   '/tasks/{id}/runs': ['status', 'role'], '/tasks/{id}/events': ['type', 'run_id'],
   '/tasks/{id}/artifacts': ['type', 'run_id'], '/agents': ['provider', 'enabled'],
   '/workers': ['status', 'platform'], '/notifications': ['state', 'event_type'],
@@ -346,7 +346,7 @@ function toRoute(entry: Input): Route {
   const parameters = [...(entry.parameters ?? [])];
   if (entry.method === 'GET') {
     const names = [...(queryParameters[entry.path] ?? [])];
-    if (lists.has(entry.path)) names.push('limit', 'cursor', 'include_deleted');
+    if (lists.has(entry.path) || entry.path === '/projects/{id}/routing-rules') names.push('limit', 'cursor', 'include_deleted');
     else if (entry.path === '/events/stream') names.push('cursor');
     for (const name of names) parameters.push({ name, in: 'query', ...((entry.path === '/tasks' && name === 'status') || (entry.path === '/events/stream' && name === 'cursor') ? { repeatable: true } : {}) });
     if (entry.path === '/events/stream') parameters.push({ name: 'Last-Event-ID', in: 'header' });
@@ -355,6 +355,7 @@ function toRoute(entry: Input): Route {
   parameters.push({ name: 'X-Request-Id', in: 'header' });
   if (entry.roles.some((role) => role === 'worker' || role.startsWith('worker:'))) parameters.push({ name: 'X-Factory-Contract', in: 'header', required: true });
   if (entry.method === 'PATCH' && (entry.path === '/projects/{id}' || entry.path === '/agents/{id}')) parameters.push({ name: 'If-Match', in: 'header', required: true });
+  if ((entry.method === 'DELETE' && entry.path === '/tasks/{id}') || (entry.method === 'POST' && entry.path === '/projects/{id}/archive')) parameters.push({ name: 'If-Match', in: 'header' });
   if (entry.method === 'PUT' && entry.path === '/projects/{id}/policy') parameters.push({ name: 'If-Match', in: 'header', required: true });
   if (keyedMutation) parameters.push({ name: 'Idempotency-Key', in: 'header', required: true, schema: idempotencyKeySchema });
   const confirms = secondPress.has(`${entry.method} ${entry.path}`);
@@ -373,6 +374,7 @@ function toRoute(entry: Input): Route {
   if (keyedMutation) errors[409] = [...(errors[409] ?? []), 'idempotency_conflict', 'idempotency_in_progress'];
   if (confirms) errors[409] = [...new Set([...(errors[409] ?? []), 'confirmation_required', 'confirmation_invalid'])];
   if (cursorStreams.has(entry.path)) errors[400] = [...(errors[400] ?? []), ...((errors[400] ?? []).includes('bad_cursor') ? [] : ['bad_cursor'])];
+  if (entry.method === 'GET' && (lists.has(entry.path) || entry.path === '/projects/{id}/routing-rules') && /^\/(projects|tasks)(\/|$)/.test(entry.path)) errors[400] = ['bad_cursor'];
   return {
     method: entry.method, path: entry.path,
     operationId: `${entry.method.toLowerCase()}_${entry.path.replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_|_$/g, '')}`,

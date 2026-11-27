@@ -30,7 +30,7 @@ export const projectSchema = z.strictObject({
   workspace_policy: z.literal('worktree'), settings: z.json(), priority: integer, created_at: time,
   updated_at: time, archived_at: time.nullable(), deleted_at: time.nullable(), row_version: integer,
 });
-export const projectDetailSchema = projectSchema.extend({ policy: executionPolicySchema });
+export const projectDetailSchema = projectSchema.extend({ policy: executionPolicySchema.nullable() });
 export const routingRuleCreateSchema = z.strictObject({
   match: z.json(), preferred_agent_ids: z.array(uuid), position: integer,
 });
