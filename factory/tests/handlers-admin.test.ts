@@ -85,7 +85,10 @@ before(async () => {
     { deps: { repo: streamRepo, queueGatewayEnabled: false, now: () => clockNow }, set: (url: string) => { off = url; } },
     { deps: { repo: streamRepo, queueGatewayEnabled: true, now: () => clockNow }, set: (url: string) => { on = url; } },
     // A repository whose token reads report a stale row_version, to provoke a lost version race.
-    { deps: { repo: { ...repo, tokens: { ...repo.tokens, get: async (id: string) => { const row = await repo.tokens.get(id); return row && { ...row, rowVersion: row.rowVersion - 1n }; } } } as Repo, now: () => clockNow }, set: (url: string) => { stale = url; } },
+    { deps: { repo: { ...repo,
+      tokens: { ...repo.tokens, get: async (id: string) => { const row = await repo.tokens.get(id); return row && { ...row, rowVersion: row.rowVersion - 1n }; } },
+      workers: { ...repo.workers, get: async (id: string) => { const row = await repo.workers.get(id); return row && { ...row, rowVersion: row.rowVersion - 1n }; } },
+    } as Repo, now: () => clockNow }, set: (url: string) => { stale = url; } },
   ];
   const running: ReturnType<typeof createApiServer>[] = [];
   for (const { deps, set } of servers) {
@@ -206,10 +209,12 @@ test('a lost row_version race rolls the idempotency claim back so the key can be
   const lost = await call(stale, 'POST', `/tokens/${made.json.id}/rotate`, owner, { headers: key });
   assert.equal(lost.status, 409);
   assert.equal(lost.json.code, 'version_conflict');
+  assert.equal(lost.json.current_row_version, 1);
   const retried = await call(off, 'POST', `/tokens/${made.json.id}/rotate`, owner, { headers: key });
   assert.equal(retried.status, 201);
   const lostRevoke = await call(stale, 'DELETE', `/tokens/${retried.json.id}`, owner, { headers: { 'idempotency-key': 'race-revoke-0001' } });
   assert.equal(lostRevoke.json.code, 'version_conflict');
+  assert.equal(lostRevoke.json.current_row_version, 1);
   assert.equal((await call(off, 'DELETE', `/tokens/${retried.json.id}`, owner, { headers: { 'idempotency-key': 'race-revoke-0001' } })).status, 200);
 });
 
@@ -272,6 +277,10 @@ test('workers list, read and patch', async () => {
   const disabled = await call(off, 'GET', '/workers?status=disabled', reader);
   assert.deepEqual((disabled.json.items as Json[]).map(item => item.id), [workerId]);
   assert.equal((await call(off, 'PATCH', `/workers/${workerId}`, owner, { body: { status: 'online' } })).json.status, 'online');
+  const lost = await call(stale, 'PATCH', `/workers/${workerId}`, owner, { body: { status: 'disabled' } });
+  assert.equal(lost.status, 409);
+  assert.equal(lost.json.code, 'version_conflict');
+  assert.equal(lost.json.current_row_version, (await repo.workers.get(workerId))?.rowVersion);
 });
 
 test('cleanup dry run reports unknown sizes as null, not zero', async () => {
@@ -372,6 +381,7 @@ test('agents: create, version-checked patch and soft delete', async () => {
   const stale = await call(off, 'PATCH', path, owner, { body: { concurrency_limit: 3 }, headers: { 'if-match': '"999"' } });
   assert.equal(stale.status, 409);
   assert.equal(stale.json.code, 'version_conflict');
+  assert.equal(stale.json.current_row_version, created.json.row_version);
   const patched = await call(off, 'PATCH', path, owner, { body: { concurrency_limit: 3 }, headers: { 'if-match': `"${created.json.row_version}"` } });
   assert.equal(patched.status, 200);
   assert.equal(patched.json.concurrency_limit, 3);
@@ -398,6 +408,7 @@ test('project policy can be written by an owner and read back', async () => {
   const wrong = await call(off, 'PUT', `/projects/${projectId}/policy`, owner, { body, headers: { 'if-match': '"1"' } });
   assert.equal(wrong.status, 409);
   assert.equal(wrong.json.code, 'version_conflict');
+  assert.equal(wrong.json.current_row_version, 0);
   const put = await call(off, 'PUT', `/projects/${projectId}/policy`, owner, { body, headers: { 'if-match': '"0"' } });
   assert.equal(put.status, 201);
   const read = await call(off, 'GET', `/projects/${projectId}/policy`, reader);
@@ -449,4 +460,5 @@ test('policy loosening needs the second press, a tightening does not, every chan
   // A stale If-Match is a conflict before any press is asked.
   const stale409 = await call(off, 'PUT', path, owner, { body: { ...loose, max_tokens: 99999 }, headers: header });
   assert.equal(stale409.json.code, 'version_conflict');
+  assert.equal(stale409.json.current_row_version, version + 2);
 });

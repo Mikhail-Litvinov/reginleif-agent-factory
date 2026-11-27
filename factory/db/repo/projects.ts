@@ -1,6 +1,7 @@
 import { and, eq, isNotNull, isNull, sql, type SQL } from "drizzle-orm";
 import type { PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import { projects } from "../schema/projects.ts";
+import { versionedUpdate } from "./errors.ts";
 
 type ProjectInsert = typeof projects.$inferInsert;
 type Project = typeof projects.$inferSelect;
@@ -21,10 +22,16 @@ export const projectRepo = (db: PostgresJsDatabase<any>) => ({
 		return (await (lock ? query.for("update") : query))[0];
 	},
 	create: async (input: ProjectInsert): Promise<Project> => (await db.insert(projects).values(input).returning())[0]!,
-	update: async (id: string, expectedVersion: bigint, patch: ProjectPatch): Promise<Project | null> =>
-		(await db.update(projects).set({ ...patch, updatedAt: new Date(), rowVersion: expectedVersion + 1n }).where(and(eq(projects.id, id), eq(projects.rowVersion, expectedVersion), isNull(projects.deletedAt))).returning())[0] ?? null,
-	archive: async (id: string, expectedVersion: bigint): Promise<Project | null> =>
-		(await db.update(projects).set({ archivedAt: new Date(), updatedAt: new Date(), rowVersion: expectedVersion + 1n }).where(and(eq(projects.id, id), eq(projects.rowVersion, expectedVersion), isNull(projects.deletedAt))).returning())[0] ?? null,
+	update: async (id: string, expectedVersion: bigint, patch: ProjectPatch): Promise<Project | null> => versionedUpdate({
+		subject: ["project", id].join(" "), expectedVersion,
+		update: async () => (await db.update(projects).set({ ...patch, updatedAt: new Date(), rowVersion: expectedVersion + 1n }).where(and(eq(projects.id, id), eq(projects.rowVersion, expectedVersion), isNull(projects.deletedAt))).returning())[0],
+		current: async () => (await db.select({ rowVersion: projects.rowVersion }).from(projects).where(and(eq(projects.id, id), isNull(projects.deletedAt))).limit(1))[0],
+	}),
+	archive: async (id: string, expectedVersion: bigint): Promise<Project | null> => versionedUpdate({
+		subject: ["project", id].join(" "), expectedVersion,
+		update: async () => (await db.update(projects).set({ archivedAt: new Date(), updatedAt: new Date(), rowVersion: expectedVersion + 1n }).where(and(eq(projects.id, id), eq(projects.rowVersion, expectedVersion), isNull(projects.deletedAt))).returning())[0],
+		current: async () => (await db.select({ rowVersion: projects.rowVersion }).from(projects).where(and(eq(projects.id, id), isNull(projects.deletedAt))).limit(1))[0],
+	}),
 });
 
 export type ProjectRepository = ReturnType<typeof projectRepo>;

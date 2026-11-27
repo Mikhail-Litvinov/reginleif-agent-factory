@@ -24,7 +24,7 @@ export function registerWorkerHandlers(api: HandlerRegistrar, { repo, now = () =
       if (row) await writeAudit(tx, context, 'worker.update', 'worker', row.id, 'ok', input);
       return row;
     });
-    return updated ? response(200, apiRow(updated)) : response(409, { code: 'version_conflict' });
+    return updated ? response(200, apiRow(updated)) : response(404, { code: 'not_found' });
   });
   api.register('POST', '/workers/register', async context => {
     const input = context.body as { machine_id: string; name: string; platform: string; capabilities: unknown; version: string; contract_version: number };

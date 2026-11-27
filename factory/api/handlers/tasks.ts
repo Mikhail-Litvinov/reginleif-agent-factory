@@ -38,7 +38,7 @@ const sessionId = ({ identity }: HandlerContext) => identity?.role === 'device' 
 const actorId = ({ identity }: HandlerContext) => identity?.ownerId ?? fail('forbidden', 403);
 const json = (status: number, body: unknown, headers?: Record<string, string>): Result => ({ status, body, headers });
 const created = (body: unknown, location: string) => json(201, body, { Location: location });
-const conflict = (current: bigint, code = 'version_conflict') => json(409, { code, current_row_version: Number(current) });
+const conflict = (current: bigint) => json(409, { code: 'project_active', current_row_version: Number(current) });
 const canReadDeleted = ({ identity }: HandlerContext) => identity?.role === 'owner' || identity?.role === 'device';
 
 // Project only the contract columns. JSON fields keep their original keys.
@@ -243,7 +243,6 @@ export function registerTasks(api: Api, repo: Repo, { clock = () => new Date(), 
   register('PATCH', '/projects/{id}', mutation(repo, async (context, tx) => {
     const version = ifMatch(context);
     const project = found(await tx.projects.get(id(context), { lock: true }));
-    if (version !== project.rowVersion) return conflict(project.rowVersion);
     const body = projectPatchSchema.parse(context.body);
     try {
       const updated = found(await tx.projects.update(project.id, version, { name: body.name, description: body.description,
@@ -255,9 +254,8 @@ export function registerTasks(api: Api, repo: Repo, { clock = () => new Date(), 
   register('POST', '/projects/{id}/archive', mutation(repo, async (context, tx) => {
     const project = found(await tx.projects.get(id(context), { lock: true }));
     const version = ifMatch(context, project.rowVersion);
-    if (version !== project.rowVersion) return conflict(project.rowVersion);
     if ((await tx.tasks.list({ projectId: project.id })).some(task => task.originType !== 'standing' && !finalStates.has(task.status ?? ''))) {
-      return conflict(project.rowVersion, 'project_active');
+      return conflict(project.rowVersion);
     }
     if (project.archivedAt) return json(200, sendProject(project));
     return json(200, sendProject(found(await tx.projects.archive(project.id, version))));
@@ -310,7 +308,6 @@ export function registerTasks(api: Api, repo: Repo, { clock = () => new Date(), 
   register('DELETE', '/tasks/{id}', mutation(repo, async (context, tx) => {
     const task = await taskAt(tx, id(context), false, true);
     const version = ifMatch(context, task.rowVersion);
-    if (version !== task.rowVersion) return conflict(task.rowVersion);
     try { return json(200, sendTask(found(await tx.tasks.softDelete(task.id, version)))); }
     catch (error) {
       if (error instanceof TaskDeleteRefusedError) throw new DecisionProblem('task_active', 409, Number(task.rowVersion));

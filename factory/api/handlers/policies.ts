@@ -3,6 +3,7 @@ import { apiRow, id, response, version, writeAudit } from './shared.ts';
 import { loosenedColumns } from './policy-loosening.ts';
 import { canonicalJson, requestHash, secondPress } from './second-press.ts';
 import { confirmWindowSeconds } from './settings.ts';
+import { StaleVersionError } from '../../db/repo/errors.ts';
 
 export function registerPolicyHandlers(api: HandlerRegistrar, { repo, now = () => new Date() }: HandlerDeps): void {
   api.register('GET', '/projects/{id}/policy', async ({ params }) => {
@@ -23,7 +24,7 @@ export function registerPolicyHandlers(api: HandlerRegistrar, { repo, now = () =
     return repo.transaction(async tx => {
       const effective = await tx.policies.effective(params.id);
       const own = effective && effective.projectId === params.id ? effective : undefined;
-      if (BigInt(own?.version ?? 0) !== expected) return response(409, { code: 'version_conflict' });
+      if (BigInt(own?.version ?? 0) !== expected) throw new StaleVersionError(["policy", params.id].join(" "), expected, BigInt(own?.version ?? 0));
       // database.md: a change that loosens a security column or raises a limit takes the second press (D23).
       const loosened = loosenedColumns(effective ? apiRow(effective) : undefined, input);
       if (loosened.length > 0) {
