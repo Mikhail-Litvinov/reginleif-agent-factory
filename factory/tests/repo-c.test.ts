@@ -162,7 +162,7 @@ it("repo queries use bound parameters and no string-built SQL", async () => {
 	for (const name of files) {
 		const source = await readFile(join(directory, name), "utf8");
 		assert.doesNotMatch(source, /\bsql\s*\.\s*raw\b/, `${name} must not use sql.raw`);
-		const untaggedTemplates = source.replace(/\bsql\s*`[^`]*`/gs, "");
+		const untaggedTemplates = source.replace(/\bsql(?:<[^>]*>)?\s*`[^`]*`/gs, "");
 		assert.doesNotMatch(untaggedTemplates, /`[^`]*\$\{/, `${name} must not interpolate into an untagged template string`);
 		assert.doesNotMatch(source, /\.(?:execute|query|unsafe|where|having)\s*\([^)]*(?:\+\s*\w|\w\s*\+)/, `${name} must not concatenate values into a query`);
 		assert.doesNotMatch(source, /(?:['"][^'"]*['"]\s*\+\s*[\w$]|[\w$]+\s*\+\s*['"][^'"]*['"])/, `${name} must not build strings by concatenation`);

@@ -100,7 +100,7 @@ describe("migration order", () => {
 		const sql = connectBench(bench.migratorUrl);
 		try {
 			const history = await sql<{ number: number; name: string }[]>`SELECT number, name FROM public.af_migrations ORDER BY number`;
-			assert.deepEqual(history, files.map((file) => ({ number: file.number, name: file.name })));
+			assert.deepEqual(history.map((row) => ({ number: row.number, name: row.name })), files.map((file) => ({ number: file.number, name: file.name })));
 		} finally {
 			await sql.end();
 		}
@@ -138,16 +138,21 @@ describe("migration order", () => {
 				} else await copyFile(join(MIGRATIONS_DIR, entry.name), join(copiedMigrations, entry.name));
 			}
 			const configPath = join(scratch.path, "drizzle.config.ts");
-			await writeFile(configPath, `export default { dialect: "postgresql", schema: ${JSON.stringify(join(PACKAGE_ROOT, "db", "schema", "*.ts").replaceAll("\\", "/"))}, out: ${JSON.stringify(copiedMigrations.replaceAll("\\", "/"))} };\n`);
+			await writeFile(configPath, `export default { dialect: "postgresql", schema: ${JSON.stringify(join(PACKAGE_ROOT, "db", "schema", "*.ts").replaceAll("\\", "/"))}, out: "./migrations" };\n`);
 			const before = await directoryContents(copiedMigrations);
 			const drizzleCli = join(PACKAGE_ROOT, "node_modules", "drizzle-kit", "bin.cjs");
-			const generated = spawnSync(process.execPath, [drizzleCli, "generate", "--config", configPath], {
-				cwd: PACKAGE_ROOT,
+			// drizzle-kit joins `out` onto the working directory, so the scratch directory is the working directory and `out` is
+			// relative: an absolute `out` is mangled on Windows and drizzle-kit still exits 0 without comparing anything.
+			const generated = spawnSync(process.execPath, [drizzleCli, "generate", "--config", "drizzle.config.ts"], {
+				cwd: scratch.path,
 				encoding: "utf8",
 				maxBuffer: 8 * 1024 * 1024,
 			});
 			assert.equal(generated.error, undefined, generated.error?.message);
-			assert.equal(generated.status, 0, `${generated.stdout}\n${generated.stderr}`);
+			const output = `${generated.stdout}\n${generated.stderr}`;
+			assert.equal(generated.status, 0, output);
+			assert.doesNotMatch(output, /ENOENT|error/i, `drizzle-kit reported an error:\n${output}`);
+			assert.match(output, /No schema changes/, `drizzle-kit did not compare the schema:\n${output}`);
 			assert.deepEqual(await directoryContents(copiedMigrations), before, "drizzle-kit generated changes; schema and migration snapshots diverge");
 		} finally {
 			await disposeScratch(scratch);

@@ -16,7 +16,7 @@ type IdempotencyKey = typeof idempotencyKeys.$inferSelect;
 export const decisionRepo = (db: PostgresJsDatabase<any>) => ({
 	// Serialize requests for the same principal/key across the decision and confirmation tables.
 	lockKey: async (principal: string, key: string): Promise<void> => {
-		await db.execute(sql`select pg_advisory_xact_lock(hashtextextended(${principal + ':' + key}, 0))`);
+		await db.execute(sql`select pg_advisory_xact_lock(hashtextextended(${principal}::text || ':' || ${key}::text, 0))`);
 	},
 	record: async (input: { decision: DecisionInsert; outbox: OutboxInsert }): Promise<{ decision: Decision; outbox: OutboxEvent }> =>
 		db.transaction(async (tx) => {

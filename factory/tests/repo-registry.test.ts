@@ -83,10 +83,15 @@ describe("registry repositories", () => {
 		await repo.registry.embeddings.create({ id: id(11), recordId: unrelated.id, modelVersion: "bench-model", dimensions: otherVector.length, embedding: otherVector });
 		await repo.registry.embeddings.create({ id: id(17), recordId: unrelated.id, modelVersion: "other-model", dimensions: vector.length, embedding: vector });
 		assert.equal((await repo.registry.embeddings.forRecord(target.id, "bench-model")).length, 1);
-		const hits = await repo.registry.embeddings.searchVector({ embedding: vector, modelVersion: "bench-model", query: "unused", limit: 5, threshold: 0 });
+		const search = (threshold: number) => repo.registry.embeddings.searchVector({ embedding: vector, modelVersion: "bench-model", query: "unused", limit: 5, threshold });
+		const hits = await search(-1);
+		assert.equal(hits.length, 2);
 		assert.equal(hits[0]?.record.id, target.id);
-		assert.ok(hits[0]!.score >= hits[1]!.score);
-		assert.deepEqual(await repo.registry.embeddings.searchVector({ embedding: vector, modelVersion: "bench-model", query: "unused", limit: 5, threshold: 1.01 }), []);
+		assert.ok(hits[0]!.score > hits[1]!.score, "the two records must score differently for the threshold to be observable");
+		// The boundary comes from the returned scores: midway keeps the better match and drops the worse one, above the best drops both.
+		const midway = (hits[0]!.score + hits[1]!.score) / 2;
+		assert.deepEqual((await search(midway)).map((hit) => hit.record.id), [target.id]);
+		assert.deepEqual(await search(hits[0]!.score + 0.01), []);
 	});
 
 	it("searches full text and trigrams by score, limit and threshold", async () => {
@@ -95,11 +100,14 @@ describe("registry repositories", () => {
 		const fullText = await repo.registry.records.searchFullText({ query: "tungsten registry", language: "en", limit: 5, threshold: 0 });
 		assert.equal(fullText.length, 2);
 		assert.ok(fullText[0]!.score >= fullText[1]!.score);
-		assert.deepEqual(await repo.registry.records.searchFullText({ query: "tungsten registry", language: "en", limit: 5, threshold: 1_000_000 }), []);
+		const topFullText = fullText[0]!.score;
+		assert.equal((await repo.registry.records.searchFullText({ query: "tungsten registry", language: "en", limit: 5, threshold: topFullText })).length >= 1, true);
+		assert.deepEqual(await repo.registry.records.searchFullText({ query: "tungsten registry", language: "en", limit: 5, threshold: topFullText + 0.01 }), []);
 		const trigram = await repo.registry.records.searchTrigram({ query: "tungsten registry phrase", limit: 2, threshold: 0 });
 		assert.deepEqual(trigram.map((hit) => hit.record.id), [first.id, second.id]);
 		assert.ok(trigram[0]!.score >= trigram[1]!.score);
-		assert.deepEqual(await repo.registry.records.searchTrigram({ query: "tungsten registry phrase", limit: 5, threshold: 1.01 }), []);
+		assert.deepEqual(await repo.registry.records.searchTrigram({ query: "tungsten registry phrase", limit: 5, threshold: trigram[0]!.score + 0.01 }), []);
+		assert.equal((await repo.registry.records.searchTrigram({ query: "tungsten registry phrase", limit: 5, threshold: trigram[0]!.score })).length >= 1, true);
 	});
 
 	it("creates inquiry results and records a verdict once", async () => {
