@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { after, before, test } from 'node:test';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { clientPromptPolicy, readClientEvents, registerClientHandlers } from '../api/handlers/client.ts';
+import { registerRightsHandlers } from '../api/handlers/rights.ts';
 import { streams } from '../api/cursor.ts';
 import { recordDecision } from '../api/decisions.ts';
 import { createApiServer } from '../api/server.ts';
@@ -38,6 +39,8 @@ async function startApi() {
     horizon: () => horizon ? horizon() : repo.audit.snapshotXmin(),
     waitForEvents: signal => waitForEvents?.(signal) ?? new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), { once: true })),
   });
+  // The grant trigger compares the confirmation's expiry with the database's real now(), so the rights handlers use the real clock, not the stale injected one.
+  registerRightsHandlers(api, { repo, now: () => new Date() });
   base = `http://127.0.0.1:${(await api.listen(0)).port}`;
 }
 
@@ -320,22 +323,42 @@ test('poll-arbiter: delivery and retries preserve one winner and only hub can de
   assert.equal((await call('POST', pollPath(fromTelegram) + '/answer', { ...client, body: factoryAnswer, status: 409 })).answered_via, 'telegram');
 });
 
+async function ownerRightRequest(runId: string) {
+  const id = randomUUID();
+  await admin`INSERT INTO right_requests (id, task_id, run_id, handling_task_id, action, target, conditions, request_hash)
+    VALUES (${id}, ${taskId}, ${runId}, ${taskId}, 'read', 'fixture', '{}'::jsonb, ${hash(`right fixture ${id}`)})`;
+  await admin`INSERT INTO right_answers (id, request_id, step, step_kind, answer)
+    VALUES (${randomUUID()}, ${id}, 1, 'code', 'call_owner')`;
+  return id;
+}
+
+test('a right grant is confirmed only by the owner second press bound to its own request and operation', async () => {
+  const agentId = randomUUID(), runId = randomUUID();
+  await admin`INSERT INTO agents (id) VALUES (${agentId})`;
+  await admin`INSERT INTO task_runs (id, task_id, agent_id, status, execution_id) VALUES (${runId}, ${taskId}, ${agentId}, 'running', ${randomUUID()})`;
+  const requestId = await ownerRightRequest(runId), otherId = await ownerRightRequest(runId);
+  const path = (id: string) => `/rights/requests/${id}/answer`;
+  const forOther = await call<Confirmation>('POST', path(otherId), { ...owner, body: { answer: 'grant' }, status: 409 });
+  assert.equal(forOther.code, 'confirmation_required');
+  assert.equal((await call('POST',path(requestId), { ...owner, body: { answer: 'grant' }, confirm: confirmHeader(forOther), status: 409 })).code, 'confirmation_invalid');
+  const wrongOperation = await call<Confirmation>('POST', '/system/stop-all', { ...owner, key: randomUUID(), status: 409 });
+  assert.equal((await call('POST', path(requestId), { ...owner, body: { answer: 'grant' }, confirm: confirmHeader(wrongOperation), status: 409 })).code, 'confirmation_invalid');
+  assert.equal((await admin`SELECT id FROM right_grants WHERE request_id = ${requestId}`).length, 0);
+  const own = await call<Confirmation>('POST', path(requestId), { ...owner, body: { answer: 'grant' }, status: 409 });
+  await call('POST', path(requestId), { ...owner, body: { answer: 'grant' }, confirm: confirmHeader(own), status: 201 });
+  assert.equal((await admin`SELECT id FROM right_grants WHERE request_id = ${requestId}`).length, 1);
+  assert.equal((await call('POST', path(requestId), { ...owner, body: { answer: 'grant' }, status: 409 })).code, 'request_closed');
+});
+
 test('stop-all binds both presses and transactionally suspends runs and rights, revokes credentials and queues stops', async () => {
   const agentId = randomUUID(), runId = randomUUID(), executionId = randomUUID(), runTokenId = randomUUID();
   await admin`INSERT INTO agents (id) VALUES (${agentId})`;
   await admin`INSERT INTO task_runs (id, task_id, agent_id, status, execution_id) VALUES (${runId}, ${taskId}, ${agentId}, 'running', ${executionId})`;
   await repo.tokens.create({ id: runTokenId, prefix: 'run', role: 'registry', runId, tokenHash: hash(randomUUID()) });
-  const rightRequestId = randomUUID();
-  const rightHash = hash('stop-all right fixture');
-  await admin`INSERT INTO right_requests (id, task_id, run_id, handling_task_id, action, target, conditions, request_hash)
-    VALUES (${rightRequestId}, ${taskId}, ${runId}, ${taskId}, 'read', 'fixture', '{}'::jsonb, ${rightHash})`;
-  await admin`INSERT INTO right_answers (id, request_id, step, step_kind, answer)
-    VALUES (${randomUUID()}, ${rightRequestId}, 1, 'code', 'call_owner')`;
-  const grantConfirmation = randomUUID();
-  await repo.confirmations.create({ id: grantConfirmation, actorId: ownerId, channel: 'api', operation: 'right.grant', targetType: 'right_requests',
-    targetId: rightRequestId, requestHash: rightHash, expiresAt: new Date(Date.now() + confirmationWindow * seconds) }); // The migration trigger checks it against the database's real now(), not the injected clock.
-  await admin`INSERT INTO right_answers (id, request_id, step, step_kind, answer, owner_act_ref)
-    VALUES (${randomUUID()}, ${rightRequestId}, 2, 'owner', 'grant', ${grantConfirmation})`;
+  const rightRequestId = await ownerRightRequest(runId);
+  const grantPress = await call<Confirmation>('POST', `/rights/requests/${rightRequestId}/answer`, { ...owner, body: { answer: 'grant' }, status: 409 });
+  assert.equal(grantPress.code, 'confirmation_required');
+  await call('POST', `/rights/requests/${rightRequestId}/answer`, { ...owner, body: { answer: 'grant' }, confirm: confirmHeader(grantPress), status: 201 });
 
   const key = randomUUID();
   const first = await call<Confirmation>('POST', '/system/stop-all', { ...owner, key, status: 409 });

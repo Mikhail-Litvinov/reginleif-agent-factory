@@ -38226,6 +38226,13 @@
               "maxLength": 128,
               "pattern": "^[A-Za-z0-9_-]+$"
             }
+          },
+          {
+            "name": "X-Confirm",
+            "in": "header",
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
@@ -38242,18 +38249,12 @@
                         "type": "string",
                         "const": "grant"
                       },
-                      "owner_act_ref": {
-                        "type": "string",
-                        "format": "uuid",
-                        "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                      },
                       "reason": {
                         "type": "string"
                       }
                     },
                     "required": [
-                      "answer",
-                      "owner_act_ref"
+                      "answer"
                     ],
                     "additionalProperties": false
                   },
@@ -38709,19 +38710,6 @@
               }
             }
           },
-          "400": {
-            "description": "Error",
-            "x-error-codes": [
-              "validation_failed"
-            ],
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ProblemDetails"
-                }
-              }
-            }
-          },
           "401": {
             "description": "Error",
             "x-error-codes": [
@@ -38768,12 +38756,20 @@
               "request_not_owner",
               "request_closed",
               "idempotency_conflict",
-              "idempotency_in_progress"
+              "idempotency_in_progress",
+              "confirmation_required"
             ],
             "content": {
               "application/problem+json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ProblemDetails"
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ProblemDetails"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ConfirmationRequired"
+                    }
+                  ]
                 }
               }
             }
