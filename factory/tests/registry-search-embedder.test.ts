@@ -10,6 +10,7 @@ import { createRepo } from "../db/repo/index.ts";
 import { createRegistrySearch } from "../registry/search.ts";
 import { httpEmbedderTransport } from "../registry/embedder-client.ts";
 import { connectBench, databaseBench } from "./database-bench.ts";
+import { requiredEnv } from "./required-env.ts";
 
 type Row = { id: string; kind: string; problem: string; decision: string; summary: string; q_cross: string; q_reword: string; q_short: string };
 type Dataset = { records: Row[]; unrelated: { q: string }[] };
@@ -20,7 +21,8 @@ before(async () => { const db = await bench; await migrate({ url: db.migratorUrl
 after(async () => { await connection?.end(); });
 
 test("registry search with the ONNX container and in degraded mode", async () => {
-	const dataset = JSON.parse(await readFile(process.env.REGISTRY_MEASUREMENT_DATASET!, "utf8")) as Dataset;
+	const datasetPath = requiredEnv("REGISTRY_MEASUREMENT_DATASET", "the path of the measurement dataset JSON, kept outside the repository (see factory/deploy/embedder/README.md)");
+	const dataset = JSON.parse(await readFile(datasetPath, "utf8")) as Dataset;
 	const transport = httpEmbedderTransport(process.env.EMBEDDER_URL ?? "http://127.0.0.1:8088");
 	const version = "5617a9f61b028005a4858fdac845db406aefb181";
 	const ids = new Map<string, string>();
