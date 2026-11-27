@@ -73,6 +73,13 @@ export const idempotencyKeyRepo = (db: PostgresJsDatabase<any>) => ({
 export type DecisionRepository = ReturnType<typeof decisionRepo>;
 
 export const taskEventRepo = (db: PostgresJsDatabase<any>) => ({
+	persist: async (event: typeof taskEvents.$inferInsert & { taskId: string; dedupeKey: string }): Promise<typeof taskEvents.$inferSelect> => db.transaction(async (tx) => {
+		const inserted = (await tx.insert(taskEvents).values(event).onConflictDoNothing({ target: [taskEvents.taskId, taskEvents.dedupeKey] }).returning())[0];
+		if (inserted) return inserted;
+		const existing = (await tx.select().from(taskEvents).where(and(eq(taskEvents.taskId, event.taskId), eq(taskEvents.dedupeKey, event.dedupeKey))).limit(1))[0];
+		if (!existing) throw new Error("task event id conflicts with a different event");
+		return existing;
+	}),
 	stream: async ({ below, after, limit, taskId, runId, type }: { below: string; after?: { commitXid: string; seq: bigint }; limit?: number; taskId?: string; runId?: string; type?: string }) => {
 		const conditions = [sql`${taskEvents.commitXid} < ${below}::xid8`];
 		if (after) conditions.push(or(gt(taskEvents.commitXid, sql`${after.commitXid}::xid8`), and(eq(taskEvents.commitXid, sql`${after.commitXid}::xid8`), gt(taskEvents.seq, after.seq)))!);
@@ -83,3 +90,5 @@ export const taskEventRepo = (db: PostgresJsDatabase<any>) => ({
 		return limit === undefined ? query : query.limit(limit);
 	},
 });
+
+export type TaskEventWriter = Pick<ReturnType<typeof taskEventRepo>, "persist">;
