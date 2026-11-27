@@ -42,12 +42,23 @@
       ],
       "timeout": 10,
       "statusMessage": "Checking for Factory regulation changes"
+    },
+    {
+      "event": "PreToolUse",
+      "matcher": "",
+      "command": "bun",
+      "args": [
+        "{{CLONE}}/features/factory/hooks/permission.ts"
+      ],
+      "timeout": 60,
+      "statusMessage": "Checking the Factory rights"
     }
   ],
   "settings": [],
   "plugins": [],
   "files": [
-    "hooks/regulation.ts"
+    "hooks/regulation.ts",
+    "hooks/permission.ts"
   ],
   "assets": [],
   "agents": [],
