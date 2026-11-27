@@ -384,7 +384,7 @@ const hookSettingValue = (
 };
 
 const hookScriptName = (hook: HookManifest): string => {
-	const script = hook.args?.find((argument) => /\.(?:py|sh|ps1)(?:$|["'])/.test(argument));
+	const script = hook.args?.find((argument) => /\.(?:py|sh|ps1|ts|js|mjs|cjs)(?:$|["'])/.test(argument));
 	if (script === undefined) return hook.command;
 	const normalized = script.replaceAll("\\", "/").replaceAll('"', "");
 	return normalized.slice(normalized.lastIndexOf("/") + 1);
