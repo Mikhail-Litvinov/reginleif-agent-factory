@@ -119,6 +119,20 @@ async function makeTask(projectId: string, dependsOn?: string[]) {
   return row;
 }
 
+test('relay-press-once: a mapped owner records one decision and replay and an unmapped user are refused', async () => {
+  const project = await makeProject();
+  const task = await makeTask(project.id);
+  const press = randomUUID();
+  const body = { text: 'Fixture feedback', telegram_user_id: telegramUser, press_id: press };
+  assert.equal((await decide(task.id, 'add_feedback', body, 'relay')).status, 202);
+  refused(await decide(task.id, 'add_feedback', body, 'relay'), 409, 'press_replayed');
+  refused(await decide(task.id, 'add_feedback', { ...body, telegram_user_id: telegramUser + 1, press_id: randomUUID() }, 'relay'), 403, 'forbidden');
+  const rows = await sql`SELECT actor_id, channel FROM task_decisions WHERE press_id = ${press}`;
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]!.actor_id, owner);
+  assert.equal(rows[0]!.channel, 'telegram');
+});
+
 const toState: Record<TaskState, readonly TaskState[]> = {
   CREATED: [], PLANNING: ['PLANNING'], READY: ['PLANNING', 'READY'], WAITING_DEPENDENCIES: ['PLANNING', 'READY', 'WAITING_DEPENDENCIES'],
   ASSIGNED: ['PLANNING', 'READY', 'ASSIGNED'], RUNNING: ['PLANNING', 'READY', 'ASSIGNED', 'RUNNING'],

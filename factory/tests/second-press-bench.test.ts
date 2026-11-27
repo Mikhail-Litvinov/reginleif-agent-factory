@@ -10,7 +10,7 @@ import { createRepo, type Repo } from '../db/repo/index.ts';
 import { connectBench, databaseBench } from './database-bench.ts';
 
 const benchPromise = databaseBench(import.meta.url);
-const owner = randomUUID(), project = randomUUID(), secret = randomUUID();
+const owner = randomUUID(), project = randomUUID(), secret = randomUUID(), relaySecret = randomUUID();
 const clock = new Date();
 let sql: ReturnType<typeof connectBench>, repo: Repo, api: ReturnType<typeof createApiServer>, base: string;
 
@@ -27,9 +27,10 @@ before(async () => {
   await migrate({ url: bench.migratorUrl });
   sql = connectBench(bench.migratorUrl);
   repo = createRepo(drizzle(sql));
-  await sql`INSERT INTO owners (id, name) VALUES (${owner}, 'Bench owner')`;
+  await sql`INSERT INTO owners (id, name, telegram_user_id) VALUES (${owner}, 'Bench owner', 42)`;
   await sql`INSERT INTO projects (id, name, repository_url, default_branch, workspace_policy) VALUES (${project}, 'Press bench', 'https://example.test/press.git', 'main', 'worktree')`;
   await repo.tokens.create({ id: randomUUID(), ownerId: owner, role: 'owner', prefix: 'press', tokenHash: createHash('sha256').update(secret).digest('hex') });
+  await repo.tokens.create({ id: randomUUID(), role: 'relay', prefix: 'relay', tokenHash: createHash('sha256').update(relaySecret).digest('hex') });
   // Explicit bench settings; api.md specifies the confirmation window, but does not prescribe its value.
   await repo.settings.set('confirm.windowSeconds', 60, owner);
   await repo.settings.set('device.codeTtlSeconds', 300, owner);
@@ -39,9 +40,9 @@ before(async () => {
 });
 after(async () => { await api?.close(); await sql?.end(); });
 
-type Fixture = { path: string; body?: unknown; headers?: Record<string, string> };
+type Fixture = { path: string; body?: unknown; secondBody?: unknown; headers?: Record<string, string> };
 async function call(route: Route, fixture: Fixture, key: string, confirmation?: string) {
-  const headers: Record<string, string> = { authorization: `Bearer afk_press_${secret}`, 'idempotency-key': key, ...fixture.headers };
+  const headers: Record<string, string> = { authorization: route.secondPress === 'sensitive-draft' ? `Bearer afk_relay_${relaySecret}` : `Bearer afk_press_${secret}`, 'idempotency-key': key, ...fixture.headers };
   if (fixture.body !== undefined) headers['content-type'] = 'application/json';
   if (confirmation) headers['X-Confirm'] = confirmation;
   const res = await fetch(base + fixture.path, { method: route.method, headers, body: fixture.body === undefined ? undefined : JSON.stringify(fixture.body) });
@@ -57,6 +58,16 @@ async function task(status = 'CREATED') {
 const policy = { allowed_commands: [], allowed_directories: [], allowed_repositories: [], git_operations: [], confirmation_required: [], allowed_tools: [], network: {}, max_concurrent_tasks: null, max_tasks_per_agent: null, max_run_seconds: null, max_tokens: null, max_auto_fixes: null, max_attempts: null, max_rework_rounds: null, max_child_depth: null, max_children_per_task: null, max_cost: null, currency: null, auto_accept_low_risk: false };
 async function fixture(route: Route): Promise<Fixture> {
   const routeKey = `${route.method} ${route.path}`;
+  if (route.secondPress === 'sensitive-draft') {
+    const draft = randomUUID();
+    await sql`INSERT INTO registry_records (id, kind, authority, status, scope_type, category, problem, decision, reuse, source, created_by) VALUES (${draft}, 'decision', 'owner', 'draft', 'global', 'security', 'Bench question', 'Bench answer', 'once', 'owner_message', ${sql.json({ type: 'owner', id: owner })})`;
+    const register = async () => {
+      const response = await fetch(`${base}/registry/drafts/${draft}/presses`, { method: 'POST', headers: { authorization: `Bearer afk_relay_${relaySecret}`, 'idempotency-key': randomUUID() } });
+      assert.equal(response.status, 201);
+      return (await response.json() as { press_id: string }).press_id;
+    };
+    return { path: `/registry/drafts/${draft}/confirm`, body: { press_id: await register(), telegram_user_id: 42 }, secondBody: { press_id: await register(), telegram_user_id: 42 } };
+  }
   if (routeKey === 'PUT /projects/{id}/policy') {
     const path = `/projects/${project}/policy`;
     const first = await call(route, { path, body: policy, headers: { 'if-match': '"0"' } }, randomUUID());
@@ -87,8 +98,9 @@ for (const route of covered) test(`second press: ${route.method} ${route.path}`,
   assert.equal(first.status, 409, JSON.stringify(first.body));
   assert.equal(first.body.code, 'confirmation_required');
   const token = `${first.body.confirmation_id}.${first.body.nonce}`;
-  const second = await call(route, input, key, token);
+  const confirmed = input.secondBody ? { ...input, body: input.secondBody } : input;
+  const second = await call(route, confirmed, input.secondBody ? randomUUID() : key, token);
   assert.ok(second.status >= 200 && second.status < 300, JSON.stringify(second.body));
-  const replay = await call(route, input, randomUUID(), token);
+  const replay = await call(route, confirmed, randomUUID(), token);
   assert.equal(replay.status, 409, JSON.stringify(replay.body));
 });

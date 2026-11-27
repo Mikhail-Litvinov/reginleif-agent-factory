@@ -26,7 +26,7 @@ export interface Route {
   responses: Readonly<Record<string, Body>>;
   errors: Readonly<Record<number, readonly string[]>>;
   idempotent: boolean;
-  secondPress?: 'always' | 'policy-loosening' | 'forced-cleanup' | 'decision-kind' | 'zone-change' | 'robot-release';
+  secondPress?: 'always' | 'policy-loosening' | 'forced-cleanup' | 'decision-kind' | 'zone-change' | 'robot-release' | 'sensitive-draft';
   parameters: readonly { name: string; in: 'query' | 'header'; required?: boolean; repeatable?: boolean; schema?: z.ZodType }[];
 }
 
@@ -171,8 +171,10 @@ const entries: Input[] = [
   { method: 'POST', path: '/registry/records/{id}/activate', roles: owner, errors: { 409: ['rule_needs_regulation', 'guard_conflict'] } },
   { method: 'POST', path: '/registry/records/{id}/revoke', roles: owner },
   { method: 'POST', path: '/registry/records/{id}/supersede', roles: owner },
-  { method: 'POST', path: '/registry/polls', roles: ['relay'] },
-  { method: 'POST', path: '/registry/captures', roles: ['relay'], errors: { 409: ['press_replayed'] } },
+  { method: 'POST', path: '/registry/polls', roles: ['relay'], errors: { 404: ['not_found'] } },
+  { method: 'POST', path: '/registry/captures', roles: ['relay'], errors: { 404: ['not_found'], 409: ['press_replayed', 'poll_closed'] } },
+  { method: 'POST', path: '/registry/drafts/{id}/presses', roles: ['relay'], errors: { 409: ['not_allowed_in_state'] } },
+  { method: 'POST', path: '/registry/drafts/{id}/confirm', roles: ['relay'], errors: { 409: ['press_replayed', 'press_expired', 'rule_needs_regulation', 'guard_conflict', 'not_allowed_in_state'] } },
   { method: 'GET', path: '/regulation/versions', roles: [...readers, 'registry'] },
   { method: 'GET', path: '/regulation/versions/{id}', roles: [...readers, 'registry'] },
   { method: 'POST', path: '/regulation/versions', roles: ['owner', 'registry:draft_only'], responses: { 201: 'unspecified' } },
@@ -286,11 +288,13 @@ const secondPress = new Set([
   'POST /robot-start-confirmations', 'POST /robots/{id}/release',
   'PATCH /robot-zones/{id}',
   'POST /tasks/{id}/reject', 'POST /tasks/{id}/cancel', 'POST /tasks/{id}/force-close',
+  'POST /registry/drafts/{id}/confirm',
 ]);
 const secondPressCases: Record<string, NonNullable<Route['secondPress']>> = {
   'PUT /projects/{id}/policy': 'policy-loosening',
   'POST /tasks/{id}/cleanup': 'forced-cleanup',
   'POST /conversations/{id}/polls/{poll_id}/answer': 'decision-kind',
+  'POST /registry/drafts/{id}/confirm': 'sensitive-draft',
   'PATCH /robot-zones/{id}': 'zone-change',
   'POST /robots/{id}/release': 'robot-release',
 };
@@ -335,6 +339,7 @@ action('POST','/registry/records',201,R.RegistryRecord,Q.RecordCreate);
 shapes['POST /registry/records/{id}/activate'] = {responses:{200:z.array(R.RegistryRecord)}, request:Q.Activate, requestOptional:true};
 action('POST','/registry/records/{id}/revoke',200,R.RegistryRecord); action('POST','/registry/records/{id}/supersede',201,R.RegistryRecord,Q.RecordCreate);
 action('POST','/registry/polls',201,Q.RegistryPollAnswer,Q.RegistryPoll); action('POST','/registry/captures',200,R.RegistryRecord,Q.Capture);
+action('POST','/registry/drafts/{id}/presses',201,Q.DraftPressRegistration); action('POST','/registry/drafts/{id}/confirm',200,R.RegistryRecord,Q.DraftPress);
 list('/regulation/versions',R.RegulationVersionSummary); get('/regulation/versions/{id}',R.RegulationVersion);
 action('POST','/regulation/versions',201,R.RegulationVersion,Q.RegulationCreate); get('/regulation/versions/{id}/diff',R.RegulationDiff);
 action('POST','/regulation/versions/{id}/activate',200,R.RegulationVersion); action('POST','/regulation/versions/{id}/revoke',200,R.RegulationVersion);

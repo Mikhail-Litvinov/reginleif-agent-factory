@@ -19,8 +19,8 @@ const laterPackages: Record<string, string> = {
   ]),
   ...later('registry handlers (api/handlers/registry.ts, phase 2)', [
     'POST /registry/inquiries', 'GET /registry/inquiries/{id}', 'POST /registry/inquiries/{id}/verdicts', 'POST /registry/gate', 'GET /registry/search',
-    'GET /registry/records', 'GET /registry/records/{id}', 'POST /registry/records', 'GET /registry/drafts', 'POST /registry/records/{id}/activate',
-    'POST /registry/records/{id}/revoke', 'POST /registry/records/{id}/supersede', 'POST /registry/polls', 'POST /registry/captures',
+    'GET /registry/records', 'GET /registry/records/{id}', 'POST /registry/records', 'POST /registry/records/{id}/activate',
+    'POST /registry/records/{id}/revoke', 'POST /registry/records/{id}/supersede',
     'GET /regulation/versions', 'GET /regulation/versions/{id}', 'POST /regulation/versions', 'GET /regulation/versions/{id}/diff',
     'POST /regulation/versions/{id}/activate', 'POST /regulation/versions/{id}/revoke',
   ]),

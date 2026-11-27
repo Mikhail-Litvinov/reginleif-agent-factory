@@ -13,9 +13,9 @@ type InquiryInput = Parameters<R["inquiries"]["create"]>[0];
 type RecordInput = Parameters<R["records"]["create"]>[0];
 type FoundResult = Omit<Parameters<R["results"]["create"]>[0], "inquiryId">;
 type InquirySearch = (input: InquiryInput, registry: R) => Promise<FoundResult[]>;
-type Actor = { type: "owner" | "agent"; id: string; tokenId?: string; runId?: string; sessionRef?: string };
+type Actor = { type: "owner" | "agent"; id: string; tokenId?: string; runId?: string; sessionRef?: string; channel?: "telegram"; pressId?: string };
 type Relay = { type: "owner" | "agent" | "relay" };
-type PollPress = { pollId: string; pressId: string; telegramUserId: bigint | number; optionIndex: number };
+type PollPress = { pollId: string; pressId: string; telegramUserId: bigint | number; optionIndex: number; now?: Date };
 type PollOption = (typeof RegistryPoll.shape.options)["_output"][number];
 type Scoped = { id: string; kind: string | null; authority: string | null; status: string | null; scopeType: string | null; projectId: string | null; repository: string | null; machineId: string | null; action: string | null; target: string | null; reuse: string | null; statusChangedBy?: unknown };
 type Scope = { projectId?: string | null; repository?: string | null; machineId?: string | null; action?: string | null; target?: string | null };
@@ -119,7 +119,7 @@ export function createRegistryService(repo: Repo, search?: InquirySearch, assess
 				const active = Boolean(inquiry.projectId) && inquiry.action == null && inquiry.target == null && harmless &&
 					conflicts.size === 0 && outdated.size === replacements.length && guardConflicts(candidate).length === 0 &&
 					(await recordConflicts(registry, candidate, [], replacements)).length === 0;
-				const now = new Date();
+				const now = input.now ?? new Date();
 				const row = await registry.records.create({ ...candidate, status: "draft" });
 				for (const id of outdated) {
 					await registry.links.create({
@@ -161,7 +161,7 @@ export function createRegistryService(repo: Repo, search?: InquirySearch, assess
 				return tx.registry.links.create({ ...input, createdBy: actor });
 			});
 		},
-		async changeStatus(actor: Actor, id: string, status: "active" | "rejected" | "revoked" | "superseded") {
+		async changeStatus(actor: Actor, id: string, status: "active" | "rejected" | "revoked" | "superseded", at?: Date) {
 			owner(actor);
 			if (status === "superseded") return refuse("validation_failed");
 			return repo.transaction(async tx => {
@@ -170,7 +170,7 @@ export function createRegistryService(repo: Repo, search?: InquirySearch, assess
 				if (!record) return refuse("not_found");
 				if ((status === "active" || record.status === "active") && record.kind === "rule") return refuse("rule_needs_regulation");
 				if (record.status !== (status === "revoked" ? "active" : "draft")) return refuse("validation_failed");
-				const now = new Date();
+				const now = at ?? new Date();
 				if (status !== "active") return tx.registry.records.changeStatus(id, status, now, actor);
 				const links = await tx.registry.links.forRecord(id);
 				const conflicts = await recordConflicts(tx.registry, record, links);

@@ -2,7 +2,8 @@ import { and, asc, desc, eq, gte, inArray, isNull, or, sql, type SQL } from "dri
 import type { PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import { auditLog } from "../schema/audit-log.ts";
 import { registryEmbeddings, registryInquiryResults, registryInquiries, registryLinks, registryRecords, regulationVersions } from "../schema/registry.ts";
-import { refusing } from "./errors.ts";
+import { idempotencyKeys } from "../schema/decisions.ts";
+import { refusing, versionedUpdate } from "./errors.ts";
 
 type RegulationInsert = typeof regulationVersions.$inferInsert;
 type Regulation = typeof regulationVersions.$inferSelect;
@@ -40,6 +41,25 @@ const recordFilters = (filters: SearchFilters): SQL[] => {
 };
 
 export const registryRepo = (db: PostgresJsDatabase<any>) => ({
+	draftPresses: {
+		register: async (pressId: string, draftId: string, tokenId: string, expiresAt: Date): Promise<void> => {
+			await db.insert(idempotencyKeys).values({ actorId: pressId, key: 'relay-draft-press', state: 'done', responseBody: { draftId, tokenId, expiresAt: expiresAt.toISOString(), usedAt: null, ownerId: null } });
+		},
+		consume: async (pressId: string, draftId: string, tokenId: string, ownerId: string, now: Date): Promise<'consumed' | 'used' | 'foreign' | 'expired'> => {
+			const where = and(eq(idempotencyKeys.actorId, pressId), eq(idempotencyKeys.key, 'relay-draft-press'));
+			const row = (await db.select().from(idempotencyKeys).where(where).for('update'))[0];
+			const data = row?.responseBody as { draftId?: string; tokenId?: string; expiresAt?: string; usedAt?: string | null } | null | undefined;
+			if (!row || !data || data.draftId !== draftId || data.tokenId !== tokenId) return 'foreign';
+			if (data.usedAt) return 'used';
+			const expiry = data.expiresAt ? Date.parse(data.expiresAt) : NaN;
+			if (!Number.isFinite(expiry) || expiry <= now.getTime()) return 'expired';
+			await versionedUpdate({ subject: 'relay-draft-press', expectedVersion: row.rowVersion,
+				update: async () => (await db.update(idempotencyKeys).set({ responseBody: { ...data, usedAt: now.toISOString(), ownerId }, updatedAt: now, rowVersion: sql`${idempotencyKeys.rowVersion} + 1` }).where(and(where, eq(idempotencyKeys.rowVersion, row.rowVersion))).returning())[0],
+				current: async () => (await db.select().from(idempotencyKeys).where(where))[0],
+			});
+			return 'consumed';
+		},
+	},
 	// Shared by all service operations that make decisions against active records and regulation.
 	lock: async (mode: "read" | "write" = "write"): Promise<void> => {
 		const key = "factory:registry";

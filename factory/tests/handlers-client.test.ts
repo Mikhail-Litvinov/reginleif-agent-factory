@@ -202,6 +202,7 @@ async function replayWhileApiIsDown() {
   await assert.rejects(fetch(base + '/conversations'));
   await startApi();
   assert.equal((await call<Poll>('POST', `/hub/polls/${poll.id}/result`, { ...hub, body: telegram })).answer_key, 'yes');
+  assert.equal((await call<{ code: string }>('POST', `/hub/polls/${poll.id}/result`, { ...hub, body: telegram, status: 409 })).code, 'poll_closed');
   const refused = { state: 'refused', refusal_reason: 'poll_closed', hub_ref: randomUUID() };
   assert.equal((await call<AnswerRequest>('POST', hubResult(pending), { ...hub, body: refused })).state, 'refused');
   const retry = await call<AnswerRequest>('POST', pollPath(poll) + '/answer', { ...client, body: { answer_key: 'no' }, key: pendingKey, status: 202 });
