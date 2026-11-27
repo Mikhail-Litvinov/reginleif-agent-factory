@@ -3,6 +3,7 @@ import type { Repo } from '../../db/repo/index.ts';
 import type { HandlerContext } from '../server.ts';
 import type { HandlerDeps, HandlerRegistrar } from './shared.ts';
 import { apiRow, apiRows, query, response } from './shared.ts';
+import { consumeConfirmationAct } from '../second-press.ts';
 import { checkForSubject, type Right } from '../../rights/check.ts';
 import { answerOwnerRequest, answerState, createRightRequest } from '../../rights/requests.ts';
 
@@ -159,7 +160,7 @@ export function registerRightsHandlers(api: HandlerRegistrar, { repo, now = () =
           result = await answerOwnerRequest(tx, { requestId: request.id, ownerId, answer: 'grant', ownerActRef: input.owner_act_ref ?? '', channel: act?.channel ?? '', deviceSessionId: act?.deviceSessionId ?? null, now: at, ...(input.reason !== undefined ? { reason: input.reason } : {}) });
           if (!('error' in result)) {
             // The owner act is single use: it is consumed in the transaction that records the grant.
-            const used = await tx.confirmations.consume({ id: input.owner_act_ref!, actorId: ownerId, channel: act!.channel ?? '', deviceSessionId: act!.deviceSessionId ?? null, operation: 'right_request', targetType: 'right_request', targetId: request.id, requestHash: request.requestHash!, now: at });
+            const used = await consumeConfirmationAct(tx, input.owner_act_ref!, { actorId: ownerId, channel: act!.channel ?? '', deviceSessionId: act!.deviceSessionId ?? null, operation: 'right_request', targetType: 'right_request', targetId: request.id, requestHash: request.requestHash! }, at);
             if (!used) throw new ConfirmationLost();
           }
         }

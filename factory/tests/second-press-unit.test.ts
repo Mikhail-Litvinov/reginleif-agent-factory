@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { confirmationWindow, issueConfirmation, verifyConfirmation } from '../api/second-press.ts';
+import { confirmationWindow, consumeConfirmationAct, issueConfirmation, verifyConfirmation } from '../api/second-press.ts';
 import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -29,6 +29,25 @@ test('confirmation binds actor, channel, operation, target and hash and expires 
   assert.equal(await verifyConfirmation(repo, token, scope, new Date(issued.expires_at)), undefined);
   assert.equal(await verifyConfirmation(repo, token, scope, now), issued.confirmation_id);
   assert.equal(await verifyConfirmation(repo, token, scope, now), undefined);
+});
+
+test('an issued act named by its id is consumed once and only inside its scope', async () => {
+  const rows = new Map<string, any>();
+  const repo = { settings: { snapshot: async () => ({ 'confirm.windowSeconds': 30 }) }, confirmations: {
+    create: async (row: any) => { rows.set(row.id, { ...row, usedAt: null }); return row; },
+    consume: async (input: any) => {
+      const row = rows.get(input.id);
+      if (!row || row.usedAt || row.expiresAt <= input.now || ['actorId', 'channel', 'deviceSessionId', 'operation', 'targetType', 'targetId', 'requestHash'].some(key => row[key] !== input[key])) return null;
+      row.usedAt = input.now; return row;
+    },
+  } } as any;
+  const now = new Date('2030-01-01T00:00:00Z');
+  const scope = { actorId: 'owner', channel: 'telegram', deviceSessionId: null, operation: 'right_request', targetType: 'right_request', targetId: 'request', requestHash: 'hash' };
+  const issued = await issueConfirmation(repo, scope, now);
+  assert.equal(await consumeConfirmationAct(repo, issued.confirmation_id, { ...scope, targetId: 'other' }, now), false);
+  assert.equal(await consumeConfirmationAct(repo, issued.confirmation_id, scope, new Date(issued.expires_at)), false);
+  assert.equal(await consumeConfirmationAct(repo, issued.confirmation_id, scope, now), true);
+  assert.equal(await consumeConfirmationAct(repo, issued.confirmation_id, scope, now), false);
 });
 
 test('a missing or invalid confirmation setting is refused', async () => {

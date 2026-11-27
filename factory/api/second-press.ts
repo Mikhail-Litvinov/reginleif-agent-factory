@@ -42,6 +42,11 @@ export async function verifyConfirmation(tx: Store, token: string, scope: Confir
   if (!id) return undefined;
   return await tx.confirmations.consume({ id, ...scope, now, decisionId }) ? id : undefined;
 }
+// An owner act that was issued earlier and is named by its id (a right request answer). Same single use and scope binding
+// as a header press; the caller has already checked the act against the request.
+export async function consumeConfirmationAct(tx: Store, id: string, scope: ConfirmationScope, now: Date): Promise<boolean> {
+  return Boolean(await tx.confirmations.consume({ id, ...scope, now }));
+}
 export async function secondPress(tx: Issuer, context: HandlerContext, input: { actorId: string; operation: string; targetType: string; targetId: string; requestHash: string; now: Date; channel?: string; deviceSessionId?: string | null }) {
   const { now, ...rest } = input;
   const scope = { ...rest, channel: rest.channel ?? 'api', deviceSessionId: rest.deviceSessionId ?? null };
