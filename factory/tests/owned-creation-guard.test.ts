@@ -10,7 +10,7 @@
 //   - writes such a command inside a shell string.
 // The check reads the text of each file with the comments removed. There is no list of exceptions: any site fails the test.
 import assert from "node:assert/strict";
-import { readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
@@ -19,8 +19,27 @@ const SELF = "owned-creation-guard.test.ts";
 const HELPER = "owned-docker.ts";
 
 // Test files that hold docker command lines only as text to be scanned, never run: the removal guard's fixtures and the
-// mount-site parser's inputs. A file that also runs docker never belongs here.
+// mount-site parser's inputs. They are left out of the shell-string scan, and the process test below holds them to running
+// nothing; a file that runs anything never belongs here.
 const TEXT_ONLY = new Set(["removal-guard.test.ts", "mount-site.test.ts"]);
+
+// The project's own helpers that start processes or talk to docker, by module (relative to this directory). Each name must
+// still be exported by its module, so a renamed helper cannot slip past this list unnoticed.
+const RUNNER_MODULES: Record<string, string[]> = {
+	"../deploy/lib.ts": ["run", "runChecked", "psql", "tryPsql", "waitHealthy", "startStack", "ownedResources", "removeOwned", "recordVolumes", "removeRecordedVolumes", "removeStack", "projectResourcesExist", "findContainer"],
+	"owned-docker.ts": ["createContainer", "runContainer", "runContainerResult", "createVolume", "composeUpFrom", "createNetwork"],
+	"helpers.ts": ["createTestStack", "sharedStack", "startBenchStack", "benchStack", "compose"],
+	"database-bench.ts": ["createDatabaseBench", "databaseBench"],
+	"dead-owners.ts": ["sweepDeadOwners", "sweepStale"],
+	// doc-lib also holds the parser that TEXT_ONLY files import, so its process starters are listed here too.
+	"doc-lib.ts": ["runPs", "restrictDir", "psq"],
+};
+// Node's process starters. Called bare (not as a method such as pattern.exec), so a regex call is not a process.
+const PROCESS_NAMES = ["spawn", "spawnSync", "exec", "execSync", "execFile", "execFileSync", "fork"];
+const CHILD_PROCESS = /["'`](?:node:)?child_process(?:\/promises)?["'`]/g;
+const IMPORT_SPECIFIER = /\b(?:from|import)\s*\(?\s*["']([^"'\n]+)["']/g;
+const PROCESS_CALL = new RegExp(String.raw`(?<![\w$.])(${PROCESS_NAMES.join("|")})\s*(?:<[^>\n]*>\s*)?\(`, "g");
+const RUNNER_CALL = new RegExp(String.raw`(?<![\w$.])(${Object.values(RUNNER_MODULES).flat().join("|")})\s*(?:<[^>\n]*>\s*)?\(`, "g");
 
 const SAFE_CALLS = /^(?:stackArgs|ownedComposeArgs|withPassfile)\s*\(/;
 const READ_ONLY = new Set(["inspect", "ls", "ps", "port", "logs", "exec", "cp", "start", "stop", "kill", "wait", "update", "--filter", "config"]);
@@ -33,7 +52,7 @@ const withoutComments = (text: string): string =>
 	text
 		.replace(/\/\*[\s\S]*?\*\//g, (block) => block.replace(/[^\n]/g, " "))
 		.split("\n")
-		.map((line) => line.replace(/(^|\s)\/\/.*$/, "$1")) // a comment to the end of the line (a "//" inside a URL has no space before it)
+		.map((line) => line.replace(/(^|\s)\/\/[\s\S]*$/, "$1")) // a comment to the end of the line (a "//" inside a URL has no space before it)
 		.join("\n");
 
 // The text of one expression starting at `from`: an array or call to its balanced end, anything else to the first comma or
@@ -99,6 +118,53 @@ export const creationSites = (text: string): string[] => {
 	return sites;
 };
 
+const lineAt = (text: string, index: number): number => text.slice(0, index).split("\n").length;
+
+// The text with comments removed and the contents of string literals blanked (the quotes stay), so a call written inside a
+// string is not read as code. A ' or " string ends at its line end, so a stray quote cannot blank the rest of a file.
+const codeOf = (text: string): string => {
+	const source = withoutComments(text);
+	let out = "";
+	let quote = "";
+	for (let i = 0; i < source.length; i += 1) {
+		const ch = source[i] as string;
+		if (quote === "") {
+			if (ch === '"' || ch === "'" || ch === "`") quote = ch;
+			out += ch;
+		} else if (ch === "\\") {
+			out += "  ";
+			i += 1;
+		} else if (ch === quote) {
+			quote = "";
+			out += ch;
+		} else if (ch === "\n" && quote !== "`") {
+			quote = "";
+			out += ch;
+		} else out += ch === "\n" ? "\n" : " ";
+	}
+	return out;
+};
+
+/** The process starts and docker-runner calls or imports of a file's text, as "line: what". Empty when it runs nothing. */
+export const processRuns = (text: string): string[] => {
+	const source = withoutComments(text);
+	const code = codeOf(text);
+	const runs: string[] = [];
+	for (const match of source.matchAll(CHILD_PROCESS)) runs.push(`${lineAt(source, match.index)}: imports child_process`);
+	for (const match of source.matchAll(IMPORT_SPECIFIER)) {
+		const specifier = match[1] as string;
+		if (Object.keys(RUNNER_MODULES).some((module) => specifier === module || specifier.endsWith(`/${module}`)))
+			runs.push(`${lineAt(source, match.index)}: imports the docker runner module ${specifier}`);
+	}
+	for (const match of code.matchAll(PROCESS_CALL)) runs.push(`${lineAt(code, match.index)}: calls ${match[1]}`);
+	for (const match of code.matchAll(RUNNER_CALL)) runs.push(`${lineAt(code, match.index)}: calls the docker runner ${match[1]}`);
+	return runs;
+};
+
+const exportsName = (text: string, name: string): boolean =>
+	new RegExp(String.raw`\bexport\s+(?:async\s+)?(?:function\*?|const|let|var|class)\s+${name}\b`).test(text) ||
+	[...text.matchAll(/\bexport\s*\{([^}]*)\}/g)].some((match) => (match[1] as string).split(",").some((part) => part.trim() === name));
+
 const testFiles = (): string[] =>
 	readdirSync(TESTS_DIR, { encoding: "utf8" }).filter((name) => /\.(ts|mts)$/.test(name) && name !== SELF && name !== HELPER && !TEXT_ONLY.has(name));
 
@@ -147,5 +213,50 @@ describe("creation guard", () => {
 			'await run("docker", ["logs", name]); // a comment that says docker run',
 		];
 		for (const text of cases) assert.deepEqual(creationSites(text), [], text);
+	});
+
+	it("text-only files run no process and call no docker runner", () => {
+		const problems: string[] = [];
+		for (const file of TEXT_ONLY) {
+			const runs = processRuns(readFileSync(join(TESTS_DIR, file), "utf8"));
+			if (runs.length > 0) problems.push(`${file}: ${runs.join("; ")}`);
+		}
+		assert.deepEqual(problems, [], "a file listed in TEXT_ONLY must only hold text; move it out of TEXT_ONLY so the creation scan covers it");
+	});
+
+	it("TEXT_ONLY names and docker runner names still exist", () => {
+		const missing = [...TEXT_ONLY].filter((name) => !existsSync(join(TESTS_DIR, name)));
+		assert.deepEqual(missing, [], "TEXT_ONLY lists files that do not exist");
+		const unexported: string[] = [];
+		for (const [module, names] of Object.entries(RUNNER_MODULES)) {
+			const text = readFileSync(join(TESTS_DIR, module), "utf8");
+			for (const name of names) if (!exportsName(text, name)) unexported.push(`${module}: ${name}`);
+		}
+		assert.deepEqual(unexported, [], "RUNNER_MODULES names must be exported by their module");
+	});
+
+	it("recognizes the runs a text-only file must not make", () => {
+		const cases = [
+			'import { spawnSync } from "node:child_process";',
+			'const { execFile } = await import("node:child_process/promises");',
+			'spawnSync("docker", ["ps"]);',
+			'execFile("ls", []);',
+			'await run("docker", ["ps"]);',
+			'import { run } from "../deploy/lib.ts";',
+			'import { createContainer } from "./owned-docker.ts";',
+			'await createVolume("x");',
+		];
+		for (const text of cases) assert.notDeepEqual(processRuns(text), [], text);
+	});
+
+	it("lets through text that only mentions a process", () => {
+		const cases = [
+			"const hit = pattern.exec(line);",
+			"const text = 'run(\"docker\", [\"ps\"])';",
+			'// spawnSync("docker", ["run"]);',
+			'const label = "node:child_process is named here";',
+			'const names = ["spawn", "exec"];',
+		];
+		for (const text of cases) assert.deepEqual(processRuns(text), [], text);
 	});
 });

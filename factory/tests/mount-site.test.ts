@@ -3,7 +3,7 @@
 // tests that run docker stay in volume-identity.test.ts, where the creation guard reads every line.
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { isMountSite } from "./doc-lib.ts";
+import { isMountSite } from "./doc-parse.ts";
 
 describe("mount sites: a compose line counts only when a file it names declares a volume", () => {
 	it("the main compose file with its pgdata volume is a mount site", () => {
