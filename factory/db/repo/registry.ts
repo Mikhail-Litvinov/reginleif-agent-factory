@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gte, isNull, or, sql, type SQL } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNull, or, sql, type SQL } from "drizzle-orm";
 import type { PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import { auditLog } from "../schema/audit-log.ts";
 import { registryEmbeddings, registryInquiryResults, registryInquiries, registryLinks, registryRecords, regulationVersions } from "../schema/registry.ts";
@@ -40,11 +40,20 @@ const recordFilters = (filters: SearchFilters): SQL[] => {
 };
 
 export const registryRepo = (db: PostgresJsDatabase<any>) => ({
+	// Shared by all service operations that make decisions against active records and regulation.
+	lock: async (mode: "read" | "write" = "write"): Promise<void> => {
+		const key = "factory:registry";
+		await db.execute(mode === "read"
+			? sql`select pg_advisory_xact_lock_shared(hashtextextended(${key}, 0))`
+			: sql`select pg_advisory_xact_lock(hashtextextended(${key}, 0))`);
+	},
 	regulations: {
 		create: async (input: RegulationInsert): Promise<Regulation> => refusing((reason) => new RegistryRefusedError(reason), async () =>
 			(await db.insert(regulationVersions).values(input).returning())[0]!),
 		get: async (id: string): Promise<Regulation | undefined> =>
 			(await db.select().from(regulationVersions).where(eq(regulationVersions.id, id)).limit(1))[0],
+		nextNumber: async (): Promise<number> =>
+			(await db.select({ number: sql`coalesce(max(${regulationVersions.number}), 0) + 1`.mapWith(Number) }).from(regulationVersions))[0]!.number,
 		list: async ({ status, limit }: { status?: string; limit?: number } = {}): Promise<Regulation[]> => {
 			const query = db.select().from(regulationVersions).where(status === undefined ? undefined : eq(regulationVersions.status, status))
 				.orderBy(desc(regulationVersions.number));
@@ -79,6 +88,13 @@ export const registryRepo = (db: PostgresJsDatabase<any>) => ({
 			(await db.insert(registryRecords).values(input).returning())[0]!),
 		get: async (id: string): Promise<Record | undefined> =>
 			(await db.select().from(registryRecords).where(eq(registryRecords.id, id)).limit(1))[0],
+		ruleIds: async (ids: string[]): Promise<string[]> =>
+			(await db.select({ id: registryRecords.id }).from(registryRecords)
+				.where(and(eq(registryRecords.kind, "rule"), inArray(registryRecords.id, ids)))).map(row => row.id),
+		captureByPress: async (pressId: string): Promise<Record | undefined> =>
+			(await db.select().from(registryRecords).where(eq(registryRecords.pressId, pressId)).limit(1))[0],
+		captureByInquiry: async (inquiryId: string): Promise<Record | undefined> =>
+			(await db.select().from(registryRecords).where(and(eq(registryRecords.inquiryId, inquiryId), eq(registryRecords.source, "poll_press"))).limit(1))[0],
 		byNumber: async (number: bigint): Promise<Record | undefined> =>
 			(await db.select().from(registryRecords).where(eq(registryRecords.number, number)).limit(1))[0],
 		list: async ({ projectId, category, kind, status, scopeType, source, limit }: SearchFilters & { source?: string; limit?: number } = {}): Promise<Record[]> => {
