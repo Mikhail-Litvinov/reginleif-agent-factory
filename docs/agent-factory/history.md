@@ -84,8 +84,19 @@ These are not wishes in a prompt.
 ## Emergency erase
 
 Only for a leaked secret or personal data that got past the scan. The owner blanks the text of one row or entry, and
-the action takes a second press (D23). A tombstone stays with who did it and when, and the row keeps its links. Nothing
-else is ever deleted from the history or the chronicle, and the owner is the only one who may erase.
+the action takes a second press (D23). The owner is the only one who may erase: the right cannot be granted to any
+agent or role, the chief engineer included.
+
+- The erase names one of two reasons, `secret` or `personal_data`; any other reason is refused. A wrong fact, an
+  awkward assessment or an outdated conclusion is corrected by a new linked row, never erased.
+- Only the text is blanked. The row stays with its time, initiator, kind and links, and gets a tombstone: who erased
+  it, when, and the reason.
+- The erase is itself a history event, so the history shows that something was there and why it is gone, but not what.
+- Backups taken before the erase still hold the text. The erased ids are kept in a separate erase list, which every
+  backup carries. A restore applies the list after loading, so the text is blanked again even when the backup predates
+  the erase. The backups themselves are not rewritten.
+
+Nothing else is ever deleted from the history or the chronicle.
 
 ## Continuity and load
 
