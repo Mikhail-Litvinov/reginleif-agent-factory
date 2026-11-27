@@ -9,7 +9,7 @@ test('a retry returns the same decision and its current delivery state', async (
     lockKey: async () => {},
     byActorKey: async () => row,
     insertPair: async ({ decision }: any) => { row = { ...decision, refusalReason: null }; return { decision: row }; },
-  }, idempotencyKeys: { get: async () => undefined } };
+  }, idempotencyKeys: { get: async () => undefined }, polls: { forDecision: async () => [] } };
   const repo = { transaction: async (fn: any) => fn(tx) } as unknown as Repo;
   const input = { taskId: 'task', kind: 'pause' as const, actorId: 'owner', channel: 'client' as const, idempotencyKey: 'abcdefgh', body: { reason: 'wait' }, windowSeconds: 60 };
   const first = await recordDecision(repo, input);

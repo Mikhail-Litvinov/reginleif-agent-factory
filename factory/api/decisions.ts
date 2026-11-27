@@ -12,16 +12,18 @@ export type DecisionInput = {
   deviceSessionId?: string | null; pressId?: string | null; confirm?: string; now?: Date;
   /** The actual request path, when it differs from the standard task decision route. */
   path?: string;
+  poll?: { id: string; answerKey: string };
 };
 export class DecisionProblem extends Error {
   code: string;
   status: number;
-  constructor(code: string, status = 409) { super(code); this.code = code; this.status = status; }
+  readonly pollResult?: { answered_via: string | null; answered_at: string | null };
+  constructor(code: string, status = 409, pollResult?: { answered_via: string | null; answered_at: string | null }) { super(code); this.code = code; this.status = status; this.pollResult = pollResult; }
 }
 type Recorded = { id: string; kind: string; delivery_state: string; refusal_reason: string | null };
 type ConfirmationRequired = { code: 'confirmation_required'; confirmation_id: string; nonce: string; expires_at: string };
 export type DecisionResult = { status: 202; body: Recorded; location: string; replayed: boolean } | { status: 409; body: ConfirmationRequired; replayed: boolean };
-const hash = (value: string) => createHash('sha256').update(value).digest('hex');
+export const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 const canonical = (value: unknown): string => {
   if (value === null || typeof value !== 'object') return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
@@ -29,12 +31,13 @@ const canonical = (value: unknown): string => {
 };
 const routes: Record<DecisionKind, string> = { approve: 'approve', reject: 'reject', request_changes: 'request-changes', cancel: 'cancel', pause: 'pause', resume: 'resume', add_feedback: 'feedback', change_priority: 'priority', revise_requirements: 'revisions', resolve_block: 'resolve-block', force_close: 'force-close', allow_agent: 'allow-agent' };
 const dangerous = new Set<DecisionKind>(['cancel', 'reject', 'force_close']);
+export const mutationHash = (method: string, path: string, body: unknown) => hash(canonical([method, path, body]));
 const answer = (row: { id: string; kind: string | null; deliveryState: string | null; refusalReason: string | null }, replayed: boolean): DecisionResult => ({ status: 202, body: { id: row.id, kind: row.kind!, delivery_state: row.deliveryState!, refusal_reason: row.refusalReason }, location: `/decisions/${row.id}`, replayed });
 
 export async function recordDecision(repo: Repo, input: DecisionInput): Promise<DecisionResult> {
   if (!/^[A-Za-z0-9_-]{8,128}$/.test(input.idempotencyKey) || !decisionRequestSchemas[input.kind]?.safeParse(input.body).success || Boolean(input.actorId) === Boolean(input.engineerRunId)) throw new DecisionProblem('validation_failed', 422);
   const path = input.path ?? `/tasks/${input.taskId}/${routes[input.kind]}`;
-  const requestHash = hash(canonical(['POST', path, input.body]));
+  const requestHash = mutationHash('POST', path, input.poll ? { answer_key: input.poll.answerKey } : input.body);
   const now = input.now ?? new Date();
   const run = async (): Promise<DecisionResult> => repo.transaction(async tx => {
     await tx.decisions.lockKey(input.actorId ?? input.engineerRunId!, input.idempotencyKey);
@@ -47,8 +50,16 @@ export async function recordDecision(repo: Repo, input: DecisionInput): Promise<
     if (key) {
       if (key.requestHash !== requestHash) throw new DecisionProblem('idempotency_conflict');
       if (key.state !== 'done') throw new DecisionProblem('idempotency_in_progress');
-      return { status: 409, body: key.responseBody as ConfirmationRequired, replayed: true };
+      const first = key.responseBody as ConfirmationRequired | null;
+      if (first?.code !== 'confirmation_required' || key.responseStatus !== 409) throw new DecisionProblem('idempotency_conflict');
+      if (!input.confirm) return { status: 409, body: first, replayed: true };
     }
+    const revisionNumber = typeof input.body.revision_number === 'number' ? input.body.revision_number : null;
+    const selectedPoll = input.poll && await tx.polls.get(input.poll.id);
+    const decisionPolls = selectedPoll ? [selectedPoll] : await tx.polls.forDecision(input.taskId, revisionNumber, input.kind);
+    const closed = (poll: (typeof decisionPolls)[number]) => new DecisionProblem('poll_closed', 409, { answered_via: poll.answeredVia, answered_at: poll.answeredAt?.toISOString() ?? null });
+    if (input.poll && (!selectedPoll || selectedPoll.arbiter !== 'api' || selectedPoll.taskId !== input.taskId)) throw new DecisionProblem('not_found', 404);
+    if (decisionPolls.length !== 0 && decisionPolls.every(poll => poll.state !== 'open')) throw closed(decisionPolls[0]!);
     let confirmationId: string | undefined;
     if (dangerous.has(input.kind)) {
       if (!input.actorId) throw new DecisionProblem('owner_only', 422);
@@ -75,7 +86,11 @@ export async function recordDecision(repo: Repo, input: DecisionInput): Promise<
       confirmationId = match[1];
     }
     const decisionId = randomUUID(), outboxId = randomUUID();
-    const result = await tx.decisions.insertPair({ decision: { id: decisionId, taskId: input.taskId, kind: input.kind, actorId: input.actorId ?? null, engineerRunId: input.engineerRunId ?? null, channel: input.channel, deviceSessionId: input.deviceSessionId ?? null, pressId: input.pressId ?? null, revisionNumber: typeof input.body.revision_number === 'number' ? input.body.revision_number : null, payload: input.body, confirmationId: confirmationId ?? null, idempotencyKey: input.idempotencyKey, requestHash, deliveryState: 'recorded', outboxId }, outbox: { id: outboxId, kind: 'deliver_decision', taskId: input.taskId, decisionId, payload: { decision_id: decisionId }, state: 'pending', attempts: 0 } });
+    const result = await tx.decisions.insertPair({ decision: { id: decisionId, taskId: input.taskId, kind: input.kind, actorId: input.actorId ?? null, engineerRunId: input.engineerRunId ?? null, channel: input.channel, deviceSessionId: input.deviceSessionId ?? null, pressId: input.pressId ?? null, revisionNumber, payload: input.body, confirmationId: confirmationId ?? null, idempotencyKey: input.idempotencyKey, requestHash, deliveryState: 'recorded', outboxId }, outbox: { id: outboxId, kind: 'deliver_decision', taskId: input.taskId, decisionId, payload: { decision_id: decisionId }, state: 'pending', attempts: 0 } });
+    for (const poll of decisionPolls.filter(row => row.state === 'open').sort((a, b) => a.id.localeCompare(b.id))) {
+      const updated = await tx.polls.answer(poll.id, { answerKey: input.poll?.answerKey ?? input.kind, answeredVia: input.channel, answeredSessionId: input.deviceSessionId ?? null, arbiter: 'api', decisionId, now });
+      if (!updated) throw closed(await tx.polls.get(poll.id) ?? poll);
+    }
     if (confirmationId && !await tx.confirmations.consume({ id: confirmationId, actorId: input.actorId!, channel: input.channel, deviceSessionId: input.deviceSessionId ?? null, operation: input.kind, targetType: 'task', targetId: input.taskId, requestHash, now, decisionId })) throw new DecisionProblem('confirmation_invalid');
     return answer(result.decision, false);
   });

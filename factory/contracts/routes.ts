@@ -12,6 +12,9 @@ export const confirmationRequiredSchema = problemDetailsSchema.extend({
   nonce: z.string(), expires_at: z.string(),
 });
 export const guardConflictSchema = problemDetailsSchema.extend({ code: z.literal('guard_conflict'), conflicts_with: z.array(z.string().uuid()) });
+const pollClosedSchema = problemDetailsSchema.extend({
+  code: z.literal('poll_closed'), answered_via: z.string().nullable(), answered_at: z.iso.datetime().nullable(),
+});
 
 export interface Route {
   method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'HEAD';
@@ -28,8 +31,6 @@ export interface Route {
 
 // api.md, Idempotency: 8–128 ASCII letters, digits, underscores or hyphens.
 const idempotencyKeySchema = z.string().min(8).max(128).regex(/^[A-Za-z0-9_-]+$/);
-// Enrollment: api.md gives 401 unauthenticated for an invalid enrollment code;
-// its Errors table names the specific code device_code_invalid for that condition.
 // A missing owner_act_ref on a right answer is 400; the Errors table calls a
 // malformed request validation_failed, although its general status is 422.
 const decisions = [
@@ -85,6 +86,7 @@ type Input = { method: Method; path: string; roles: readonly string[]; request?:
 
 const owner = ['owner'] as const;
 const readers = ['owner', 'reader', 'relay'] as const;
+const clientReaders = ['owner', 'reader', 'device'] as const;
 const workers = ['worker:own_runs'] as const;
 const entries: Input[] = [
   { method: 'GET', path: '/projects', roles: readers, responses: { 200: pageSchema(projectSchema) } },
@@ -134,28 +136,28 @@ const entries: Input[] = [
   { method: 'HEAD', path: '/artifacts/{id}/content', roles: workers, responses: { 200: 'none' } },
   { method: 'GET', path: '/artifacts/{id}/content', roles: [...readers, ...workers], responses: { 200: 'binary' } },
   { method: 'POST', path: '/runs/{run_id}/proposals', roles: workers, request: childTaskProposalRequestSchema, responses: { 201: 'unspecified' }, errors: { 409: ['depth_exceeded'] } },
-  { method: 'POST', path: '/devices', roles: owner },
-  { method: 'POST', path: '/devices/enroll', roles: ['none'], errors: { 401: ['device_code_invalid'] } },
+  { method: 'POST', path: '/devices', roles: owner, errors: { 409: ['token_already_issued'] } },
+  { method: 'POST', path: '/devices/enroll', roles: ['none'], errors: { 401: ['unauthenticated'] } },
   { method: 'GET', path: '/devices', roles: ['owner', 'device'] },
   { method: 'GET', path: '/devices/{id}/sessions', roles: ['owner', 'device'] },
   { method: 'DELETE', path: '/devices/{id}', roles: ['owner', 'device'] },
   { method: 'DELETE', path: '/device-sessions/{id}', roles: ['owner', 'device'] },
-  { method: 'GET', path: '/conversations', roles: [...readers, 'device'] },
-  { method: 'GET', path: '/conversations/{id}', roles: [...readers, 'device'] },
-  { method: 'GET', path: '/conversations/{id}/messages', roles: [...readers, 'device'] },
-  { method: 'POST', path: '/conversations/{id}/messages', roles: ['owner', 'device'] },
+  { method: 'GET', path: '/conversations', roles: clientReaders },
+  { method: 'GET', path: '/conversations/{id}', roles: clientReaders },
+  { method: 'GET', path: '/conversations/{id}/messages', roles: clientReaders },
+  { method: 'POST', path: '/conversations/{id}/messages', roles: ['owner', 'device'], errors: { 409: ['request_closed'] } },
   { method: 'POST', path: '/hub/messages', roles: ['hub'], idempotent: true },
   { method: 'POST', path: '/hub/polls', roles: ['hub'], idempotent: true },
   { method: 'POST', path: '/hub/states', roles: ['hub'], idempotent: true },
   { method: 'POST', path: '/conversations/{id}/polls/{poll_id}/answer', roles: ['owner', 'device'], errors: { 409: ['poll_closed'] } },
-  { method: 'GET', path: '/conversations/{id}/polls/{poll_id}', roles: [...readers, 'device'] },
+  { method: 'GET', path: '/conversations/{id}/polls/{poll_id}', roles: clientReaders },
   { method: 'GET', path: '/hub/poll-answers', roles: ['hub'] },
   { method: 'POST', path: '/hub/poll-answers/{id}/result', roles: ['hub'], idempotent: true, errors: { 409: ['request_closed'] } },
   { method: 'POST', path: '/hub/polls/{id}/result', roles: ['hub'], errors: { 409: ['poll_closed'] } },
   { method: 'GET', path: '/hub/polls', roles: ['hub'] },
-  { method: 'GET', path: '/events/stream', roles: [...readers, 'device'], responses: { 200: 'event-stream' }, errors: { 400: ['bad_cursor'] } },
+  { method: 'GET', path: '/events/stream', roles: clientReaders, responses: { 200: 'event-stream' }, errors: { 400: ['bad_cursor'] } },
   // Open shapes: stop-all has no specified request, scope, or result fields.
-  { method: 'POST', path: '/system/stop-all', roles: ['owner', 'device'] },
+  { method: 'POST', path: '/system/stop-all', roles: ['owner', 'device'], request: 'none', responses: { 204: 'none' } },
   { method: 'POST', path: '/registry/inquiries', roles: ['registry:own_session_or_run', 'owner'] },
   { method: 'GET', path: '/registry/inquiries/{id}', roles: [...readers, 'registry:own_session_or_run'] },
   { method: 'POST', path: '/registry/inquiries/{id}/verdicts', roles: ['registry'] },
@@ -277,7 +279,7 @@ const queryParameters: Readonly<Record<string, readonly string[]>> = {
 const cursorStreams = new Set(['/tasks/{id}/events', '/events/stream', '/conversations/{id}/messages', '/system/audit', '/notifications']);
 const secondPress = new Set([
   'PUT /projects/{id}/policy', 'POST /tasks/{id}/publish', 'POST /tasks/{id}/cleanup',
-  'POST /devices', 'POST /system/stop-all', 'POST /regulation/versions/{id}/activate',
+  'POST /devices', 'POST /system/stop-all', 'POST /conversations/{id}/polls/{poll_id}/answer', 'POST /regulation/versions/{id}/activate',
   'POST /regulation/versions/{id}/revoke', 'POST /personnel/chief-engineer',
   'DELETE /personnel/chief-engineer', 'PUT /personnel/replacement-procedure', 'PUT /personnel/mode',
   'POST /robot-start-confirmations', 'POST /robots/{id}/release',
@@ -342,7 +344,8 @@ function toRoute(entry: Input): Route {
   const isRead = entry.method === 'GET' || entry.method === 'HEAD';
   const earlierOwnerRoute = /^\/(projects|tasks|decisions|agents|workers|notifications)(\/|$)/.test(entry.path) && entry.path !== '/tasks/{id}/participants';
   const roles = earlierOwnerRoute && entry.roles.includes('owner') ? [...entry.roles, 'device'] : entry.roles;
-  const keyedMutation = !isRead && !(entry.path === '/workers/register' || entry.path === '/workers/{id}/heartbeat' || entry.path === '/runs/{run_id}/artifacts' || (entry.path === '/artifacts/{id}/content' && entry.method === 'PUT'));
+  const keyedMutation = !isRead && !entry.path.startsWith('/hub/') && entry.path !== '/devices/enroll' &&
+    !(entry.path === '/workers/register' || entry.path === '/workers/{id}/heartbeat' || entry.path === '/runs/{run_id}/artifacts' || (entry.path === '/artifacts/{id}/content' && entry.method === 'PUT'));
   const parameters = [...(entry.parameters ?? [])];
   if (entry.method === 'GET') {
     const names = [...(queryParameters[entry.path] ?? [])];
@@ -361,7 +364,7 @@ function toRoute(entry: Input): Route {
   if (confirms) parameters.push({ name: 'X-Confirm', in: 'header' });
   const errors: Record<number, readonly string[]> = { 422: ['validation_failed'], 429: ['rate_limited'], 500: ['internal'], 503: ['unavailable'] };
   if (!entry.roles.includes('none')) {
-    errors[401] = ['unauthenticated'];
+    errors[401] = roles.includes('device') ? ['unauthenticated', 'device_revoked'] : ['unauthenticated'];
     errors[403] = ['forbidden'];
   }
   if (entry.path.includes('{')) errors[404] = ['not_found'];
@@ -390,6 +393,7 @@ export const routes: readonly Route[] = [...decisionRoutes, ...entries.map(toRou
       const variants: z.ZodType[] = [problemDetailsSchema];
       if (codes.includes('confirmation_required')) variants.push(confirmationRequiredSchema);
       if (codes.includes('guard_conflict')) variants.push(guardConflictSchema);
+      if (codes.includes('poll_closed')) variants.push(pollClosedSchema);
       return [status, variants.length > 1 ? z.union([variants[0]!, variants[1]!, ...variants.slice(2)]) : variants[0]!];
     })),
   },

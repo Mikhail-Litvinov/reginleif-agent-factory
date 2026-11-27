@@ -2,6 +2,8 @@ import { and, asc, desc, eq, isNotNull, isNull, or, sql, type SQL } from "drizzl
 import type { PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import { refusing } from "./errors.ts";
 import { rightAnswers, rightGrants, rightRequests, rightsSuspensions, roleAssignments, roles } from "../schema/rights.ts";
+import { taskRuns } from "../schema/runs.ts";
+import { tasks } from "../schema/tasks.ts";
 
 type RoleInsert = typeof roles.$inferInsert;
 type Role = typeof roles.$inferSelect;
@@ -95,6 +97,21 @@ export const rightGrantRepo = (db: PostgresJsDatabase<any>) => ({
 });
 
 export const rightsSuspensionRepo = (db: PostgresJsDatabase<any>) => ({
+	stopTargets: async () => {
+		const live = await db.selectDistinct({ agentId: taskRuns.agentId }).from(taskRuns).where(and(
+			isNotNull(taskRuns.agentId), isNull(taskRuns.finishedAt),
+			sql`${taskRuns.status} IS NULL OR ${taskRuns.status} NOT IN ('finished','failed','died','cancelled')`,
+		));
+		const grants = await db.select({
+			id: rightGrants.id, agentId: sql<string | null>`coalesce(${taskRuns.agentId}, ${tasks.assignedAgentId})`,
+			sessionRef: rightGrants.sessionRef, taskId: rightGrants.taskId,
+		}).from(rightGrants).leftJoin(rightRequests, eq(rightGrants.requestId, rightRequests.id))
+			.leftJoin(taskRuns, eq(taskRuns.id, rightRequests.runId)).leftJoin(tasks, eq(tasks.id, rightGrants.taskId))
+			.where(isNull(rightGrants.endedAt));
+		return { live, grants };
+	},
+	openForAgent: async (agentId: string): Promise<RightsSuspension | undefined> =>
+		(await db.select().from(rightsSuspensions).where(and(eq(rightsSuspensions.agentId, agentId), isNull(rightsSuspensions.endedAt))).limit(1))[0],
 	create: async (input: RightsSuspensionInsert): Promise<RightsSuspension> => refusing((reason) => new RightsSuspensionRefusedError(reason), async () =>
 		(await db.insert(rightsSuspensions).values(input).returning())[0]!),
 	get: async (id: string): Promise<RightsSuspension | undefined> => (await db.select().from(rightsSuspensions).where(eq(rightsSuspensions.id, id)).limit(1))[0],
