@@ -86,6 +86,13 @@ export const registryRepo = (db: PostgresJsDatabase<any>) => ({
 	records: {
 		create: async (input: RecordInsert): Promise<Record> => refusing((reason) => new RegistryRefusedError(reason), async () =>
 			(await db.insert(registryRecords).values(input).returning())[0]!),
+		createImportedIfAbsent: async (input: RecordInsert): Promise<{ record: Record; inserted: boolean }> => refusing((reason) => new RegistryRefusedError(reason), async () => {
+			const inserted = (await db.insert(registryRecords).values(input).onConflictDoNothing({ target: registryRecords.id }).returning())[0];
+			if (inserted) return { record: inserted, inserted: true };
+			const existing = (await db.select().from(registryRecords).where(eq(registryRecords.id, input.id)).limit(1))[0];
+			if (!existing) throw new RegistryRefusedError("import_conflict_missing");
+			return { record: existing, inserted: false };
+		}),
 		get: async (id: string): Promise<Record | undefined> =>
 			(await db.select().from(registryRecords).where(eq(registryRecords.id, id)).limit(1))[0],
 		ruleIds: async (ids: string[]): Promise<string[]> =>
