@@ -1,0 +1,15 @@
+services:
+  embedder:
+    build: .
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    volumes:
+      - ${AF_EMBEDDER_MODEL_DIR:?set AF_EMBEDDER_MODEL_DIR}:/model:ro
+    ports:
+      - "127.0.0.1:${AF_EMBEDDER_PORT:-8088}:8080"
+    networks: [embedder]
+networks:
+  embedder:
+    internal: true
