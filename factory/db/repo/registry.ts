@@ -24,9 +24,9 @@ export class RegistryRefusedError extends Error {
 	constructor(reason: string) { super(reason); this.reason = reason; }
 }
 
-type SearchFilters = { projectId?: string; category?: string; kind?: string; status?: string; scopeType?: string };
+type SearchFilters = { projectId?: string; category?: string; kind?: string; status?: string; scopeType?: string; reuse?: string };
 type SearchInput = SearchFilters & { query: string; limit: number; threshold: number };
-type SearchHit = { record: Record; score: number };
+type SearchHit = { record: Record; score: number; matchedFields: string[] };
 
 const recordFilters = (filters: SearchFilters): SQL[] => {
 	const conditions: SQL[] = [];
@@ -35,6 +35,7 @@ const recordFilters = (filters: SearchFilters): SQL[] => {
 	if (filters.kind !== undefined) conditions.push(eq(registryRecords.kind, filters.kind));
 	if (filters.status !== undefined) conditions.push(eq(registryRecords.status, filters.status));
 	if (filters.scopeType !== undefined) conditions.push(eq(registryRecords.scopeType, filters.scopeType));
+	if (filters.reuse !== undefined) conditions.push(eq(registryRecords.reuse, filters.reuse));
 	return conditions;
 };
 
@@ -99,15 +100,18 @@ export const registryRepo = (db: PostgresJsDatabase<any>) => ({
 		searchFullText: async (input: SearchInput & { language: "ru" | "en" }): Promise<SearchHit[]> => {
 			const vector = input.language === "ru" ? registryRecords.searchRu : registryRecords.searchEn;
 			const config = input.language === "ru" ? "russian" : "english";
-			const query = sql`plainto_tsquery(${config}::regconfig, ${input.query})`;
-			const score = sql<number>`ts_rank(${vector}, ${query})`;
-			return db.select({ record: registryRecords, score }).from(registryRecords)
+			const query = sql`replace(plainto_tsquery(${config}::regconfig, ${input.query})::text, ' & ', ' | ')::tsquery`;
+			const score = sql<number>`ts_rank(${vector}, ${query}, 32)`;
+			const fields = [["problem", registryRecords.problem], ["decision", registryRecords.decision], ["exceptions_text", registryRecords.exceptionsText], ["grounds", registryRecords.grounds], ["consequences", registryRecords.consequences], ["question", registryRecords.question], ["summary", registryRecords.summary]] as const;
+			const matchedFields = sql<string[]>`array_remove(ARRAY[${sql.join(fields.map(([name, column]) => sql`CASE WHEN to_tsvector(${config}::regconfig, coalesce(${column}, '')) @@ ${query} THEN ${name} END`), sql`, `)}], NULL)`;
+			return db.select({ record: registryRecords, score, matchedFields }).from(registryRecords)
 				.where(and(...recordFilters(input), sql`${vector} @@ ${query}`, gte(score, input.threshold)))
 				.orderBy(desc(score), asc(registryRecords.id)).limit(input.limit);
 		},
 		searchTrigram: async (input: SearchInput): Promise<SearchHit[]> => {
 			const score = sql<number>`greatest(similarity(coalesce(${registryRecords.problem}, ''), ${input.query}), similarity(coalesce(${registryRecords.decision}, ''), ${input.query}))`;
-			return db.select({ record: registryRecords, score }).from(registryRecords)
+			const matchedFields = sql<string[]>`array_remove(ARRAY[CASE WHEN similarity(coalesce(${registryRecords.problem}, ''), ${input.query}) >= ${input.threshold} THEN 'problem' END, CASE WHEN similarity(coalesce(${registryRecords.decision}, ''), ${input.query}) >= ${input.threshold} THEN 'decision' END], NULL)`;
+			return db.select({ record: registryRecords, score, matchedFields }).from(registryRecords)
 				.where(and(...recordFilters(input), gte(score, input.threshold)))
 				.orderBy(desc(score), asc(registryRecords.id)).limit(input.limit);
 		},
@@ -129,7 +133,7 @@ export const registryRepo = (db: PostgresJsDatabase<any>) => ({
 			// postgres-js sends number[] as float8[], which has no <=> operator; bind the vector literal text and cast it.
 			const distance = sql<number>`${registryEmbeddings.embedding} <=> ${JSON.stringify(input.embedding)}::vector`;
 			const score = sql<number>`1 - (${distance})`;
-			return db.select({ record: registryRecords, score }).from(registryEmbeddings)
+			return db.select({ record: registryRecords, score, matchedFields: sql<string[]>`ARRAY[]::text[]` }).from(registryEmbeddings)
 				.innerJoin(registryRecords, eq(registryRecords.id, registryEmbeddings.recordId))
 				.where(and(eq(registryEmbeddings.modelVersion, input.modelVersion), ...recordFilters(input), gte(score, input.threshold)))
 				.orderBy(desc(score), asc(registryRecords.id)).limit(input.limit);

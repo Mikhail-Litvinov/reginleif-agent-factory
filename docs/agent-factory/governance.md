@@ -303,6 +303,15 @@ stores the model version; a new model re-embeds in the background and switches w
 the two text rankings and says `degraded`. The model and thresholds are chosen by a measurement on invented paraphrases in
 Russian and English: the criterion is the right record among the first results, and no hit for an unrelated question.
 
+Search reads `registry.textThreshold`, `registry.trigramThreshold`, `registry.vectorThreshold`,
+`registry.embeddingModel` and `registry.searchLimit` from global settings on each call. The defaults are respectively
+0.025, 0.1846, 0.47, `5617a9f61b028005a4858fdac845db406aefb181` and 5; see
+`docs/reports/registry-search-measurement.md` (the limit is the report's top-five criterion). The two full-text
+scores are combined by their maximum. Vector, full text and trigram scores have different scales: results are ordered
+by vector first, then full text, then trigram as a typo fallback, with descending score within each ranking. A record
+appears once, under its highest-priority ranking. Search excludes single-use records before ranking. Matched fields
+are collected from the text and trigram matches; vector similarity alone does not identify a field.
+
 ## Access
 
 - `registry` role: search, open an inquiry, give a verdict, propose a draft. Bound to one session or run. It is the only
