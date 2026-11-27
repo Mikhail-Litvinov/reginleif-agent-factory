@@ -2,7 +2,7 @@
 
 Binding: [architecture.md](architecture.md). Tables: [database.md](database.md). Workflow: [temporal.md](temporal.md).
 Interface: [api.md](api.md). Adapters: [agent-adapters.md](agent-adapters.md). Checks: [testing.md](testing.md).
-Security: [security.md](security.md). "Spec 4.2" is a section of the task specification. "Call" is a choice made here,
+Security: [security.md](security.md). History: [history.md](history.md). "Spec 4.2" is a section of the task specification. "Call" is a choice made here,
 open to veto. Paths: `F/` is `factory/` (own package, Node 24, D1 D2 D17); `R/` is the Rig repository (Bun).
 
 ## Phase 0 (this folder)
@@ -200,6 +200,7 @@ Criterion (spec): a real task starts an agent, gets the result, survives a worke
 | `F/adapters/codex/` | Supervisor job folder; mapping of the 7 statuses; a record can only choose the sandbox at job start, there is no hook | api, runner |
 | `F/control/activities/chief-engineer.ts` | `AskChiefEngineer`, a local activity (D28) using `F/rights/chief-engineer.ts`; the wait for a right holds no machine and the task state stays as it is; `call_owner` is recorded as a step of its own and goes through the gate (G9) to the owner; it also resolves the blocks whose handler is the chief engineer (`resolve_block`), never one that raises a cost or does a dangerous operation, and runs its routine physical decision (D34, a `physical_decision` row on the standing or physical task, its own run) | rights, registry |
 | `F/personnel/critical.ts` | The critical reaction (D32), moved here from phase 8 because this phase first gives an agent a right: one transaction of `af_control` writes the `rights_suspensions` row, ends the open grants (`critical`), revokes the tokens, writes the audit row `rights.suspend` (`personnel.critical_reaction` while incident records do not exist) and the outbox `stop_run` and `notify` rows; the worker executes `stop_run` by killing the run by its identity (the whole process tree, the Codex sandbox included) | rights, worker, repo |
+| `F/history/` (planned, [history.md](history.md)) | The factory's historical memory: `history_events` (append-only, immutable by trigger, references to source rows made in the transaction that writes them), the chronicle space, the separate read route, the secret scan and size cap on every write, the owner's emergency erase with a tombstone. Planned for this phase because it is the first in which tasks run and agents act on their own, and it lands before full autonomy. Migration number assigned when the phase starts; proving checks named then | registry, audit, rights |
 | `F/telegram/` | Task commands and notices are phase 6; the relay of the registry exists since phase 2 | |
 | `docs/agent-factory/operations.md`; `recovery.md` extended | Spec 23 documents with the real commands of this phase | worker, runner |
 
