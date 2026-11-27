@@ -451,7 +451,9 @@ Hidden columns are named in each entry; `commit_xid` is hidden on every stream r
 - **TaskProposal** (`task_proposals`): `id, task_id, run_id, kind: E(decomposition|agent_proposal), title, requirements,
   covers: json, state, child_task_id|null, decided_by|null, created_at, decided_at|null`.
 - **CleanupPlan** (`POST /tasks/{id}/cleanup`, `dry_run=true`, 200): `{dry_run: true, items: [{kind: E(log|artifact|execution_folder|worktree),
-  ref: string, size: int}], total_size: int}`. With `dry_run=false` the answer is Recorded decision-style `202
+  ref: string, size: int|null}], total_size: int}`. `size` is `null` when the server cannot know it: execution folders and
+  worktrees live on a worker machine and the server stores no size for them (only logs and artifacts have one);
+  `total_size` sums the known sizes only. With `dry_run=false` the answer is Recorded decision-style `202
   {id, delivery_state}` of the cleanup request, with `Location`.
 - **Agent** (`agents`): `id, name, provider, adapter_type, capabilities: json, enabled: bool, concurrency_limit: int,
   configuration: json (credential references only), created_at, updated_at, deleted_at|null, row_version`.

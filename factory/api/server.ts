@@ -4,10 +4,13 @@ import type { AddressInfo } from 'node:net';
 import { z } from 'zod';
 import { routes, type Route } from '../contracts/routes.ts';
 import { createLogger, type Logger } from '../lib/log.ts';
+import { BadCursorError } from './cursor.ts';
 
 type Identity = { id: string; role: string | null; prefix: string | null; tokenHash: string | null; ownerId?: string | null; workerId: string | null; revokedAt: Date | null; expiresAt: Date | null; validUntil: Date | null };
-type Dependencies = { tokens: { byHash(hash: string): Promise<Identity | undefined> }; workers: { get(id: string): Promise<{ machineId: string | null } | undefined> }; queueGatewayEnabled?: boolean; authorizeScope?: (context: { identity: Identity; route: Route; params: Record<string, string>; body: unknown; scope: string }) => Promise<boolean>; logger?: Logger; clock?: () => Date };
-export type HandlerContext = { request: IncomingMessage; route: Route; params: Record<string, string>; body: unknown; identity: Identity | null; requestId: string; logger: Logger };
+type Dependencies = { tokens: { byHash(hash: string): Promise<Identity | undefined> }; authorizeScope?: (context: { identity: Identity; route: Route; params: Record<string, string>; body: unknown; scope: string }) => Promise<boolean>; logger?: Logger; clock?: () => Date };
+// Every route template that has a path parameter names it `{id}`; the router fills it before the handler runs.
+export type PathParams = Record<string, string> & { id: string };
+export type HandlerContext = { request: IncomingMessage; route: Route; params: PathParams; body: unknown; identity: Identity | null; requestId: string; logger: Logger };
 export type Handler = (context: HandlerContext) => Promise<{ status: number; body?: unknown; headers?: Record<string, string> }>;
 
 const uuid = z.string().uuid();
@@ -40,7 +43,7 @@ export function createApiServer(deps: Dependencies) {
       const match = matching.find((item) => item.route.method === req.method && item.regex.test(pathname));
       if (!match) { problem(404, 'not_found', 'Route not found'); return; }
       const values = match.regex.exec(pathname)!;
-      const params = Object.fromEntries(match.names.map((name, i) => [name, decodeURIComponent(values[i + 1]!)]));
+      const params = Object.fromEntries(match.names.map((name, i) => [name, decodeURIComponent(values[i + 1]!)])) as PathParams;
       const route = match.route;
       let identity: Identity | null = null;
       if (!route.roles.includes('none')) {
@@ -64,10 +67,6 @@ export function createApiServer(deps: Dependencies) {
         if (!parsed.success) { problem(422, 'validation_failed', 'Invalid request body'); return; }
         body = parsed.data;
       }
-      if (identity?.role === 'worker' && route.path === '/workers/register') {
-        const worker = await deps.workers.get(identity.workerId!);
-        if (!worker || (worker.machineId !== (body as { machine_id: string }).machine_id && !deps.queueGatewayEnabled)) { problem(409, 'queue_isolation_required', 'A second machine requires an isolated queue gateway'); return; }
-      }
       if (identity) {
         const grants = route.roles.filter((role) => role.split(':')[0] === identity!.role);
         if (!grants.includes(identity.role!) && !(await Promise.all(grants.map(async (grant) => {
@@ -88,7 +87,12 @@ export function createApiServer(deps: Dependencies) {
       res.writeHead(result.status, result.headers);
       const contentType = result.headers?.['content-type'] ?? '';
       res.end(result.body === undefined ? undefined : typeof result.body === 'string' && (contentType.startsWith('text/') || contentType.includes('application/octet-stream')) ? result.body : JSON.stringify(result.body));
-    } catch { if (!res.headersSent) problem(500, 'internal', 'Request failed'); else res.destroy(); }
+    } catch (error) {
+      // A malformed or foreign cursor is the caller's mistake (api.md:385, :667), whichever handler read the stream.
+      if (error instanceof BadCursorError && !res.headersSent) problem(400, 'bad_cursor', 'Invalid cursor');
+      else if (!res.headersSent) problem(500, 'internal', 'Request failed');
+      else res.destroy();
+    }
   });
   return {
     register(method: Route['method'], path: string, handler: Handler) {

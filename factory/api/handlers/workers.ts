@@ -27,15 +27,17 @@ export function registerWorkerHandlers(api: HandlerRegistrar, { repo, now = () =
     return updated ? response(200, apiRow(updated)) : response(409, { code: 'version_conflict' });
   });
   api.register('POST', '/workers/register', async context => {
-    const { body, identity } = context;
-    const input = body as { machine_id: string; name: string; platform: string; capabilities: unknown; version: string; contract_version: number };
-    const bound = identity?.workerId ? await repo.workers.get(identity.workerId) : undefined;
-    const existing = (await repo.workers.list()).find(worker => worker.machineId === input.machine_id);
-    if (bound && bound.machineId !== input.machine_id && !queueGatewayEnabled) return response(409, { code: 'queue_isolation_required' });
-    if (!bound && existing) return response(403, { code: 'forbidden' });
+    const input = context.body as { machine_id: string; name: string; platform: string; capabilities: unknown; version: string; contract_version: number };
+    const known = await repo.workers.list();
+    const existing = known.find(worker => worker.machineId === input.machine_id);
+    // api.md:149, :676 and security.md:72 (T26): one machine only; a second one is refused with
+    // 409 queue_isolation_required until the deployment declares the queue gateway (D28). Registering
+    // an already known machine again is safe (api.md:149), so only a new machine is refused.
+    const firstMachine = !known.some(worker => worker.machineId !== null);
+    if (!existing && !firstMachine && !queueGatewayEnabled) return response(409, { code: 'queue_isolation_required' });
     const worker = await repo.transaction(async tx => {
       const registered = await tx.workers.register({
-      id: existing?.id ?? (bound?.machineId === input.machine_id ? bound.id : id()), machineId: input.machine_id,
+      id: existing?.id ?? id(), machineId: input.machine_id,
       name: input.name, platform: input.platform, capabilities: input.capabilities, version: input.version,
         // New workers default to one slot until an owner sets the documented concurrency limit.
         contractVersion: input.contract_version, status: 'online', concurrencyLimit: existing?.concurrencyLimit ?? 1,
@@ -45,14 +47,17 @@ export function registerWorkerHandlers(api: HandlerRegistrar, { repo, now = () =
     });
     return response(200, { worker_id: worker.id, contract_range: { min: String(worker.contractVersion), max: String(worker.contractVersion) } });
   });
-  api.register('POST', '/workers/{id}/heartbeat', async ({ params, body, identity }) => {
+  api.register('POST', '/workers/{id}/heartbeat', async context => {
+    const { params, body, identity } = context;
+    // api.md:150: a worker reports only for its own id.
+    if (!identity || identity.workerId !== params.id) return response(403, { code: 'forbidden' });
     const input = body as { capabilities?: unknown; run_ids: string[] };
     const worker = await repo.transaction(async tx => {
       const updated = await tx.workers.heartbeat(params.id, input.capabilities, now());
       if (updated) await writeAudit(tx, context, 'worker.heartbeat', 'worker', updated.id, 'ok', { run_ids: input.run_ids });
       return updated;
     });
-    if (!worker || identity?.workerId !== params.id) return response(404, { code: 'not_found' });
+    if (!worker) return response(404, { code: 'not_found' });
     return response(200, { server_time: now().toISOString(), token_expires_at: identity.expiresAt?.toISOString() ?? null });
   });
 }

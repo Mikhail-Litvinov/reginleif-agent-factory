@@ -1,6 +1,7 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { HandlerDeps, HandlerRegistrar } from './shared.ts';
 import { query, response } from './shared.ts';
+import { confirmWindowSeconds } from './settings.ts';
 
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 
@@ -11,10 +12,10 @@ export function registerCleanupHandlers(api: HandlerRegistrar, { repo, now = () 
     const force = params.get('force') === 'true';
     const task = await repo.tasks.get(context.params.id);
     if (!task || task.originType === 'standing') return response(404, { code: 'not_found' });
-    const final = ['ACCEPTED', 'REJECTED', 'CANCELLED', 'FAILED'].includes(task.status);
+    const final = ['ACCEPTED', 'REJECTED', 'CANCELLED', 'FAILED'].includes(task.status ?? '');
     if (!final) return response(409, { code: 'task_active' });
     const items = await repo.tasks.cleanupItems(task.id);
-    if (dryRun) return response(200, { dry_run: true, items, total_size: items.reduce((sum, item) => sum + item.size, 0) });
+    if (dryRun) return response(200, { dry_run: true, items, total_size: items.reduce((sum, item) => sum + (item.size ?? 0), 0) });
 
     const target = `POST /tasks/${task.id}/cleanup?dry_run=false&force=${force}`;
     const requestHash = hash(target);
@@ -28,9 +29,7 @@ export function registerCleanupHandlers(api: HandlerRegistrar, { repo, now = () 
       if (typeof confirmHeader !== 'string') {
         const id = randomUUID();
         const nonce = randomBytes(32).toString('base64url');
-        const configured = (await repo.settings.snapshot(['confirm.windowSeconds']))['confirm.windowSeconds'];
-        const seconds = typeof configured === 'number' && Number.isSafeInteger(configured) && configured > 0 ? configured : 60;
-        const expiresAt = new Date(now().getTime() + seconds * 1000);
+        const expiresAt = new Date(now().getTime() + await confirmWindowSeconds(repo) * 1000);
         await repo.confirmations.create({ id, actorId, channel: 'api', deviceSessionId: null, operation: 'cleanup', targetType: 'task', targetId: task.id, requestHash, nonceHash: hash(nonce), issuedAt: now(), expiresAt });
         return response(409, { code: 'confirmation_required', confirmation_id: id, nonce, expires_at: expiresAt.toISOString() });
       }

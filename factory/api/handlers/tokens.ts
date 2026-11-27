@@ -9,6 +9,13 @@ const idempotencyKey = (context: { request: { headers: Record<string, string | s
   return typeof value === 'string' && /^[A-Za-z0-9_-]{8,128}$/.test(value) ? value : undefined;
 };
 
+// A lost row_version race throws inside the transaction so the idempotency claim rolls back
+// with it; the caller may retry the same key instead of finding it stuck in progress.
+class VersionConflict extends Error {}
+const withConflict = async <T>(run: () => Promise<T>): Promise<T | { error: 'version_conflict' }> => {
+  try { return await run(); } catch (error) { if (error instanceof VersionConflict) return { error: 'version_conflict' }; throw error; }
+};
+
 export function registerTokenHandlers(api: HandlerRegistrar, { repo, now = () => new Date() }: HandlerDeps): void {
   api.register('GET', '/tokens', async () => response(200, { items: (await repo.tokens.list()).map(apiRow), next_cursor: null }));
   api.register('POST', '/tokens', async context => {
@@ -37,7 +44,7 @@ export function registerTokenHandlers(api: HandlerRegistrar, { repo, now = () =>
       await tx.idempotencyKeys.complete(actorId, key, 201, { token_id: created.id });
       return { created };
     });
-    if ('error' in result) return response(result.error === 'token_already_issued' ? 409 : result.error === 'idempotency_in_progress' ? 409 : 409, { code: result.error });
+    if ('error' in result) return response(409, { code: result.error });
     return response(201, { ...apiRow(result.created), secret: `afk_${secret.prefix}_${secret.secret}` }, { location: `/tokens/${result.created.id}` });
   });
   api.register('POST', '/tokens/{id}/rotate', async context => {
@@ -52,7 +59,7 @@ export function registerTokenHandlers(api: HandlerRegistrar, { repo, now = () =>
     const actorId = identity?.ownerId ?? identity?.id;
     if (!actorId) return response(403, { code: 'forbidden' });
     const requestHash = requestDigest(context.request.method ?? 'POST', `${context.route.path}:${params.id}`, null);
-    const result = await repo.transaction(async tx => {
+    const result = await withConflict(() => repo.transaction(async tx => {
       const claim = await tx.idempotencyKeys.claim({ actorId, key, requestHash, state: 'in_progress' });
       if (claim.replayed) {
         if (claim.row.requestHash !== requestHash) return { error: 'idempotency_conflict' as const };
@@ -64,10 +71,10 @@ export function registerTokenHandlers(api: HandlerRegistrar, { repo, now = () =>
         expiresAt: raw.expiresAt,
       }, validUntil);
       if (replacement) await writeAudit(tx, context, 'token.rotate', 'token', replacement.id, 'ok', { replaces_token_id: params.id });
-      if (!replacement) return { error: 'version_conflict' as const };
+      if (!replacement) throw new VersionConflict();
       await tx.idempotencyKeys.complete(actorId, key, 201, { token_id: replacement.id });
       return { replacement };
-    });
+    }));
     if ('error' in result) return response(409, { code: result.error });
     return response(201, { ...apiRow(result.replacement), secret: `afk_${secret.prefix}_${secret.secret}` }, { location: `/tokens/${result.replacement.id}` });
   });
@@ -80,7 +87,7 @@ export function registerTokenHandlers(api: HandlerRegistrar, { repo, now = () =>
     const requestHash = requestDigest(context.request.method ?? 'DELETE', `${context.route.path}:${params.id}`, null);
     const raw = await repo.tokens.get(params.id);
     if (!raw) return response(404, { code: 'not_found' });
-    const result = await repo.transaction(async tx => {
+    const result = await withConflict(() => repo.transaction(async tx => {
       const claim = await tx.idempotencyKeys.claim({ actorId, key, requestHash, state: 'in_progress' });
       if (claim.replayed) {
         if (claim.row.requestHash !== requestHash) return { error: 'idempotency_conflict' as const };
@@ -88,12 +95,12 @@ export function registerTokenHandlers(api: HandlerRegistrar, { repo, now = () =>
         return { replay: claim.row.responseBody as Record<string, unknown> };
       }
       const revoked = await tx.tokens.revoke(params.id, raw.rowVersion);
-      if (!revoked) return { error: 'version_conflict' as const };
+      if (!revoked) throw new VersionConflict();
       await writeAudit(tx, context, 'token.revoke', 'token', revoked.id, 'ok', null);
       const body = apiRow(revoked);
       await tx.idempotencyKeys.complete(actorId, key, 200, body);
       return { revoked: body };
-    });
+    }));
     if ('error' in result) return response(409, { code: result.error });
     return response(200, 'replay' in result ? result.replay : result.revoked, 'replay' in result ? { 'Idempotent-Replay': 'true' } : undefined);
   });

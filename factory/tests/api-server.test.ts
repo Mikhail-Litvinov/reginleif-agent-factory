@@ -14,7 +14,7 @@ const hash = (value: string) => createHash('sha256').update(value).digest('hex')
 const workerId = randomUUID();
 const tokens = new Map(roles.map((role) => [hash(role), { id: randomUUID(), role, prefix: role, tokenHash: hash(role), workerId: role === 'worker' ? workerId : null, revokedAt: null, expiresAt: null, validUntil: null }]));
 const lines: string[] = [];
-const api = createApiServer({ tokens: { byHash: async (h) => tokens.get(h) }, workers: { get: async () => ({ machineId: 'first' }) }, authorizeScope: async () => true, logger: createLogger({ sink: (line) => lines.push(line) }) });
+const api = createApiServer({ tokens: { byHash: async (h) => tokens.get(h) }, authorizeScope: async () => true, logger: createLogger({ sink: (line) => lines.push(line) }) });
 for (const route of routes) api.register(route.method, route.path, async () => ({ status: 204 }));
 let base: string;
 before(async () => { const address = await api.listen(0); assert.equal(address.address, '127.0.0.1'); base = `http://127.0.0.1:${address.port}`; });
@@ -32,10 +32,12 @@ test('api-authz-matrix', async () => {
   }
 });
 
-test('rejects another machine and revoked credentials; propagates request id', async () => {
+test('rejects revoked credentials and an invalid body; propagates request id', async () => {
   const requestId = randomUUID();
-  const response = await fetch(base + '/workers/register', { method: 'POST', headers: { authorization: 'Bearer afk_worker_worker', 'content-type': 'application/json', 'x-request-id': requestId }, body: JSON.stringify({ machine_id: 'second', name: 'w', platform: 'x', capabilities: {}, version: '1', contract_version: 1 }) });
-  assert.equal(response.status, 403);
+  // api.md validation rule: a malformed body is answered 422 validation_failed. The second-machine rule
+  // (api.md:149, :676) lives in the workers handler and is tested in handlers-admin.test.ts.
+  const response = await fetch(base + '/workers/register', { method: 'POST', headers: { authorization: 'Bearer afk_worker_worker', 'content-type': 'application/json', 'x-request-id': requestId }, body: JSON.stringify({ machine_id: 'second' }) });
+  assert.equal(response.status, 422);
   assert.equal(response.headers.get('x-request-id'), requestId);
   assert.equal((await response.json() as { request_id: string }).request_id, requestId);
   assert.ok(lines.some((line) => line.includes(requestId)));
@@ -50,7 +52,7 @@ test('repository token authentication on the database bench', async () => {
   await migrate({ url: bench.migratorUrl });
   const client = connectBench(bench.migratorUrl);
   const repo = createRepo(drizzle(client));
-  const server = createApiServer({ tokens: repo.tokens, workers: repo.workers });
+  const server = createApiServer({ tokens: repo.tokens });
   try {
     const secret = randomUUID();
     const id = randomUUID();

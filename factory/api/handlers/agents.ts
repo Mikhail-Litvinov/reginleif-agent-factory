@@ -22,7 +22,7 @@ export function registerAgentHandlers(api: HandlerRegistrar, { repo }: HandlerDe
       const created = await tx.agents.create({
         id: id(), name: input.name as string, provider: input.provider as string, adapterType: input.adapter_type as string,
         // An omitted limit starts with one concurrent run; the owner can raise it explicitly later.
-        capabilities: input.capabilities ?? {}, enabled: input.enabled ?? true, concurrencyLimit: input.concurrency_limit ?? 1,
+        capabilities: input.capabilities ?? {}, enabled: (input.enabled as boolean | undefined) ?? true, concurrencyLimit: (input.concurrency_limit as number | undefined) ?? 1,
         configuration: input.configuration ?? {},
       });
       await writeAudit(tx, context, 'agent.create', 'agent', created.id, 'ok', { name: input.name, provider: input.provider });
