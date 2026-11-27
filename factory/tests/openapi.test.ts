@@ -35,10 +35,11 @@ test('device sessions inherit earlier owner routes except token management', () 
   assert.ok(!find('POST', '/tokens')?.roles.includes('device'));
 });
 
-test('device enrollment uses the specific invalid-code problem code', () => {
+test('device enrollment answers a wrong, used or expired code with the generic unauthenticated problem code', () => {
   const route = routes.find((entry) => entry.method === 'POST' && entry.path === '/devices/enroll');
   assert.ok(route);
-  assert.ok(route.errors[401]?.includes('device_code_invalid'));
+  assert.ok(route.errors[401]?.includes('unauthenticated'));
+  assert.ok(!route.errors[401]?.includes('device_code_invalid'));
   assert.ok(route.responses[401] && typeof route.responses[401] !== 'string');
 });
 
@@ -79,7 +80,7 @@ test('project creation accepts defaults and rejects unknown fields', () => {
 
 test('unspecified bodies equal the Open shapes inventory', async () => {
   const openRequests = [
-    'POST /system/stop-all', 'PUT /personnel/replacement-procedure', 'POST /robots', 'PATCH /robots/{id}',
+    'PUT /personnel/replacement-procedure', 'POST /robots', 'PATCH /robots/{id}',
     'POST /robots/{id}/configurations', 'POST /robots/{id}/assignments', 'POST /robots/{id}/leases',
     'DELETE /robots/{id}/leases/{number}', 'PATCH /robot-zones/{id}', 'POST /robot-start-confirmations',
     'POST /unattended-policies', 'POST /robots/{id}/stop', 'POST /robots/{id}/release',
@@ -88,7 +89,7 @@ test('unspecified bodies equal the Open shapes inventory', async () => {
     'POST /robots/{id}/challenges',
   ];
   const openResponses = [
-    'POST /system/stop-all', 'PUT /personnel/replacement-procedure', 'GET /robots', 'GET /robots/{id}',
+    'PUT /personnel/replacement-procedure', 'GET /robots', 'GET /robots/{id}',
     'POST /robots', 'PATCH /robots/{id}', 'GET /robots/{id}/configurations', 'POST /robots/{id}/configurations',
     'GET /robots/{id}/state', 'POST /robots/{id}/assignments', 'DELETE /robots/{id}/assignments/{aid}',
     'GET /robots/{id}/leases', 'POST /robots/{id}/leases', 'DELETE /robots/{id}/leases/{number}',

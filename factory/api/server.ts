@@ -1,4 +1,5 @@
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
+import { once } from 'node:events';
 import { createServer, type IncomingMessage } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { z } from 'zod';
@@ -9,11 +10,19 @@ import { BadCursorError } from './cursor.ts';
 
 type Identity = { id: string; role: string | null; prefix: string | null; tokenHash: string | null; workerId: string | null; ownerId?: string | null; runId?: string | null; revokedAt: Date | null; expiresAt: Date | null; validUntil: Date | null };
 type AuthorizeScope = (context: { identity: Identity; route: Route; params: Record<string, string>; body: unknown; scope: string }) => Promise<boolean>;
-type Dependencies = { tokens: { byHash(hash: string): Promise<Identity | undefined> }; authorizeScope?: AuthorizeScope; logger?: Logger; clock?: () => Date };
+type DeviceAuth = {
+  deviceSessions: {
+    byTokenHash(hash: string): Promise<{ id: string; deviceId: string | null; prefix: string | null; tokenHash: string | null; revokedAt: Date | null; expiresAt: Date | null } | undefined>;
+    touch(id: string, now?: Date): Promise<unknown>;
+  };
+  devices: { get(id: string): Promise<{ ownerId?: string | null; revokedAt: Date | null } | undefined> };
+};
+type Dependencies = { tokens: { byHash(hash: string): Promise<Identity | undefined> }; deviceSessions?: DeviceAuth['deviceSessions']; devices?: DeviceAuth['devices']; authorizeScope?: AuthorizeScope; logger?: Logger; clock?: () => Date };
+type FailedAuthenticationLimit = { limit: number; windowSeconds: number };
 // Every route template that has a path parameter names it `{id}`; the router fills it before the handler runs.
 export type PathParams = Record<string, string> & { id: string };
-export type HandlerContext = { request: IncomingMessage; route: Route; params: PathParams; body: unknown; identity: Identity | null; requestId: string; logger: Logger };
-export type Handler = (context: HandlerContext) => Promise<{ status: number; body?: unknown; headers?: Record<string, string> }>;
+export type HandlerContext = { request: IncomingMessage; route: Route; params: PathParams; body: unknown; identity: Identity | null; requestId: string; logger: Logger; now: Date };
+export type Handler = (context: HandlerContext) => Promise<{ status: number; body?: unknown; headers?: Record<string, string>; stream?: (signal: AbortSignal) => AsyncIterable<string> }>;
 type Registration = { authorizeScope?: AuthorizeScope; onProblem?: (context: HandlerContext, status: number, code: string) => Promise<void> };
 
 const uuid = z.string().uuid();
@@ -31,6 +40,10 @@ export function createApiServer(deps: Dependencies) {
   const handlers = new Map<string, Registration & { handler: Handler }>();
   const logger = deps.logger ?? createLogger();
   const clock = deps.clock ?? (() => new Date());
+  const streams = new Set<AbortController>();
+  let deviceAuth = deps.devices && deps.deviceSessions ? { devices: deps.devices, deviceSessions: deps.deviceSessions } : undefined;
+  let failedAuthSettings: (() => Promise<FailedAuthenticationLimit>) | undefined;
+  const failedAuth = new Map<string, { remaining: number; checkedAt: number }>();
   const server = createServer(async (req, res) => {
     const suppliedId = req.headers['x-request-id'];
     const requestId = typeof suppliedId === 'string' && uuid.safeParse(suppliedId).success ? suppliedId : randomUUID();
@@ -52,25 +65,61 @@ export function createApiServer(deps: Dependencies) {
       const match = matching.find((item) => item.route.method === req.method && item.regex.test(pathname));
       if (!match) { await problem(404, 'not_found', 'Route not found'); return; }
       const route = match.route;
+      const now = clock();
       registered = handlers.get(`${route.method} ${route.path}`);
-      context = { request: req, route, params: {} as PathParams, body: undefined, identity: null, requestId, logger: log };
+      context = { request: req, route, params: {} as PathParams, body: undefined, identity: null, requestId, logger: log, now };
       const values = match.regex.exec(pathname)!;
       let params: PathParams;
       try { params = Object.fromEntries(match.names.map((name, i) => [name, decodeURIComponent(values[i + 1]!) ])) as PathParams; }
       catch { await problem(422, 'validation_failed', 'Invalid path parameter'); return; }
       context.params = params;
+      const source = req.socket.remoteAddress ?? '';
+      const failureRate = async (record: boolean): Promise<boolean> => {
+        if (!failedAuthSettings) return false;
+        const { limit, windowSeconds } = await failedAuthSettings();
+        const time = now.getTime();
+        const existing = failedAuth.get(source);
+        const replenishPerMs = limit / (windowSeconds * 1000);
+        const elapsed = existing ? Math.max(0, time - existing.checkedAt) : 0;
+        const available = existing ? Math.min(limit, existing.remaining + elapsed * replenishPerMs) : limit;
+        const allowed = available >= 1;
+        const remaining = record && allowed ? available - 1 : available;
+        if (record) failedAuth.set(source, { remaining, checkedAt: time });
+        const reset = Math.ceil((1 - Math.min(1, remaining)) / replenishPerMs / 1000);
+        res.setHeader('RateLimit-Limit', limit);
+        res.setHeader('RateLimit-Remaining', Math.floor(remaining));
+        res.setHeader('RateLimit-Reset', reset);
+        if (!allowed) await problem(429, 'rate_limited', 'Too many failed authentication attempts', {}, { 'Retry-After': String(reset) });
+        return !allowed;
+      };
+      const refuseAuthentication = async (code = 'unauthenticated') => {
+        if (!await failureRate(true)) await problem(401, code, 'Authentication required');
+      };
+      const enrolling = route.path === '/devices/enroll';
+      if (enrolling && await failureRate(false)) return;
       let identity: Identity | null = null;
       if (!route.roles.includes('none')) {
         const bearer = /^Bearer afk_([^_\s]+)_([^\s]+)$/.exec(req.headers.authorization ?? '');
-        if (!bearer) { await problem(401, 'unauthenticated', 'Authentication required'); return; }
+        if (!bearer) { await refuseAuthentication(); return; }
         const digest = createHash('sha256').update(bearer[2]!).digest('hex');
         identity = await deps.tokens.byHash(digest) ?? null;
         context.identity = identity;
+        if (!identity && deviceAuth) {
+          const session = await deviceAuth.deviceSessions.byTokenHash(digest);
+          const device = session?.deviceId ? await deviceAuth.devices.get(session.deviceId) : undefined;
+          if (session && device) identity = { id: session.id, ownerId: device.ownerId, role: 'device', prefix: session.prefix, tokenHash: session.tokenHash, workerId: null, revokedAt: session.revokedAt ?? device.revokedAt, expiresAt: session.expiresAt, validUntil: null };
+          context.identity = identity;
+        }
         const stored = identity?.tokenHash;
         const validHash = typeof stored === 'string' && /^[0-9a-f]{64}$/.test(stored) && timingSafeEqual(Buffer.from(digest, 'hex'), Buffer.from(stored, 'hex'));
-        const now = clock().getTime();
-        if (!identity || !validHash || identity.prefix !== bearer[1] || identity.revokedAt || (identity.expiresAt && identity.expiresAt.getTime() <= now) || (identity.validUntil && identity.validUntil.getTime() <= now)) { await problem(401, 'unauthenticated', 'Authentication required'); return; }
-        if (!identity.role || !route.roles.some((role) => role.split(':')[0] === identity!.role)) { await problem(403, 'forbidden', 'Access denied'); return; }
+        if (!identity || !validHash || identity.prefix !== bearer[1]) { await refuseAuthentication(); return; }
+        if (identity.revokedAt || (identity.expiresAt && identity.expiresAt <= now) || (identity.validUntil && identity.validUntil <= now)) {
+          await refuseAuthentication(identity.role === 'device' && identity.revokedAt ? 'device_revoked' : 'unauthenticated'); return;
+        }
+        if (!identity.role || !route.roles.some((role) => role.split(':')[0] === identity!.role)) {
+          await problem(403, identity.role === 'device' ? 'device_not_allowed' : 'forbidden', 'Access denied'); return;
+        }
+        if (identity.role === 'device' && deviceAuth && !await deviceAuth.deviceSessions.touch(identity.id, now)) { await refuseAuthentication('device_revoked'); return; }
         if (identity.role === 'worker' && (!identity.workerId || (route.roles.includes('worker:own_id') && params.id !== identity.workerId))) { await problem(403, 'forbidden', 'Access denied'); return; }
       }
       let body: unknown;
@@ -105,17 +154,38 @@ export function createApiServer(deps: Dependencies) {
         const body = result.body && typeof result.body === 'object' ? result.body as Record<string, unknown> : {};
         const code = typeof body.code === 'string' && route.errors[result.status]?.includes(body.code) ? body.code : 'internal';
         if (code === 'internal') { await problem(500, code, 'Request failed'); return; }
+        if (enrolling && result.status === 401 && await failureRate(true)) return;
         const fields = ['current_row_version', 'retry_after'];
         if (code === 'confirmation_required') fields.push('confirmation_id', 'nonce', 'expires_at');
         if (code === 'guard_conflict') fields.push('conflicts_with');
+        if (code === 'poll_closed') fields.push('answered_via', 'answered_at');
         const extra = Object.fromEntries(fields.filter(field => Object.hasOwn(body, field)).map(field => [field, body[field]]));
         await problem(result.status, code, 'Request failed', extra, result.headers);
         return;
       }
       log.info('API request completed');
-      res.writeHead(result.status, result.headers);
-      const contentType = result.headers?.['content-type'] ?? '';
-      res.end(result.body === undefined ? undefined : typeof result.body === 'string' && (contentType.startsWith('text/') || contentType.includes('application/octet-stream')) ? result.body : JSON.stringify(result.body));
+      if (result.stream) {
+        res.writeHead(result.status, { ...(result.body === undefined ? {} : { 'content-type': 'application/json' }), ...result.headers });
+        const controller = new AbortController();
+        streams.add(controller);
+        res.once('close', () => controller.abort());
+        try {
+          if (res.destroyed) controller.abort();
+          res.flushHeaders();
+          for await (const chunk of result.stream(controller.signal)) {
+            if (controller.signal.aborted) break;
+            if (!res.write(chunk)) await once(res, 'drain', { signal: controller.signal });
+          }
+        } finally {
+          streams.delete(controller);
+          res.end();
+        }
+      } else {
+        const contentType = result.headers?.['content-type'] ?? '';
+        const text = typeof result.body === 'string' && (contentType.startsWith('text/') || contentType.includes('application/octet-stream'));
+        res.writeHead(result.status, text || result.body === undefined ? result.headers : { 'content-type': 'application/json', ...result.headers });
+        res.end(result.body === undefined ? undefined : text ? result.body as string : JSON.stringify(result.body));
+      }
     } catch (error) {
       // A malformed or foreign cursor is the caller's mistake (api.md:385, :667), whichever handler read the stream.
       if (res.headersSent) res.destroy();
@@ -125,11 +195,16 @@ export function createApiServer(deps: Dependencies) {
     }
   });
   return {
+    useDeviceAuthentication(auth: DeviceAuth) { deviceAuth = auth; },
+    useFailedAuthenticationLimit(settings: () => Promise<FailedAuthenticationLimit>) { failedAuthSettings = settings; },
     register(method: Route['method'], path: string, handler: Handler, options?: Registration) {
       if (!routes.some((route) => route.method === method && route.path === path)) throw new Error('Unknown route');
       handlers.set(`${method} ${path}`, { handler, ...options });
     },
     listen(port: number): Promise<AddressInfo> { return new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', () => { server.off('error', reject); resolve(server.address() as AddressInfo); }); }); },
-    close(): Promise<void> { return new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); },
+    close(): Promise<void> {
+      for (const stream of streams) stream.abort();
+      return new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    },
   };
 }

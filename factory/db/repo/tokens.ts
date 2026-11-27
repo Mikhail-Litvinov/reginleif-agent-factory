@@ -1,4 +1,5 @@
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq, inArray, isNull, or, sql } from "drizzle-orm";
+import { taskRuns } from "../schema/runs.ts";
 import type { PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import { apiTokens } from "../schema/api-tokens.ts";
 
@@ -8,6 +9,14 @@ type ListedToken = Omit<Token, "tokenHash">;
 type NewToken = Omit<TokenInsert, "rowVersion" | "updatedAt" | "lastUsedAt" | "revokedAt" | "validUntil" | "replacesTokenId"> & Partial<Pick<TokenInsert, "validUntil" | "replacesTokenId">>;
 
 export const tokenRepo = (db: PostgresJsDatabase<any>) => ({
+	revokeForStop: async (agentIds: string[], sessionRefs: string[]): Promise<void> => {
+		if (agentIds.length === 0 && sessionRefs.length === 0) return;
+		await db.update(apiTokens).set({ revokedAt: sql`now()`, updatedAt: sql`now()`, rowVersion: sql`${apiTokens.rowVersion} + 1` })
+			.where(and(isNull(apiTokens.revokedAt), or(
+				agentIds.length ? inArray(apiTokens.runId, db.select({ id: taskRuns.id }).from(taskRuns).where(inArray(taskRuns.agentId, agentIds))) : undefined,
+				sessionRefs.length ? inArray(apiTokens.sessionRef, sessionRefs) : undefined,
+			)));
+	},
 	list: async (): Promise<ListedToken[]> => db.select({ id: apiTokens.id, name: apiTokens.name, role: apiTokens.role, ownerId: apiTokens.ownerId, workerId: apiTokens.workerId, sessionRef: apiTokens.sessionRef, runId: apiTokens.runId, prefix: apiTokens.prefix, createdBy: apiTokens.createdBy, createdAt: apiTokens.createdAt, expiresAt: apiTokens.expiresAt, lastUsedAt: apiTokens.lastUsedAt, revokedAt: apiTokens.revokedAt, replacesTokenId: apiTokens.replacesTokenId, validUntil: apiTokens.validUntil, updatedAt: apiTokens.updatedAt, rowVersion: apiTokens.rowVersion }).from(apiTokens).orderBy(apiTokens.createdAt, apiTokens.id),
 	get: async (id: string): Promise<Token | undefined> => (await db.select().from(apiTokens).where(eq(apiTokens.id, id)).limit(1))[0],
 	byHash: async (tokenHash: string): Promise<Token | undefined> => (await db.select().from(apiTokens).where(eq(apiTokens.tokenHash, tokenHash)).limit(1))[0],

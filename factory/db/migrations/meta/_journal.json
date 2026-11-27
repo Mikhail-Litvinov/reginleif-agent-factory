@@ -50,6 +50,13 @@
       "when": 1795707336495,
       "tag": "0007_rights",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1795772313071,
+      "tag": "0008_client_owner_messages",
+      "breakpoints": true
     }
   ]
 }

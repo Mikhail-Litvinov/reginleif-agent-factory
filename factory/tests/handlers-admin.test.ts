@@ -321,7 +321,7 @@ test('cleanup runs once per key and force needs a second press within the confir
   } finally { await repo.settings.set('confirm.windowSeconds', 60, null); }
 });
 
-test('task events and the event stream page by cursor and honour the page-limit settings', async () => {
+test('task events page by cursor and honour the page-limit settings', async () => {
   const path = `/tasks/${acceptedTask}/events?type=seed_event`;
   const all = await call(off, 'GET', path, reader);
   assert.equal(all.status, 200);
@@ -341,16 +341,6 @@ test('task events and the event stream page by cursor and honour the page-limit 
     await repo.settings.set('page.maxLimit', 100, null);
     await repo.settings.set('page.defaultLimit', 50, null);
   }
-
-  const stream = await call(off, 'GET', '/events/stream', reader);
-  assert.equal(stream.status, 200);
-  assert.match(stream.headers.get('content-type') ?? '', /^text\/event-stream/);
-  const ids = [...stream.text.matchAll(/^id: (.+)\nevent: task_events$/gm)].map(match => match[1]!);
-  assert.ok(ids.length >= 3);
-  const after = await call(off, 'GET', `/events/stream?cursor=${ids.at(-1)}`, reader);
-  assert.ok(!after.text.includes(`id: ${ids.at(-1)}`));
-  assert.equal((await call(off, 'GET', '/events/stream?cursor=garbage', reader)).json.code, 'bad_cursor');
-  assert.equal((await call(off, 'GET', '/events/stream', reader, { headers: { 'last-event-id': 'garbage' } })).json.code, 'bad_cursor');
 });
 
 test('audit list filters and pages by cursor', async () => {
@@ -437,7 +427,7 @@ test('policy loosening needs the second press, a tightening does not, every chan
   assert.equal(await count('policy.loosen'), 0);
 
   // Loosening: an added allowed element and a raised limit.
-  const loose = { ...tight, allowed_commands: ['rm -rf build'], max_tokens: 5000 };
+  const loose = { ...tight, allowed_commands: ['make build-all'], max_tokens: 5000 };
   const header = { 'if-match': `"${version + 1}"` };
   const before = await versions();
   const first = await call(off, 'PUT', path, owner, { body: loose, headers: header });

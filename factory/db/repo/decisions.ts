@@ -19,7 +19,7 @@ export const decisionRepo = (db: PostgresJsDatabase<any>) => ({
 		await db.execute(sql`select pg_advisory_xact_lock(hashtextextended(${principal}::text || ':' || ${key}::text, 0))`);
 	},
 	tryLockKey: async (principal: string, key: string): Promise<boolean> =>
-		(await db.execute<{ locked: boolean }>(sql`select pg_try_advisory_xact_lock(hashtextextended(${principal + ':' + key}, 0)) as locked`))[0]!.locked,
+		(await db.execute<{ locked: boolean }>(sql`select pg_try_advisory_xact_lock(hashtextextended(${principal}::text || ':' || ${key}::text, 0)) as locked`))[0]!.locked,
 	record: async (input: { decision: DecisionInsert; outbox: OutboxInsert }): Promise<{ decision: Decision; outbox: OutboxEvent }> =>
 		db.transaction(async (tx) => {
 			return decisionRepo(tx).insertPair(input);

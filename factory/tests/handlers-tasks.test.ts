@@ -23,8 +23,11 @@ const now = new Date('2030-01-01T00:00:00.000Z');
 let sql: ReturnType<typeof connectBench>, apiSql: typeof sql, controlSql: typeof sql;
 let api: ReturnType<typeof createApiServer>, repo: Repo, control: Repo, base: string;
 
+// Registered at module level: node:test attaches the teardown to the running hook when it is called inside one, which would drop the database right after setup.
+const benchPromise = databaseBench(import.meta.url);
+
 before(async () => {
-  const bench = await databaseBench(import.meta.url);
+  const bench = await benchPromise;
   await migrate({ url: bench.migratorUrl });
   sql = connectBench(bench.migratorUrl);
   apiSql = connectBench(bench.apiUrl);
@@ -226,7 +229,7 @@ test('project, routing, task, revision, and dependency routes preserve wire shap
   const task = await makeTask(project.id, [dep.id]);
   const crossProject = `cross-project-${randomUUID()}`;
   refused(await call('POST', '/tasks', { body: { ...taskInput(foreign.id, [dep.id]), title: crossProject } }), 422, 'validation_failed');
-  assert.deepEqual(await sql`SELECT id FROM tasks WHERE title = ${crossProject}`, []);
+  assert.deepEqual([...await sql`SELECT id FROM tasks WHERE title = ${crossProject}`], []);
   const start = await sql`SELECT payload FROM outbox_events WHERE task_id = ${task.id} AND kind = 'start_workflow'`;
   assert.deepEqual(start.map(row => row.payload), [{ task_id: task.id }]);
   assert.equal(task.revision.revision_number, 1);

@@ -4,7 +4,6 @@ The API document leaves these complete shapes open for their handler packages.
 
 ## Requests
 
-- `POST /system/stop-all`
 - `PUT /personnel/replacement-procedure`
 - `POST /robots`
 - `PATCH /robots/{id}`
@@ -27,7 +26,6 @@ The API document leaves these complete shapes open for their handler packages.
 
 ## Responses
 
-- `POST /system/stop-all` — default
 - `PUT /personnel/replacement-procedure` — default
 - `GET /robots` — 200
 - `GET /robots/{id}` — 200

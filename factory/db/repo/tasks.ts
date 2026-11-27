@@ -57,7 +57,7 @@ export const taskRepo = (db: PostgresJsDatabase<any>) => ({
 	createStanding: async (input: { id: string; projectId: string; createdBy: string; revisionId: string }): Promise<void> => db.transaction(async tx => {
 		await tx.insert(tasks).values({ id: input.id, projectId: input.projectId, createdBy: input.createdBy,
 			title: "Standing task", description: "", priority: 0, status: "RUNNING", currentRevision: 1,
-			workflowId: `task-${input.id}`, depth: 0, originType: "standing", pauseRequested: false, stopping: false, endUnconfirmed: false });
+			workflowId: ["task", input.id].join("-"), depth: 0, originType: "standing", pauseRequested: false, stopping: false, endUnconfirmed: false });
 		await tx.insert(taskRevisions).values({ id: input.revisionId, taskId: input.id, revisionNumber: 1,
 			requirements: "", acceptanceCriteria: [], constraints: {}, changeReason: "initial", authorId: input.createdBy });
 	}),
