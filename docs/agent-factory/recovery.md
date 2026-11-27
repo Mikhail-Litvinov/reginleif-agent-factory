@@ -199,9 +199,10 @@ the old version keeps working until the new one is complete. The client is `fact
 - The setting `registry.embeddingModel` is changed to the new version only when the pass is complete. Until then a
   search with the new version would find only the records already embedded.
 
-The client is not yet started by any running service: nothing calls `reembedAll` or `startBackground` outside the
-tests, so after a model change the pass has to be started by code that builds the client with `httpEmbedderTransport`
-for the embedder's URL. There is no command for it.
+The API process (`factory/api/main.ts`, deployment.md "Starting the API") starts `startBackground` when
+`AF_EMBEDDER_URL` is set, so after a model change the pass runs by starting the API with that variable and, when the
+setting `registry.embeddingModel` still holds the old version, `AF_EMBEDDER_TARGET_VERSION` set to the new one. Without
+`AF_EMBEDDER_URL` the loop is not started and search stays degraded.
 
 When search is down. The gate (`factory/registry/gate.ts`) answers a question before a person is asked. It waits for the
 search at most `registry.gateTimeoutMs`. When the time runs out, or the check fails (database or embedder not

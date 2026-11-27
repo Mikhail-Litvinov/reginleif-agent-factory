@@ -143,6 +143,38 @@ after the previous one. Migrations go forward only; there are no down files, so 
 The `pgvector` extension is not created by a migration: `af_bootstrap` creates it at init, and migration 0006 creates
 `pg_trgm`.
 
+## Starting the API
+
+The API is one process, `factory/api/main.ts`. It needs the stack healthy and the migrations applied. From `factory/`:
+
+`$env:AF_SECRETS_DIR = $secrets; npm run start`
+
+The same from the repository root: `$env:AF_SECRETS_DIR = $secrets; node factory/api/main.ts`. It connects as `af_api`
+with the password from the file `af_api` in `AF_SECRETS_DIR` (never from an environment variable), checks the
+database, and prints `af-api ready` with the address when it listens. A wrong password or a missing database ends it
+with exit 1; a bad setting is exit 2.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `AF_SECRETS_DIR` | none, required | directory of the password files |
+| `AF_PG_PORT` | 55432 | PostgreSQL port, as for compose |
+| `AF_PG_DATABASE` | `agent_factory` | database name |
+| `AF_API_HOST` | `127.0.0.1` | only `127.0.0.1` or `localhost` is accepted |
+| `AF_API_PORT` | 8787 | listening port (chosen next to PostgreSQL 55432 and the embedder 8088); 0 takes a free one |
+| `AF_EMBEDDER_URL` | unset | embedder address, for example `http://127.0.0.1:8088`; unset means search stays degraded and no re-embedding loop runs |
+| `AF_EMBEDDER_TARGET_VERSION` | the setting `registry.embeddingModel` | model version the loop embeds toward |
+| `AF_REEMBED_BATCH` | 16 | records per embedder request |
+| `AF_REEMBED_INTERVAL_MS` | 60000 | pause between passes |
+| `AF_API_STOP_TIMEOUT_MS` | 10000 | longest time a stop may take; after it the process ends with exit 1 |
+
+Cleartext is served on loopback only. Any other address in `AF_API_HOST` is refused with exit 2, because TLS is not built
+yet (`security.md` T25, the row "Switch on a non-loopback bind of the API"; `api.md` "Authentication"; `client.md`
+"Network").
+
+Stop: Ctrl+C (SIGINT) or SIGTERM. The server stops taking requests, finishes the running ones, stops the re-embedding
+loop and closes the database pool, then exits 0. Windows cannot deliver SIGTERM to a process, so a supervisor that
+starts it with an IPC channel sends the message `af-api-stop` instead, with the same effect.
+
 ## Embedder container
 
 The Decision Registry searches by meaning with a local embedding model, `BAAI/bge-m3` in its ONNX form, on the CPU. It
