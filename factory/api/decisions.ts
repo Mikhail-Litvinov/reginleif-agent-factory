@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { confirmationId as checkedConfirmationId, issueConfirmation, verifyConfirmation } from './second-press.ts';
 import type { Repo } from '../db/repo/index.ts';
 import { databaseRefusal } from '../db/repo/errors.ts';
+import type { AuditPrincipal } from '../db/repo/audit.ts';
 import { decisionRequestSchemas } from '../contracts/schemas/index.ts';
 import { routes as contractRoutes } from '../contracts/routes.ts';
 
@@ -15,7 +16,7 @@ export type DecisionInput = {
   /** The actual request path, when it differs from the standard task decision route. */
   path?: string;
   wireBody?: unknown;
-  http?: { requestId: string; tokenId: string; workerId?: string };
+  http?: { requestId: string; principal: AuditPrincipal | null; workerId?: string };
   poll?: { id: string; answerKey: string };
 };
 export type PollResult = { answered_via: string | null; answered_at: string | null };
@@ -59,7 +60,7 @@ export async function recordDecision(repo: Repo, input: DecisionInput): Promise<
     const audit = async (outcome: 'ok' | 'needs_confirmation') => {
       if (!input.http) return;
       await tx.audit.append({ id: randomUUID(), actorId: principal, requestId: input.http.requestId,
-        tokenId: input.http.tokenId, deviceSessionId: input.deviceSessionId, targetType: 'task', targetId: input.taskId,
+        principal: input.http.principal, targetType: 'task', targetId: input.taskId,
         action: `POST ${path}`, requestHash, outcome });
     };
     const existing = input.actorId ? await tx.decisions.byActorKey(input.actorId, input.idempotencyKey) : await tx.decisions.byEngineerKey(input.engineerRunId!, input.idempotencyKey);

@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { BadCursorError, decodeCursor, encodeCursor, readStreamPage, streamSource, streams, type Stream } from '../cursor.ts';
 import { DecisionProblem, hash, mutationHash, recordDecision, type DecisionKind } from '../decisions.ts';
 import { confirmationHeader, secondPress } from '../second-press.ts';
+import { principalOf, type AuditPrincipal } from '../../db/repo/audit.ts';
 import { decisionRequestSchemas } from '../../contracts/schemas/index.ts';
 import * as Q from '../../contracts/schemas/requests.ts';
 import * as R from '../../contracts/schemas/resources.ts';
@@ -83,8 +84,8 @@ function presentId(value: string | undefined): string {
 
 async function audit(tx: Tx, context: HandlerContext, actor: Principal | null, action: string, targetType: string, targetId: string | null, details: Record<string, string> = {}, outcome: 'ok' | 'denied' | 'failed' | 'needs_confirmation' = 'ok') {
   const row = await tx.audit.append({
-    id: randomUUID(), requestId: context.requestId, actorId: actor?.ownerId ?? null, tokenId: actor ? actor.tokenId : context.identity?.id ?? null,
-    deviceSessionId: actor?.deviceSessionId ?? null, action, targetType, targetId, outcome,
+    id: randomUUID(), requestId: context.requestId, actorId: actor?.ownerId ?? null,
+    principal: actor ? (actor.deviceSessionId ? { kind: 'device_session', id: actor.deviceSessionId } : actor.tokenId ? { kind: 'token', id: actor.tokenId } : null) : principalOf(context.identity), action, targetType, targetId, outcome,
     // Enrollment sends a credential as its body. The failed and successful audit rows carry metadata only.
     requestHash: action === 'device.enroll' ? null : requestHash(context), details,
   });
