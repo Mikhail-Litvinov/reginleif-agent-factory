@@ -8,6 +8,7 @@ type Agent = typeof agents.$inferSelect;
 type AgentPatch = Partial<Omit<AgentInsert, "id" | "createdAt" | "rowVersion" | "deletedAt">>;
 
 export const agentRepo = (db: PostgresJsDatabase<any>) => ({
+	lock: async (id: string): Promise<void> => { await db.select({ id: agents.id }).from(agents).where(eq(agents.id, id)).for('update'); },
 	list: async ({ includeDeleted = false, provider, enabled }: { includeDeleted?: boolean; provider?: string; enabled?: boolean } = {}): Promise<Agent[]> => {
 		const conditions: SQL[] = [];
 		if (!includeDeleted) conditions.push(isNull(agents.deletedAt));

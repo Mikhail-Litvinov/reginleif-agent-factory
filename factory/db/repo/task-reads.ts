@@ -4,6 +4,8 @@ import { reviewFindingOutcomes, taskReviews } from '../schema/reviews.ts';
 import { taskArtifacts, taskRuns } from '../schema/runs.ts';
 
 export const taskReadRepo = (db: PostgresJsDatabase<any>) => ({
+	getRun: async (id: string) => (await db.select().from(taskRuns).where(eq(taskRuns.id, id)).limit(1))[0],
+	runsForSession: async (sessionId: string) => db.select().from(taskRuns).where(and(eq(taskRuns.sessionId, sessionId), isNull(taskRuns.finishedAt))),
   runs: (taskId: string, { status, role }: { status?: string; role?: string } = {}) => db.select().from(taskRuns).where(and(
     eq(taskRuns.taskId, taskId), status === undefined ? undefined : eq(taskRuns.status, status),
     role === undefined ? undefined : eq(taskRuns.role, role),
