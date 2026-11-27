@@ -8,6 +8,7 @@ import { registerAllHandlers } from '../api/handlers/register-all.ts';
 import { migrate } from '../db/migrate.ts';
 import { createRepo, type Repo } from '../db/repo/index.ts';
 import { connectBench, databaseBench } from './database-bench.ts';
+import { issueConfirmation } from '../api/second-press.ts';
 
 const benchPromise = databaseBench(import.meta.url);
 const owner = randomUUID(), project = randomUUID(), secret = randomUUID();
@@ -91,4 +92,31 @@ for (const route of covered) test(`second press: ${route.method} ${route.path}`,
   assert.ok(second.status >= 200 && second.status < 300, JSON.stringify(second.body));
   const replay = await call(route, input, randomUUID(), token);
   assert.equal(replay.status, 409, JSON.stringify(replay.body));
+});
+
+for (const route of covered) for (const source of ['record', 'grant'] as const) test(`permission-second-press: ${source}, ${route.method} ${route.path}`, async () => {
+  const right = { action: `${route.method} ${route.path}`, target: 'bench', conditions: {} };
+  const session = randomUUID();
+  if (source === 'record') {
+    const id = randomUUID();
+    await sql`INSERT INTO registry_records(id,kind,authority,source,status,scope_type,project_id,reuse,"right") VALUES (${id},'permission','owner','owner_button','draft','project',${project},'standing',${sql.json(right)})`;
+    await sql`UPDATE registry_records SET status='active' WHERE id=${id}`;
+  } else {
+    const request = randomUUID(), requestHash = randomUUID();
+    await repo.transaction(async tx => {
+      await tx.rightRequests.create({ id: request, sessionRef: session, action: right.action, target: right.target, conditions: right.conditions, reason: 'bench', tried: 'bench', requestHash, handlingTaskId: '00000000-0000-4000-8000-000000000008' });
+      await tx.rightAnswers.create({ id: randomUUID(), requestId: request, step: 1, stepKind: 'code', answer: 'call_owner' });
+      const confirmation = await issueConfirmation(tx, { actorId: owner, channel: 'api', deviceSessionId: null, operation: 'right.answer', targetType: 'right_request', targetId: request, requestHash }, clock);
+      await tx.rightAnswers.create({ id: randomUUID(), requestId: request, step: 2, stepKind: 'owner', answer: 'grant', ownerActRef: confirmation.confirmation_id, answeredBy: { type: 'owner', id: owner } });
+    });
+  }
+  if (source === 'record') await repo.conversations.forHubSession({ id: randomUUID(), sessionRef: session, projectId: project, state: 'active', title: 'Rights bench' });
+  const registrySecret = randomUUID(), prefix = randomUUID();
+  await repo.tokens.create({ id: randomUUID(), role: 'registry', sessionRef: session, prefix, tokenHash: createHash('sha256').update(registrySecret).digest('hex') });
+  const checked = await fetch(base + '/rights/check', { method: 'POST', headers: { authorization: `Bearer afk_${prefix}_${registrySecret}`, 'content-type': 'application/json' }, body: JSON.stringify({ session_id: session, action: right.action, target: { target: right.target, conditions: right.conditions } }) });
+  assert.equal(checked.status, 200);
+  assert.equal((await checked.json() as { source: string }).source, source);
+  const first = await call(route, await fixture(route), randomUUID());
+  assert.equal(first.status, 409, JSON.stringify(first.body));
+  assert.equal(first.body.code, 'confirmation_required');
 });

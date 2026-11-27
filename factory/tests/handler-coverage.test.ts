@@ -25,7 +25,7 @@ const laterPackages: Record<string, string> = {
     'POST /regulation/versions/{id}/activate', 'POST /regulation/versions/{id}/revoke',
   ]),
   ...later('rights handlers (api/handlers/rights.ts, phase 2)', [
-    'GET /roles', 'GET /roles/{id}', 'GET /tasks/{id}/participants', 'POST /rights/check', 'POST /rights/requests', 'GET /rights/requests',
+    'GET /roles', 'GET /roles/{id}', 'GET /tasks/{id}/participants', 'POST /rights/requests', 'GET /rights/requests',
     'GET /rights/requests/{id}', 'POST /rights/requests/{id}/answer', 'GET /rights/grants', 'POST /rights/grants/{id}/revoke',
     'GET /rights/suspensions', 'GET /rights/suspensions/{id}', 'POST /rights/suspensions/{id}/restore',
   ]),

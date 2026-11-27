@@ -87,6 +87,7 @@ export const notificationRepo = (db: PostgresJsDatabase<any>) => ({
 });
 
 export const conversationRepo = (db: PostgresJsDatabase<any>) => ({
+	bySessionRef: async (sessionRef: string): Promise<Conversation | undefined> => (await db.select().from(conversations).where(and(eq(conversations.source, 'rig_session'), eq(conversations.sessionRef, sessionRef))).limit(1))[0],
 	create: async (input: ConversationInsert): Promise<Conversation> => (await db.insert(conversations).values(input).returning())[0]!,
 	forHubSession: async (input: ConversationInsert & { sessionRef: string }): Promise<Conversation> => {
 		const inserted = await db.insert(conversations).values({ ...input, source: 'rig_session' })
