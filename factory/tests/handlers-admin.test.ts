@@ -302,6 +302,18 @@ test('cleanup dry run reports unknown sizes as null, not zero', async () => {
   assert.equal((await call(off, 'POST', `/tasks/${randomUUID()}/cleanup`, owner)).status, 404);
 });
 
+test('standing-task: the standing task of a project is not cleanable and looks like a missing task', async () => {
+  // The standing task is the project's permanent anchor, never an item of work; cleanup must not even confirm it exists.
+  let standing = (await client`SELECT id FROM tasks WHERE project_id = ${projectId} AND origin_type = 'standing'`)[0]?.id as string | undefined;
+  if (!standing) {
+    standing = randomUUID();
+    await client`INSERT INTO tasks (id, project_id, status, depth, workflow_id, origin_type) VALUES (${standing}, ${projectId}, 'RUNNING', 0, ${'task-' + standing}, 'standing')`;
+  }
+  const refused = await call(off, 'POST', `/tasks/${standing}/cleanup`, owner);
+  assert.equal(refused.status, 404);
+  assert.equal(refused.json.code, 'not_found');
+});
+
 test('cleanup runs once per key and force needs a second press within the confirmation window', async () => {
   const path = `/tasks/${acceptedTask}/cleanup?dry_run=false`;
   assert.equal((await call(off, 'POST', path, owner)).status, 422);

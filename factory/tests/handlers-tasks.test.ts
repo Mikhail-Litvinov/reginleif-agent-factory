@@ -133,6 +133,46 @@ test('relay-press-once: a mapped owner records one decision and replay and an un
   assert.equal(rows[0]!.channel, 'telegram');
 });
 
+// A fingerprint of the whole schema as the catalog states it: any statement smuggled in through a field changes it.
+const schemaFingerprint = async () => {
+  const rows = await sql`SELECT c.relname, c.relkind, a.attname, a.atttypid::regtype::text AS type
+    FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace LEFT JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
+    WHERE n.nspname = 'public' ORDER BY c.relname, a.attnum`;
+  return createHash('sha256').update(JSON.stringify(rows)).digest('hex');
+};
+
+test('sql-param: hostile text in every free-text field is stored and returned verbatim and runs nothing', async () => {
+  const hostile = ["'; DROP TABLE tasks; --", '" OR 1=1 --', "$1 $$ \\' ); DELETE FROM projects; --", "Robert'); TRUNCATE outbox_events;--", '%s %1$s \u{1F600}'];
+  const before = await schemaFingerprint();
+  const projectCount = async () => Number((await sql`SELECT count(*) AS n FROM projects`)[0]!.n);
+  for (const text of hostile) {
+    const projects = await projectCount();
+    const created = success('POST', '/projects', await call('POST', '/projects', { body: { name: `${text}-${randomUUID()}`, repository_url: 'https://example.invalid/repo' } }), 201);
+    assert.ok((created.name as string).startsWith(text));
+    const task = success('POST', '/tasks', await call('POST', '/tasks', { body: { ...taskInput(created.id), title: text, description: text, requirements: text } }), 201);
+    const read = (await call('GET', `/tasks/${task.id}`)).body;
+    assert.equal(read.title, text);
+    assert.equal(read.description, text);
+    assert.equal(read.revision.requirements, text);
+    // The text is only ever a value: filtering by it finds the project, and it is the only table content that changed.
+    const found = await call('GET', `/tasks?project_id=${created.id}`);
+    assert.equal(found.status, 200);
+    // The search text of a query value is matched literally: it finds the project whose name holds it.
+    const searched = await call('GET', `/projects?q=${encodeURIComponent(text)}`);
+    assert.equal(searched.status, 200, JSON.stringify(searched.body));
+    assert.ok((searched.body.items as { id: string }[]).some(item => item.id === created.id));
+    assert.equal(await projectCount(), projects + 1);
+  }
+  assert.equal(await schemaFingerprint(), before);
+  assert.ok((await sql`SELECT count(*) AS n FROM tasks`)[0]!.n > 0);
+  assert.ok((await sql`SELECT count(*) AS n FROM outbox_events`)[0]!.n > 0);
+  // The same text in a route field and in a query value is refused or matches nothing; it is never run.
+  const attack = encodeURIComponent(`${randomUUID()}'; DROP TABLE tasks; --`);
+  refused(await call('GET', `/tasks/${attack}`), 422, 'validation_failed');
+  assert.equal((await call('GET', `/tasks?project_id=${attack}`)).status, 422);
+  assert.equal(await schemaFingerprint(), before);
+});
+
 const toState: Record<TaskState, readonly TaskState[]> = {
   CREATED: [], PLANNING: ['PLANNING'], READY: ['PLANNING', 'READY'], WAITING_DEPENDENCIES: ['PLANNING', 'READY', 'WAITING_DEPENDENCIES'],
   ASSIGNED: ['PLANNING', 'READY', 'ASSIGNED'], RUNNING: ['PLANNING', 'READY', 'ASSIGNED', 'RUNNING'],
@@ -261,6 +301,9 @@ test('project, routing, task, revision, and dependency routes preserve wire shap
   refused(await call('GET', `${query}&unknown=x`), 422, 'validation_failed');
   const standing = (await call('GET', `/tasks?project_id=${project.id}&origin_type=standing`)).body.items[0];
   assert.equal(standing.status, 'RUNNING');
+  // The standing task is not an item of work: the default list of the project leaves it out.
+  const defaultList = (await call('GET', `/tasks?project_id=${project.id}&limit=25`)).body.items as { id: string }[];
+  assert.ok(defaultList.length > 0 && !defaultList.some(item => item.id === standing.id));
   assert.equal((await call('GET', `/tasks/${standing.id}`)).status, 200);
   refused(await call('GET', `/tasks/${standing.id}/revisions`), 404, 'not_found');
   refused(await decide(standing.id, 'pause'), 409, 'not_allowed_in_state');
