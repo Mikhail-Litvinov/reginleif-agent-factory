@@ -169,6 +169,55 @@ new-project procedure and the switch-over were not run on the real stack with ta
   It prints the name of the file and nothing else on success; then go to the restore above. (The copy command names no
   password.) The image `alpine` is pulled when absent.
 
+## Decision Registry
+
+The registry (`factory/registry/`) keeps its records, links, inquiries and embeddings in the application database, so a
+restore (above) brings all of it back as of the backup. Nothing of the registry lives outside the database except the
+embedding model, which is a separate container (`deployment.md`, "Embedder container").
+
+What is lost and how it comes back:
+
+- Records, links, inquiries and verdicts written after the newest backup are lost with everything else; only a new entry
+  restores them.- The embedder container holds no data. If it is lost, its image is rebuilt and started from the staged model files with
+  the commands of `deployment.md`; the files are checked by SHA-256 on every start, so a damaged copy refuses to start
+  instead of producing wrong vectors. The stored vectors are not affected.
+- A vector exists per record and per model version (`registry_embeddings`, 1024 dimensions, one row for each pair) and
+  is in the dump with its record, so a restored record has the vectors it had at the backup.
+
+Re-embedding after a model change. The search reads only the vectors of the model version named by the setting
+`registry.embeddingModel` (default: the pinned revision `5617a9f61b028005a4858fdac845db406aefb181`). When the model or
+its revision changes, the old vectors stay in place and are never overwritten; the new ones are added beside them, so
+the old version keeps working until the new one is complete. The client is `factory/registry/embedder-client.ts`:
+
+- `reembedBatch(version, limit)` takes up to `limit` records that have a vector of another version and none of the
+  target version, asks the embedder for them and writes the new rows, all in one transaction under one lock, so two
+  runs cannot embed the same record twice. A response whose revision differs from the requested version, or whose
+  vector count or size (1024) is wrong, is refused and nothing is written.
+- `reembedAll(version, limit)` repeats batches until one returns 0.
+- `startBackground(version, limit, intervalMs, { onError })` runs `reembedAll` again every interval and returns a
+  function that stops it; an error goes to `onError` and the next interval tries again.
+- The setting `registry.embeddingModel` is changed to the new version only when the pass is complete. Until then a
+  search with the new version would find only the records already embedded.
+
+The client is not yet started by any running service: nothing calls `reembedAll` or `startBackground` outside the
+tests, so after a model change the pass has to be started by code that builds the client with `httpEmbedderTransport`
+for the embedder's URL. There is no command for it.
+
+When search is down. The gate (`factory/registry/gate.ts`) answers a question before a person is asked. It waits for the
+search at most `registry.gateTimeoutMs`. When the time runs out, or the check fails (database or embedder not
+reachable), the gate lets the question through (fail open) and records the reason, `timeout` or `unavailable`, through
+a local callback that does not need the database, so a registry that is down cannot stop the record of its own
+failure. This is on purpose: a dead registry must not stop the work (G1, `governance.md`). The cost is that a question
+that a recorded decision would have answered goes to the owner. The gate blocks (`pass: false`, with the records) only
+when it finds an inquiry result without a verdict or with the verdict `applies`. Today the callback only writes a log
+line; no row is stored, so the number of fail-open passes is read from the log.
+
+Degraded search. When the embedder does not answer, a search does not fail. It still runs the full-text search in
+Russian and English, marks the result `degraded: true`, and adds a trigram search as a fallback for typos
+(`registry.trigramThreshold`, default 0.1846). Vector results are absent, so a question worded differently from the
+record may find nothing: a degraded result is weaker, not wrong. The search returns to normal on the next call after
+the embedder answers again; nothing has to be repaired.
+
 ## Not covered
 
 No schedule, no encryption, no off-host copy of the backups or the secrets, no retention, no continuous archive, and no

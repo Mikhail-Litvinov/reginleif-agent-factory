@@ -125,6 +125,69 @@ Nothing else on the machine is touched: the stack neither uses nor removes other
 
    `$env:AF_PG_PORT = '55433'`
 
+## Migrations
+
+The tables come from the numbered files `factory/db/migrations/0001_core.sql` to `0009_standing_revision.sql`
+(`modules.md` lists what each adds). They are applied by one command, after the stack is healthy. It connects as
+`af_migrator` with the password in the secrets directory and uses the port `AF_PG_PORT` (default 55432), so the same
+two variables as for compose must be set:
+
+`$env:AF_SECRETS_DIR = $secrets; node factory/db/migrate.ts`
+
+It takes no flags (a flag is a usage error, exit 2). It prints `applied <name>` for each file it applies and nothing
+for a file already applied, so running it again on an up-to-date database changes nothing. Any other failure exits 1.
+Under an advisory lock it creates `public.af_migrations` (number, name, sha256, applied_at) and checks the files
+against it before applying anything: the numbers must have no gap, and an applied file that was edited, is missing or
+was renamed stops the command. Each file runs in its own transaction, so a failed file leaves the database as it was
+after the previous one. Migrations go forward only; there are no down files, so a mistake is corrected by a new file.
+The `pgvector` extension is not created by a migration: `af_bootstrap` creates it at init, and migration 0006 creates
+`pg_trgm`.
+
+## Embedder container
+
+The Decision Registry searches by meaning with a local embedding model, `BAAI/bge-m3` in its ONNX form, on the CPU. It
+runs from its own compose file, `factory/deploy/embedder/compose.yml`, separate from the database stack. The container
+has no route to the outside.
+
+1. Stage the model files once, outside the repository: the `onnx` directory of `BAAI/bge-m3` at revision
+   `5617a9f61b028005a4858fdac845db406aefb181`. Its pinned files are checked by SHA-256 before the HTTP listener starts,
+   and the service refuses to start on any difference:
+
+   | File | SHA-256 |
+   |---|---|
+   | `model.onnx` | `f84251230831afb359ab26d9fd37d5936d4d9bb5d1d5410e66442f630f24435b` |
+   | `model.onnx_data` (the 2.2 GB weights) | `1eebfb28493f67bba03ce0ef64bfdc7fc5a3bd9d7493f818bb1d78cd798416b4` |
+   | `tokenizer.json` | `6710678b12670bc442b99edc952c4d996ae309a7020c1fa0096dd245c2faf790` |
+   | the external constant `Constant_7_attr__value` | `cdf16f72c5d07b36484056e601ed9687f78477e5d85cee85a34f2406b7fb5906` |
+
+   The directory must be readable by UID 65532, the user the service runs as. The image never loads PyTorch weights.
+2. Build and start. `AF_EMBEDDER_MODEL_DIR` is required (compose refuses without it) and is mounted read-only at
+   `/model`:
+
+   `$env:AF_EMBEDDER_MODEL_DIR = '<model dir>'; docker compose -p af-embedder -f factory/deploy/embedder/compose.yml up -d --build`
+
+   The image `af-embedder:local` is built from `factory/deploy/embedder/Dockerfile` (Python with `onnxruntime`,
+   `tokenizers` and `numpy`, versions pinned there). The server hashes the weights before it listens, so the first
+   request after a start can take several seconds to half a minute.
+3. Check it. `POST /embed` with `{"texts":["text"]}` returns the model name, the revision, the SHA-256 of the weights
+   and one normalized vector of 1024 numbers per text:
+
+   `Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:8088/embed' -ContentType 'application/json' -Body '{"texts":["test"]}'`
+
+Network: the model container (`embedder`) sits only on an internal Docker network. Docker never publishes the ports of
+an internal network, so a second service, `entry`, runs the same image with `forward.py` (a plain TCP relay) on that
+network and on a normal one. It is the only published part and binds to `127.0.0.1` only, at port `AF_EMBEDDER_PORT`
+(default 8088). Both containers run read-only with all capabilities dropped and `no-new-privileges`. To stop it:
+
+`docker compose -p af-embedder -f factory/deploy/embedder/compose.yml stop`
+
+Measured on this configuration (CPU, four intra-op threads; `registry-search-measurement.md`, "ONNX re-measurement"):
+a query takes 38.1 ms median and 49.3 ms at the 95th percentile at batch size 1, including HTTP and the relay; the
+container holds about 1.43 GB of memory (a `docker stats` snapshot); the search quality equals the PyTorch run on every
+figure, so the vector threshold 0.47 holds. The measurement run is `factory/deploy/embedder/benchmark.py`, and
+`python -m unittest test_server.py` in that directory runs the checksum test. The registry service does not start or
+supervise this container; what the registry does while it is down is in `recovery.md`, "Decision Registry".
+
 ## Stop and start
 
 All lines run from the repository root and need `AF_SECRETS_DIR` set (compose refuses to read the file without it);
@@ -515,8 +578,8 @@ and its volume and network whatever happened. Everything it creates carries the 
 selects only by that label, so nothing else on the machine can be removed. It takes about 40 seconds. Exit code 0
 means all matched; 1 lists the differences or errors; 2 means a usage error.
 
-On the first real run the database was still empty (phase 2 adds the tables), so the check covered the checksum, the
-restore of the roles-independent schema objects and the extension, and zero tables.
+The check also covers the tables of the applied migrations: row counts and foreign keys are compared per table, so
+a backup of a migrated database is proven table by table.
 
 ## Restore
 
