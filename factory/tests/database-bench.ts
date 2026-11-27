@@ -72,14 +72,22 @@ const makeBench = (database: string, stack: Awaited<ReturnType<typeof benchStack
 		clock: fakeClock(),
 		dispose: async () => {
 			if (disposed) return;
-			const errors: unknown[] = [];
-			await dropDatabase().catch((error) => errors.push(error));
-			if (!process.env[BENCH_STACK_ENV]) await stack.dispose().catch((error) => errors.push(error));
-			if (errors.length > 0) throw new AggregateError(errors, "database bench cleanup failed");
+			await disposeBench(!process.env[BENCH_STACK_ENV], dropDatabase, () => stack.dispose());
 			disposed = true;
 		},
 	};
 	return bench;
+};
+
+// A bench that owns its stack (a file run by hand, no global setup) needs no DROP DATABASE: removing the stack removes the
+// database with it. The drop must not run there at all: helpers.ts registers an `after` that removes every live stack
+// before this file's hook runs, so the container is already gone ("No such container"). With the shared stack of
+// `npm test` the drop is needed, and the container always outlives the hook.
+export const disposeBench = async (ownsStack: boolean, dropDatabase: () => Promise<unknown>, disposeStack: () => Promise<void>): Promise<void> => {
+	const errors: unknown[] = [];
+	if (ownsStack) await disposeStack().catch((error) => errors.push(error));
+	else await dropDatabase().catch((error) => errors.push(error));
+	if (errors.length > 0) throw new AggregateError(errors, "database bench cleanup failed");
 };
 
 // Call during module setup: Node registers the teardown before any tests can fail.
