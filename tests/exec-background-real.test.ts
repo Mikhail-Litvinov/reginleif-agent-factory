@@ -1,8 +1,9 @@
 import { expect, test } from "bun:test";
-import { existsSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 
 import { createRealRuntime } from "../src/commands/real-runtime.js";
-import { startExec, statusExec, stopExec } from "../src/exec-core.js";
+import { EXEC_RUN_POLL_MS, startExec, statusExec, stopExec } from "../src/exec-core.js";
 import { withIsolatedHome } from "./helpers/isolated-home.js";
 
 // Allow cold Bun and Git Bash starts: the runner and the shell are two process starts in a row.
@@ -10,10 +11,12 @@ const WAIT_BOUND_MS = 30_000;
 const POLL_MS = 25;
 const TEST_BOUND_MS = 60_000;
 const TEMP_HOME_PREFIX = "rig-exec-background-home-";
-// The background command sleeps this long; the run must outlive its foreground command by about this much.
-const BACKGROUND_SECONDS = 3;
-// Polling and process start-up take a little of the sleep; the run must still last most of it after "started" appears.
-const MIN_RUN_AFTER_STARTED_MS = 2_000;
+// The background process waits for a release file instead of sleeping a fixed time: a fixed sleep races against how
+// late a loaded machine lets the test observe the run (the run is seen ended when the sleep ran out first). While the
+// file is absent the run cannot end, however slow the observation is.
+// The run is held this long after "started" appears: two supervision polls, enough for the runner to end the run if it
+// wrongly treated the exited foreground command as the end.
+const HOLD_AFTER_STARTED_MS = 2 * EXEC_RUN_POLL_MS;
 const LONG_SLEEP_SECONDS = 61;
 
 const GIT_BASH_PATH = "C:\\Program Files\\Git\\bin\\bash.exe";
@@ -55,28 +58,41 @@ const logText = (status: Record<string, unknown>): string => {
 // A run is one unit of all its processes: a command that leaves a background process behind keeps the run running until
 // that process ends, and the end code is the command's own. Needs bash: Git Bash on Windows, the system bash elsewhere (the real runner is a separate
 // process, so its kill-on-close job is the one a normal run uses).
+// The shell's path of a file: forward slashes, which Git Bash and POSIX bash both read.
+const shellPath = (path: string): string => path.replaceAll("\\", "/");
+// A background process that lives until the release file appears.
+const waitForRelease = (release: string): string => `(while [ ! -e "${shellPath(release)}" ]; do sleep 0.1; done)`;
+
 for (const variant of [
-	{ name: "that keeps the output pipes", text: `sleep ${BACKGROUND_SECONDS} & echo started` },
-	{ name: "with its output redirected away", text: `sleep ${BACKGROUND_SECONDS} >/dev/null 2>&1 & echo started` },
+	{ name: "that keeps the output pipes", redirect: "" },
+	{ name: "with its output redirected away", redirect: " >/dev/null 2>&1" },
 ]) {
 	test.skipIf(!hasBash)(`a run stays running while its background process lives, ${variant.name}`, async () => {
-		await withIsolatedHome(TEMP_HOME_PREFIX, async () => {
+		await withIsolatedHome(TEMP_HOME_PREFIX, async (home) => {
+			const release = join(home, "release");
 			const runtime = await makeRuntime();
-			const started = await startExec(runtime, "bash", runtime.currentDirectory, variant.text);
+			const started = await startExec(runtime, "bash", runtime.currentDirectory, `${waitForRelease(release)}${variant.redirect} & echo started`);
 			if (!started.ok) throw new Error(started.error.message);
 			const id = startedId(started.value);
 			try {
 				const deadline = Date.now() + WAIT_BOUND_MS;
 				while (!logText(await status(runtime, id)).includes("started") && Date.now() < deadline) await runtime.clock.sleep(POLL_MS);
-				const seenAt = Date.now();
-				const whileBackground = await status(runtime, id);
-				expect(logText(whileBackground)).toContain("started");
-				expect(whileBackground.state).toBe("running");
-				while ((await status(runtime, id)).state === "running" && Date.now() < deadline) await runtime.clock.sleep(POLL_MS);
-				const ended = await status(runtime, id);
-				expect(ended).toMatchObject({ state: "ended", end: { kind: "exit", code: 0 } });
-				expect(Date.now() - seenAt).toBeGreaterThanOrEqual(MIN_RUN_AFTER_STARTED_MS);
-			} finally { await runtime.fs.removeDirectoryTree(runtime.resolvePath(runtime.home, ".agent-rig", "exec", id)); }
+				// The foreground command has exited; the background process holds the run for the whole hold, which spans supervision polls.
+				const holdEnd = Date.now() + HOLD_AFTER_STARTED_MS;
+				while (Date.now() < holdEnd) {
+					const whileBackground = await status(runtime, id);
+					expect(logText(whileBackground)).toContain("started");
+					expect(whileBackground.state).toBe("running");
+					await runtime.clock.sleep(POLL_MS);
+				}
+				writeFileSync(release, "");
+				const endBound = Date.now() + WAIT_BOUND_MS;
+				while ((await status(runtime, id)).state === "running" && Date.now() < endBound) await runtime.clock.sleep(POLL_MS);
+				expect(await status(runtime, id)).toMatchObject({ state: "ended", end: { kind: "exit", code: 0 } });
+			} finally {
+				// A failed test must not leave the background process waiting: releasing it lets the run end and the runner exit.
+				writeFileSync(release, "");
+			}
 		});
 	}, TEST_BOUND_MS);
 }
@@ -107,8 +123,8 @@ test.skipIf(!hasBash)("stop of a run whose command has already exited kills its 
 			while ((await status(runtime, id)).state === "running" && Date.now() < waitEnd) await runtime.clock.sleep(POLL_MS);
 			expect(await status(runtime, id)).toMatchObject({ state: "ended", end: { kind: "stopped" } });
 		} finally {
+			// The run directory goes with the temporary home, after the runner has exited (withIsolatedHome).
 			if (sleepPid !== 0 && alive(sleepPid)) process.kill(sleepPid);
-			await runtime.fs.removeDirectoryTree(runtime.resolvePath(runtime.home, ".agent-rig", "exec", id));
 		}
 	});
 }, TEST_BOUND_MS);

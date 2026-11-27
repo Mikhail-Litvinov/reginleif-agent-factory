@@ -22,7 +22,8 @@ test("rig exec start rig -- status runs rig's own read-only command through the 
 		const value = started.value;
 		if (typeof value !== "object" || value === null || Array.isArray(value) || typeof value.id !== "string") throw new Error("Unexpected start result");
 		const id = value.id;
-		try {
+		// The run directory goes with the temporary home, after the runner has exited (withIsolatedHome).
+		{
 			expect(value.shell).toBe("rig");
 			const deadline = Date.now() + WAIT_BOUND_MS;
 			let latest = await runExecCommand(runtime, "status", [id]);
@@ -38,6 +39,6 @@ test("rig exec start rig -- status runs rig's own read-only command through the 
 			const direct = await readStatus(runtime);
 			if (!direct.ok || !status.ok || typeof status.value !== "object" || status.value === null || Array.isArray(status.value)) throw new Error("Status unavailable");
 			expect(Object.keys(status.value.result ?? {}).sort()).toEqual(Object.keys(direct.value).sort());
-		} finally { await runtime.fs.removeDirectoryTree(runtime.resolvePath(runtime.home, ".agent-rig", "exec", id)); }
+		}
 	});
 }, TEST_BOUND_MS);
