@@ -13,7 +13,7 @@ import { installRig } from "./commands/install.js";
 import { setLanguage, showLanguage } from "./commands/language.js";
 import { createRealRuntime, readRealLanguage } from "./commands/real-runtime.js";
 import { readStatus } from "./commands/status.js";
-import { registryUsage, runRegistryCommand, type RegistryAction } from "./commands/registry.js";
+import { runRegistryCommand, type RegistryAction } from "./commands/registry.js";
 import { isSessionCommand, runSessionCommand } from "./commands/session.js";
 import { runExecCommand } from "./commands/exec.js";
 import { runExecRunner } from "./exec-core.js";
@@ -112,7 +112,7 @@ export const parseCommand = (args: string[]): ParsedCommand => {
 	if (head === "factory" && rest[0] === "registry" && rest.length >= 2 && ["find", "verdict", "propose", "import"].includes(rest[1]!)) {
 		return { ok: true, command: { name: "factory-registry", action: rest[1] as RegistryAction, args: rest.slice(2) } };
 	}
-	if (head === "factory" && (rest[0] === "registry" || rest.length === 0)) return { ok: false, error: () => registryUsage() };
+	if (head === "factory" && (rest[0] === "registry" || rest.length === 0)) return { ok: false, error: (messages) => messages.registry.usage() };
 	if (head === "exec-runner" && rest.length === 1) return { ok: true, command: { name: "exec-runner", id: rest[0] } };
 	if (head === "update-step") return parseUpdateStep(rest) ?? { ok: false, error: (messages) => messages.cli.usageUpdateStep() };
 	return { ok: false, error: (messages) => messages.cli.unknownCommand(args.join(" ")) };

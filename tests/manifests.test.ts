@@ -42,6 +42,7 @@ const EXPECTED_FEATURE_NAMES: string[] = [
 	"chief-assistant",
 	"cmd",
 	"codex",
+	"factory",
 	"js-ts-rules",
 	"pwsh",
 	"reflection",

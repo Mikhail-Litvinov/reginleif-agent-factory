@@ -1,43 +1,46 @@
 import type { RuntimePorts } from "../ports.js";
 import type { ApiResult, JsonValue } from "../output.js";
 
-import { apiFail, apiOk } from "../output.js";
+import { messagesFor } from "../messages.js";
+import { apiFail, apiOk, ERROR_CODE_USAGE } from "../output.js";
+import { errorText } from "../result.js";
 
 export type RegistryAction = "find" | "verdict" | "propose" | "import";
-export const registryUsage = (): string => "Usage: rig factory registry find <problem> <category> [--project-id <id>] [--action <text>] [--target <text>] [--reuse-intent standing|once]; verdict <inquiry-id> <record-id> <verdict> [--difference <text>] [--conflicts-with <record-id>]; propose <record-json>; import <record-json-file>";
 
-type RegistryArgs = { action: RegistryAction; values: string[] };
+type RegistryArgs = { action: RegistryAction; args: string[] };
 type RecordPayload = Record<string, JsonValue>;
 
-export const runRegistryCommand = async (runtime: RuntimePorts, { action, values }: RegistryArgs): Promise<ApiResult<JsonValue>> => {
+export const runRegistryCommand = async (runtime: RuntimePorts, { action, args }: RegistryArgs): Promise<ApiResult<JsonValue>> => {
+	const messages = messagesFor(runtime.language).registry;
+	const usage = (): ApiResult<never> => apiFail(ERROR_CODE_USAGE, messages.usage());
 	const baseUrl = runtime.environment.get("RIG_FACTORY_URL")?.replace(/\/+$/u, "");
 	const token = runtime.environment.get("RIG_FACTORY_TOKEN");
-	if (!baseUrl || !token) return apiFail("registry_client_config", "Set RIG_FACTORY_URL and RIG_FACTORY_TOKEN in the process environment.");
+	if (!baseUrl || !token) return apiFail("registry_client_config", messages.clientConfig());
 
 	let path: string;
 	let body: RecordPayload;
 	if (action === "find") {
-		const parsed = parseFind(values);
-		if (!parsed.ok) return apiFail("usage", registryUsage());
+		const parsed = parseFind(args);
+		if (!parsed.ok) return usage();
 		path = "/registry/inquiries";
 		body = parsed.value;
 	} else if (action === "verdict") {
-		const parsed = parseVerdict(values);
-		if (!parsed.ok) return apiFail("usage", registryUsage());
+		const parsed = parseVerdict(args);
+		if (!parsed.ok) return usage();
 		path = `/registry/inquiries/${encodeURIComponent(parsed.value.inquiryId)}/verdicts`;
 		body = parsed.value.body;
 	} else {
 		let payloadText: string;
 		if (action === "propose") {
-			if (values.length !== 1) return apiFail("usage", registryUsage());
-			payloadText = values[0]!;
+			if (args.length !== 1) return usage();
+			payloadText = args[0]!;
 		} else {
-			if (values.length !== 1 || values[0]!.trim().length === 0) return apiFail("usage", registryUsage());
-			try { payloadText = await runtime.fs.readText(values[0]!); }
-			catch { return apiFail("registry_import_input", "Could not read the import JSON file."); }
+			if (args.length !== 1 || args[0]!.trim().length === 0) return usage();
+			try { payloadText = await runtime.fs.readText(args[0]!); }
+			catch { return apiFail("registry_import_input", messages.importRead()); }
 		}
 		const record = parseRecord(payloadText);
-		if (record === null) return apiFail(action === "import" ? "registry_import_input" : "usage", action === "import" ? "Import input must be a registry record JSON object." : registryUsage());
+		if (record === null) return action === "import" ? apiFail("registry_import_input", messages.importInput()) : usage();
 		path = "/registry/records";
 		body = record;
 	}
@@ -50,10 +53,10 @@ export const runRegistryCommand = async (runtime: RuntimePorts, { action, values
 		});
 		const result: unknown = await response.json();
 		if (response.status >= 200 && response.status < 300) return apiOk(asJson(result));
-		const problem = problemFrom(result, response.status);
+		const problem = problemFrom(result, response.status, messages.refused());
 		return apiFail(problem.code, problem.message);
 	} catch (error) {
-		return apiFail("registry_unavailable", error instanceof Error ? error.message : "The registry API could not be reached.");
+		return apiFail("registry_unavailable", messages.unreachable(errorText(error)));
 	}
 };
 
@@ -104,14 +107,14 @@ const parseRecord = (text: string): RecordPayload | null => {
 	} catch { return null; }
 };
 
-const problemFrom = (value: unknown, status: number): { code: string; message: string } => {
+const problemFrom = (value: unknown, status: number, refused: string): { code: string; message: string } => {
 	if (isObject(value)) {
-		const error = isObject(value.error) ? value.error : value;
-		const code = typeof error.code === "string" ? error.code : `http-${status}`;
-		const message = typeof error.detail === "string" ? error.detail : typeof error.message === "string" ? error.message : "The registry API refused the request.";
-		return { code, message };
+		const body = isObject(value.error) ? value.error : value;
+		const code = typeof body.code === "string" ? body.code : `http-${status}`;
+		const detail = typeof body.detail === "string" ? body.detail : typeof body.message === "string" ? body.message : refused;
+		return { code, message: detail };
 	}
-	return { code: `http-${status}`, message: "The registry API refused the request." };
+	return { code: `http-${status}`, message: refused };
 };
 
 const isObject = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);

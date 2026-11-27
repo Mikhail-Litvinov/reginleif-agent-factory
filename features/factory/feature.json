@@ -19,7 +19,12 @@
         "SessionStart"
       ],
       "timeout": 10,
-      "statusMessage": "Loading active Factory regulation"
+      "statusMessage": "Loading active Factory regulation",
+      "translations": {
+        "ru": {
+          "statusMessage": "Загрузка действующего регламента Factory"
+        }
+      }
     },
     {
       "event": "UserPromptSubmit",
@@ -30,7 +35,12 @@
         "UserPromptSubmit"
       ],
       "timeout": 10,
-      "statusMessage": "Checking for Factory regulation changes"
+      "statusMessage": "Checking for Factory regulation changes",
+      "translations": {
+        "ru": {
+          "statusMessage": "Проверка изменений регламента Factory"
+        }
+      }
     },
     {
       "event": "PreToolUse",
@@ -41,7 +51,12 @@
         "PreToolUse"
       ],
       "timeout": 10,
-      "statusMessage": "Checking for Factory regulation changes"
+      "statusMessage": "Checking for Factory regulation changes",
+      "translations": {
+        "ru": {
+          "statusMessage": "Проверка изменений регламента Factory"
+        }
+      }
     }
   ],
   "settings": [],

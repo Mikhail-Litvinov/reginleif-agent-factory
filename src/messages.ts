@@ -57,6 +57,14 @@ export const en = {
 		unavailable: (): string => "Shell feature is unavailable",
 		launch: (detail: string): string => `Exec: ${detail}`,
 	},
+	registry: {
+		usage: (): string => "Usage: rig factory registry find <problem> <category> [--project-id <id>] [--action <text>] [--target <text>] [--reuse-intent standing|once]; verdict <inquiry-id> <record-id> <verdict> [--difference <text>] [--conflicts-with <record-id>]; propose <record-json>; import <record-json-file>",
+		clientConfig: (): string => "Set RIG_FACTORY_URL and RIG_FACTORY_TOKEN in the process environment.",
+		importRead: (): string => "Could not read the import JSON file.",
+		importInput: (): string => "Import input must be a registry record JSON object.",
+		unreachable: (detail: string): string => `The registry API could not be reached: ${detail}`,
+		refused: (): string => "The registry API refused the request.",
+	},
 	session: {
 		usage: (): string => "Usage: rig session <subcommand> [arguments]",
 		usageCompact: (): string => "Usage: rig session compact <id> [--instructions <text>]",

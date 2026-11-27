@@ -46,6 +46,7 @@ const FIXTURES: Record<string, Fixture> = {
 	"info": { success: ["info", "--session", SESSION_ID], failure: ["info", "--session", "missing-session"], failureSeeding: "installed", usage: ["info"] },
 	"session": { success: ["session", "list"], failure: null, failureSeeding: "none", usage: ["session", "unknown"] },
 	"exec": { success: ["exec", "list"], failure: ["exec", "stop", "../bad"], failureSeeding: "none", usage: ["exec", "unknown"] },
+	"factory-registry": { success: ["factory", "registry", "find", "a problem", "operations"], failure: ["factory", "registry", "import", "/missing/record.json"], failureSeeding: "none", usage: ["factory", "registry"] },
 	"exec-runner": { success: ["exec-runner", "test"], failure: ["exec-runner", "missing"], failureSeeding: "none", usage: ["exec-runner"] },
 	"update-step": { success: ["update-step", "apply", "10", "20"], failure: ["update-step", "apply", "10", "20"], failureSeeding: "installed", usage: ["update-step", "rollback", "10", "20"] },
 };
@@ -59,8 +60,16 @@ const PENDING_COMMANDS: readonly string[] = [];
 const INTERNAL_COMMANDS: readonly string[] = ["update-step", "exec-runner"];
 
 // `installed`: state, features, a session and the generated files that `check` reads are seeded.
+// The factory registry commands talk to a server named by the environment; a fake one answers every request.
+const connectRegistry = (harness: MemoryRuntimeHarness): void => {
+	harness.environment.set("RIG_FACTORY_URL", "https://factory.example/api");
+	harness.environment.set("RIG_FACTORY_TOKEN", "afk_prefix_secret");
+	harness.runtime.http = { request: async () => ({ status: 200, json: async () => ({ id: "result" }) }) };
+};
+
 const seed = (seeding: Seeding): MemoryRuntimeHarness => {
 	const harness = createMemoryRuntime();
+	connectRegistry(harness);
 	if (seeding === "none") return harness;
 	seedFeature(harness.fs, REPO, baseManifest());
 	seedFeature(harness.fs, REPO, featureManifest("demo"));

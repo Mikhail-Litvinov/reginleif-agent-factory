@@ -92,7 +92,7 @@ describe("Factory regulation hooks", () => {
 
 		expect(stdout).toHaveLength(1);
 		const context = JSON.parse(stdout[0]!).hookSpecificOutput.additionalContext as string;
-		expect(context).toContain("Version 2");
+		expect(context).toContain("changed to version 2 (from version 1)");
 		expect(context).toContain("Use the new process");
 	});
 

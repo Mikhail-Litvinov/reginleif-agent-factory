@@ -42,6 +42,14 @@ export const ru: Messages = {
 		unavailable: (): string => "Фича оболочки недоступна",
 		launch: (detail: string): string => `Запуск команд: ${detail}`,
 	},
+	registry: {
+		usage: (): string => "Использование: rig factory registry find <problem> <category> [--project-id <id>] [--action <text>] [--target <text>] [--reuse-intent standing|once]; verdict <inquiry-id> <record-id> <verdict> [--difference <text>] [--conflicts-with <record-id>]; propose <record-json>; import <record-json-file>",
+		clientConfig: (): string => "Задайте RIG_FACTORY_URL и RIG_FACTORY_TOKEN в окружении процесса.",
+		importRead: (): string => "Не удалось прочитать JSON-файл импорта.",
+		importInput: (): string => "Входные данные импорта должны быть JSON-объектом записи реестра.",
+		unreachable: (detail: string): string => `Не удалось связаться с API реестра: ${detail}`,
+		refused: (): string => "API реестра отклонил запрос.",
+	},
 	session: {
 		usage: (): string => "Использование: rig session <subcommand> [arguments]",
 		usageCompact: (): string => "Использование: rig session compact <id> [--instructions <text>]",
