@@ -1,6 +1,7 @@
-// What a completely initialised database looks like: one check for every statement of init/10-roles.sh and every step of
-// init/99-finish.sh. deploy/verify-init.ts runs them; tests/verify-init.test.ts proves that no statement of the init
-// scripts is left without a check (and no check names a statement that is gone), so the two cannot drift apart.
+// What a completely initialised database looks like: one check for every statement of init/10-roles.sh and
+// init/lib/temporal.sql (the role and the two databases of Temporal) and every step of init/99-finish.sh.
+// deploy/verify-init.ts runs them; tests/verify-init.test.ts proves that no statement of the init scripts is left without
+// a check (and no check names a statement that is gone), so the two cannot drift apart.
 //
 // Every check only reads: a SQL expression over the catalogs (they are readable by any role, so the check logs in as
 // af_backup, whose login the healthcheck uses anyway), or a read-only shell test in the container. The password of a
@@ -8,6 +9,10 @@
 
 export const APPLICATION_ROLES = ["af_migrator", "af_api", "af_control", "af_backup", "af_reader"] as const;
 export const BOOTSTRAP_ROLE = "af_bootstrap";
+// The role of Temporal and the two databases it owns (docs/agent-factory/database.md "The Temporal databases"). It is no
+// application role: it reaches only these databases, and no application role reaches them.
+export const TEMPORAL_ROLE = "af_temporal";
+export const TEMPORAL_DATABASES = ["af_temporal", "af_temporal_visibility"] as const;
 // Roles that get CONNECT on the application database (the owner, af_migrator, holds it as owner).
 const CONNECTING_ROLES = ["af_api", "af_control", "af_backup", "af_reader"] as const;
 const READER_CONNECTION_LIMIT = 5;
@@ -40,6 +45,8 @@ export interface ShellCheck extends CheckBase {
 export interface LoginCheck extends CheckBase {
 	readonly kind: "login";
 	readonly role: string;
+	// The database to log in to; the application database when absent.
+	readonly database?: string;
 	readonly wrongPassword?: boolean;
 }
 // The rules the running server really uses (pg_hba_file_rules, read as the bootstrap role over the socket), not the file
@@ -66,10 +73,13 @@ const attributes = "LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBY
 
 const roleCheck = (role: string): SqlCheck => {
 	const limit = role === "af_reader" ? READER_CONNECTION_LIMIT : -1;
+	// init/lib/temporal.sql also repairs an existing role (ALTER ROLE) to the same attributes.
+	const covers = [`CREATE ROLE ${role} ${attributes}${role === "af_reader" ? ` CONNECTION LIMIT ${READER_CONNECTION_LIMIT}` : ""}`];
+	if (role === TEMPORAL_ROLE) covers.push(`ALTER ROLE ${role} ${attributes}`);
 	return {
 		kind: "sql",
 		name: `role ${role}: login, no superuser, no createdb, no createrole, no replication, no bypassrls, connection limit ${limit}`,
-		covers: [`CREATE ROLE ${role} ${attributes}${role === "af_reader" ? ` CONNECTION LIMIT ${READER_CONNECTION_LIMIT}` : ""}`],
+		covers,
 		expression: `exists (select 1 from pg_roles where rolname = '${role}' and rolcanlogin and not rolsuper and not rolcreatedb and not rolcreaterole and not rolreplication and not rolbypassrls and rolconnlimit = ${limit})`,
 	};
 };
@@ -140,18 +150,22 @@ const ownerOid = `(select oid from pg_roles where rolname = '${OWNER_ROLE}')`;
 const sortedC = (values: readonly string[]): string[] => [...values].sort();
 const textArray = (values: readonly string[]): string => `array[${sortedC(values).map((v) => `'${v}'`).join(", ")}]::text[]`;
 
-const ALL_ROLE_NAMES = [BOOTSTRAP_ROLE, ...APPLICATION_ROLES];
+const ALL_ROLE_NAMES = [BOOTSTRAP_ROLE, ...APPLICATION_ROLES, TEMPORAL_ROLE];
 
 // The only default-privilege entries of the database, written `owner|schema|object type|grantee|privilege`; the owner's own
 // entry (it always has one once a default is set) is not a grant to anyone else and is left out.
 const INTENDED_DEFAULT_ENTRIES = ["r", "S"].map((kind) => `${OWNER_ROLE}|public|${kind}|${BACKUP_ROLE}|SELECT`);
 
-const policyChecks: readonly SqlCheck[] = [
+// `withTemporal` false is the shape of an installation made before Temporal existed (docs/agent-factory/deployment.md
+// "Upgrade of a running stack"): the same policy without the role and the two databases of Temporal.
+const buildPolicyChecks = (withTemporal: boolean): readonly SqlCheck[] => [
 	{
 		kind: "sql",
-		name: "role set: only af_bootstrap and the five application roles exist (besides the predefined pg_ roles)",
+		name: withTemporal
+			? "role set: only af_bootstrap, the five application roles and af_temporal exist (besides the predefined pg_ roles)"
+			: "role set: only af_bootstrap and the five application roles exist (besides the predefined pg_ roles; af_temporal is not judged)",
 		covers: [],
-		expression: `(select coalesce(array_agg(rolname::text order by rolname::text collate "C"), '{}') from pg_roles where rolname !~ '^pg_') = ${textArray(ALL_ROLE_NAMES)}`,
+		expression: `(select coalesce(array_agg(rolname::text order by rolname::text collate "C"), '{}') from pg_roles where rolname !~ '^pg_'${withTemporal ? "" : ` and rolname <> '${TEMPORAL_ROLE}'`}) = ${textArray(withTemporal ? ALL_ROLE_NAMES : ALL_ROLE_NAMES.filter((role) => role !== TEMPORAL_ROLE))}`,
 	},
 	{
 		kind: "sql",
@@ -176,10 +190,13 @@ const policyChecks: readonly SqlCheck[] = [
 	},
 	{
 		kind: "sql",
-		name: "database ownership: af_migrator owns agent_factory, af_bootstrap owns postgres, template0 and template1",
+		name: withTemporal
+			? "database ownership: af_migrator owns agent_factory, af_temporal owns its two databases, af_bootstrap owns postgres, template0 and template1"
+			: "database ownership: af_migrator owns agent_factory, af_bootstrap owns postgres, template0 and template1",
 		covers: [],
 		expression:
 			`(select count(*) from pg_database where datname = 'agent_factory' and pg_get_userbyid(datdba) = '${OWNER_ROLE}') = 1` +
+			(withTemporal ? ` and (select count(*) from pg_database where datname in (${roleList(TEMPORAL_DATABASES)}) and pg_get_userbyid(datdba) = '${TEMPORAL_ROLE}') = ${TEMPORAL_DATABASES.length}` : "") +
 			` and not exists (select 1 from pg_database where datname in ('postgres', 'template0', 'template1') and pg_get_userbyid(datdba) <> '${BOOTSTRAP_ROLE}')`,
 	},
 	{
@@ -190,6 +207,20 @@ const policyChecks: readonly SqlCheck[] = [
 			`not exists (select 1 from ${wanted("database")} where has_database_privilege(r.oid, 'agent_factory', w.priv) <> w.allowed)` +
 			` and not exists (select 1 from ${wanted("database", () => false)} cross join (values ('postgres'), ('template1')) as db(name) where w.priv = 'CONNECT' and has_database_privilege(r.oid, db.name, 'CONNECT'))`,
 	},
+	...(withTemporal
+		? [
+				{
+					kind: "sql" as const,
+					// Joined to pg_database by name (has_database_privilege on a missing database name raises an error that would fail the
+					// whole batch; a missing database is the failure of the checks of its own).
+					name: "database privileges: the Temporal role cannot connect to agent_factory, postgres or template1, and no application role holds any right on a Temporal database",
+					covers: [],
+					expression:
+						`not exists (select 1 from pg_roles r, pg_database d where r.rolname = '${TEMPORAL_ROLE}' and d.datname in ('agent_factory', 'postgres', 'template1') and has_database_privilege(r.oid, d.oid, 'CONNECT'))` +
+						` and not exists (select 1 from pg_roles r, pg_database d where r.rolname in (${roleList(APPLICATION_ROLES)}) and d.datname in (${roleList(TEMPORAL_DATABASES)}) and has_database_privilege(r.oid, d.oid, 'CONNECT, CREATE, TEMPORARY'))`,
+				},
+			]
+		: []),
 	{
 		kind: "sql",
 		name: "schema privileges: the application roles hold exactly the intended rights on schema public",
@@ -252,8 +283,8 @@ export interface HbaRule {
 // The rules of deploy/postgres/pg_hba.conf, in file order (the first matching rule decides, so the order is part of the
 // policy). A test keeps this list equal to the file. Every method is a password proven by scram, or a rejection: trust,
 // peer, ident, md5, password, cert, gss... would let a login in without proving the password of the secret file. The
-// bootstrap superuser works over the socket only (the first rule), its network rule is a reject, and the application roles
-// reach only the application database from the server's own subnet.
+// bootstrap superuser works over the socket only (the first rule), its network rule is a reject, the application roles
+// reach only the application database from the server's own subnet, and the Temporal role only its two databases.
 export interface IntendedHbaRule {
 	readonly type: string;
 	readonly database: readonly string[];
@@ -265,6 +296,7 @@ export const INTENDED_HBA_RULES: readonly IntendedHbaRule[] = [
 	{ type: "local", database: ["all"], user_name: ["all"], address: null, auth_method: "scram-sha-256" },
 	{ type: "host", database: ["all"], user_name: [BOOTSTRAP_ROLE], address: "all", auth_method: "reject" },
 	{ type: "host", database: ["agent_factory"], user_name: APPLICATION_ROLES, address: "samenet", auth_method: "scram-sha-256" },
+	{ type: "host", database: TEMPORAL_DATABASES, user_name: [TEMPORAL_ROLE], address: "samenet", auth_method: "scram-sha-256" },
 ];
 // One JSON line: the file the server reads, whether that file was modified after the server last loaded its configuration
 // (`stale`: pg_hba_file_rules then shows rules the server does not run), and its rules.
@@ -278,26 +310,42 @@ const sameList = (a: readonly string[] | null, b: readonly string[]): boolean =>
 
 // The rules the server reports, compared in order with INTENDED_HBA_RULES: a legacy rule, a missing reject, a reordering
 // or a different method each show as a difference at the line where it happens.
-export const hbaRuleProblems = (rules: readonly HbaRule[]): string[] => {
+// `withTemporal` false drops the Temporal rule (the file of an installation made before Temporal existed).
+export const intendedHbaRules = (withTemporal = true): readonly IntendedHbaRule[] =>
+	withTemporal ? INTENDED_HBA_RULES : INTENDED_HBA_RULES.filter((rule) => !rule.user_name.includes(TEMPORAL_ROLE));
+
+// With `withTemporal` false the intended rule of the Temporal role is neither required nor forbidden (the file may be the
+// legacy one, without it, or the current one, before or after the bootstrap of Temporal ran): exactly that rule is left out
+// before the comparison. Any other rule that names the Temporal role (wider databases, another method or address, an
+// application role in the list) is not the intended one and stays to be judged, so the flag never hides a hole.
+export const hbaRuleProblems = (allRules: readonly HbaRule[], withTemporal = true): string[] => {
+	const temporalRule = INTENDED_HBA_RULES.find((rule) => rule.user_name.includes(TEMPORAL_ROLE));
+	const isTemporalRule = (rule: HbaRule): boolean =>
+		temporalRule !== undefined && !rule.error && rule.type === temporalRule.type && sameList(rule.database, temporalRule.database) && sameList(rule.user_name, temporalRule.user_name) && rule.address === temporalRule.address && rule.auth_method === temporalRule.auth_method;
+	const rules = withTemporal ? allRules : allRules.filter((rule) => !isTemporalRule(rule));
 	if (rules.length === 0) return ["no rule is active (pg_hba_file_rules is empty)"];
+	const intendedList = intendedHbaRules(withTemporal);
 	const problems: string[] = [];
 	rules.forEach((rule, index) => {
 		if (rule.error) {
 			problems.push(`line ${rule.line_number}: the server cannot use this rule: ${rule.error}`);
 			return;
 		}
-		const intended = INTENDED_HBA_RULES[index];
+		const intended = intendedList[index];
 		if (intended === undefined) {
 			problems.push(`line ${rule.line_number}: an unexpected rule after the intended ones: "${describeRule(rule)}"`);
 		} else if (rule.type !== intended.type || !sameList(rule.database, intended.database) || !sameList(rule.user_name, intended.user_name) || rule.address !== intended.address || rule.auth_method !== intended.auth_method) {
 			problems.push(`line ${rule.line_number}: the rule number ${index + 1} must be "${describeRule(intended)}" but is "${describeRule(rule)}"`);
 		}
 	});
-	for (const missing of INTENDED_HBA_RULES.slice(rules.length)) problems.push(`the intended rule "${describeRule(missing)}" is missing`);
+	for (const missing of intendedList.slice(rules.length)) problems.push(`the intended rule "${describeRule(missing)}" is missing`);
 	return problems;
 };
 
-export const CHECKS: readonly Check[] = [
+// The checks of a completely initialised installation. `withTemporal` false leaves out everything about the role and the
+// two databases of Temporal: it is what an installation made before Temporal existed satisfies, and it is used only by the
+// upgrade of such a stack before the bootstrap of Temporal has run (docs/agent-factory/deployment.md).
+export const buildChecks = (withTemporal: boolean): readonly Check[] => [
 	{
 		kind: "sql",
 		name: "role af_bootstrap exists and is a superuser",
@@ -305,6 +353,7 @@ export const CHECKS: readonly Check[] = [
 		expression: `exists (select 1 from pg_roles where rolname = '${BOOTSTRAP_ROLE}' and rolsuper)`,
 	},
 	...APPLICATION_ROLES.map(roleCheck),
+	...(withTemporal ? [roleCheck(TEMPORAL_ROLE)] : []),
 	roleSetting("af_reader", "default_transaction_read_only", "on", "ALTER ROLE af_reader SET default_transaction_read_only = on"),
 	roleSetting("af_reader", "statement_timeout", "30s", "ALTER ROLE af_reader SET statement_timeout = '30s'"),
 	{
@@ -337,6 +386,21 @@ export const CHECKS: readonly Check[] = [
 		covers: ["GRANT CONNECT ON DATABASE agent_factory TO af_api, af_control, af_backup, af_reader"],
 		expression: `(select count(distinct r.rolname) from pg_database d, aclexplode(d.datacl) a join pg_roles r on r.oid = a.grantee where d.datname = 'agent_factory' and a.privilege_type = 'CONNECT' and r.rolname in (${roleList(CONNECTING_ROLES)})) = ${CONNECTING_ROLES.length}`,
 	},
+	...(withTemporal ? TEMPORAL_DATABASES : []).flatMap((database): SqlCheck[] => [
+		{
+			kind: "sql",
+			name: `database ${database} exists and af_temporal owns it`,
+			covers: [`CREATE DATABASE ${database} OWNER ${TEMPORAL_ROLE}`, `ALTER DATABASE ${database} OWNER TO ${TEMPORAL_ROLE}`],
+			expression: `exists (select 1 from pg_database d join pg_roles o on o.oid = d.datdba where d.datname = '${database}' and o.rolname = '${TEMPORAL_ROLE}')`,
+		},
+		{
+			kind: "sql",
+			name: `database ${database}: PUBLIC holds no right`,
+			covers: [`REVOKE ALL ON DATABASE ${database} FROM PUBLIC`],
+			// A missing database holds no ACL row, so the existence is part of the check (the check above fails it too).
+			expression: `exists (select 1 from pg_database where datname = '${database}') and not ${publicOnDatabase(database)}`,
+		},
+	]),
 	{
 		kind: "sql",
 		name: "extension vector is installed in agent_factory",
@@ -358,9 +422,10 @@ export const CHECKS: readonly Check[] = [
 	defaultSelectOnly("r", "ALTER DEFAULT PRIVILEGES FOR ROLE af_migrator IN SCHEMA public GRANT SELECT ON TABLES TO af_backup", "tables"),
 	defaultSelectOnly("S", "ALTER DEFAULT PRIVILEGES FOR ROLE af_migrator IN SCHEMA public GRANT SELECT ON SEQUENCES TO af_backup", "sequences"),
 	// Everything beyond the statements above: the whole intended policy (memberships, ownership, effective privileges).
-	...policyChecks,
+	...buildPolicyChecks(withTemporal),
 	// What the statements above cannot show: the passwords, and the connect grant itself as the server enforces it.
 	...APPLICATION_ROLES.map((role): LoginCheck => ({ kind: "login", name: `login as ${role} to agent_factory with the password of its secret file`, covers: [], role })),
+	...(withTemporal ? TEMPORAL_DATABASES : []).map((database): LoginCheck => ({ kind: "login", name: `login as ${TEMPORAL_ROLE} to ${database} with the password of its secret file`, covers: [], role: TEMPORAL_ROLE, database })),
 	// A login that works proves the password only when no active rule lets any password in. The rules the server reports
 	// are compared with the intended ones; because that report comes from the file on disk (not necessarily what the
 	// server loaded), the server's behaviour is proven too: the bootstrap role is refused over TCP, and every role that
@@ -375,9 +440,29 @@ export const CHECKS: readonly Check[] = [
 		name: `authentication: a login as ${BOOTSTRAP_ROLE} over TCP is refused by the rules in every database even with the right password`,
 		covers: [],
 		role: BOOTSTRAP_ROLE,
-		// All databases of the cluster that accept connections (template0 does not): initdb makes postgres and template1, init/10-roles.sh agent_factory.
-		databases: ["postgres", "agent_factory", "template1"],
+		// All databases of the cluster that accept connections (template0 does not): initdb makes postgres and template1, init/10-roles.sh agent_factory, init/lib/temporal.sql the two of Temporal.
+		databases: ["postgres", "agent_factory", "template1", ...(withTemporal ? TEMPORAL_DATABASES : [])],
 	},
+	// The two sides of the separation: the Temporal role is refused by the rules in every database but its own, and no
+	// application role is let into a Temporal database (no rule names that pairing; the database privileges would refuse it too).
+	...(withTemporal
+		? [
+				{
+					kind: "refused" as const,
+					name: `authentication: a login as ${TEMPORAL_ROLE} over TCP is refused by the rules in agent_factory, postgres and template1 even with the right password`,
+					covers: [],
+					role: TEMPORAL_ROLE,
+					databases: ["agent_factory", "postgres", "template1"],
+				},
+				...APPLICATION_ROLES.map((role): RefusalCheck => ({
+					kind: "refused",
+					name: `authentication: a login as ${role} over TCP is refused by the rules in both Temporal databases even with the right password`,
+					covers: [],
+					role,
+					databases: TEMPORAL_DATABASES,
+				})),
+			]
+		: []),
 	...APPLICATION_ROLES.map((role): LoginCheck => ({
 		kind: "login",
 		name: `authentication: a login as ${role} over TCP with a password that is in no secret file is refused`,
@@ -385,6 +470,18 @@ export const CHECKS: readonly Check[] = [
 		role,
 		wrongPassword: true,
 	})),
+	...(withTemporal
+		? [
+				{
+					kind: "login" as const,
+					name: `authentication: a login as ${TEMPORAL_ROLE} over TCP with a password that is in no secret file is refused`,
+					covers: [],
+					role: TEMPORAL_ROLE,
+					database: TEMPORAL_ROLE,
+					wrongPassword: true,
+				},
+			]
+		: []),
 	{
 		kind: "shell",
 		name: FINISH_REMOVES_SERVICE_FILE,
@@ -407,6 +504,19 @@ export const CHECKS: readonly Check[] = [
 		isMarker: true,
 	},
 ];
+
+export const CHECKS: readonly Check[] = buildChecks(true);
+
+// Every statement of init/lib/temporal.sql as `covers` writes it: the CREATE, ALTER and REVOKE statements without their
+// password clause (`PASSWORD :'secret'`) and trailing semicolon. The \if / SELECT / \set lines are control flow, not statements.
+export const statementsOfTemporalScript = (source: string): string[] => {
+	const found: string[] = [];
+	for (const line of source.split(/\r?\n/)) {
+		const statement = /^((?:ALTER|REVOKE|GRANT|CREATE|DROP) .*);\s*$/.exec(line);
+		if (statement) found.push((statement[1] as string).replace(" PASSWORD :'secret'", ""));
+	}
+	return found;
+};
 
 // Every statement of init/10-roles.sh as `covers` writes it: the quoted statements of the script, and the CREATE ROLE
 // printf lines without their password clause. Used by the test that every statement has a check.

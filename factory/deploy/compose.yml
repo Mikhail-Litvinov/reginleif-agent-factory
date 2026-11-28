@@ -48,6 +48,7 @@ services:
       - af_control
       - af_backup
       - af_reader
+      - af_temporal
     healthcheck:
       # "healthy" means a usable database, not only a server that answers. Three things, in this order, all must hold:
       #  1. pg_isready over TCP (the entrypoint's temporary init server listens on the unix socket only, so a TCP answer
@@ -87,3 +88,5 @@ secrets:
     file: ${AF_SECRETS_DIR:?set AF_SECRETS_DIR to the directory made by deploy/setup-secrets.ts}/af_backup
   af_reader:
     file: ${AF_SECRETS_DIR:?set AF_SECRETS_DIR to the directory made by deploy/setup-secrets.ts}/af_reader
+  af_temporal:
+    file: ${AF_SECRETS_DIR:?set AF_SECRETS_DIR to the directory made by deploy/setup-secrets.ts}/af_temporal

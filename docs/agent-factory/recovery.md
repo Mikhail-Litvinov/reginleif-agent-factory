@@ -32,9 +32,10 @@ Everything written after the backup that is restored: rows, new accounts' grants
 with the application between the backup and the failure. A backup is a point in time, there is no continuous archive
 (no WAL shipping), so the loss is as old as the newest backup. Take a backup before any risky change.
 
-The dump holds the application database only. It does not hold the roles and their passwords (these live in the
-cluster) or the secrets directory. Roles and the empty database come from a fresh start of the stack (init), with the
-passwords in the secrets directory. If those secret files are gone too, a new set is made with `setup-secrets.ts` on an
+The application dump holds the application database only; the two Temporal databases are dumped next to it, as their own
+files of the same backup (`deployment.md` "Temporal in backup and recovery", which also says what is lost between the
+two). Neither holds the roles and their passwords (these live in the cluster) or the secrets directory. Roles and the
+empty databases come from a fresh start of the stack (init), with the passwords in the secrets directory. If those secret files are gone too, a new set is made with `setup-secrets.ts` on an
 empty directory, and the applications must receive the new passwords.
 
 ## Before relying on a backup
@@ -45,7 +46,7 @@ taken, and again before a real restore. Check the secrets directory too, without
 
 `node factory/deploy/setup-secrets.ts --check $secrets`
 
-It prints `secrets ready` and exits 0 only when the directory holds all six valid secret files, open to the current
+It prints `secrets ready` and exits 0 only when the directory holds all seven valid secret files, open to the current
 user, SYSTEM and Administrators only, in a place that cannot be committed (a git-ignored path inside a checkout is
 accepted); otherwise it prints `secrets NOT ready` with the problems and exits 1. A wrong command line, here and in
 every command of this document, exits 2 with a `usage:` line. `restore.ts` runs this same check before anything else
@@ -69,9 +70,11 @@ uses a passfile that exists only while the command runs.
    never names an existing project, and the command refuses when any container, volume or network of that name
    exists. The loopback port is a free one; to choose it, run the same command with `--port` and a port number added at the end.
    The paths must be absolute, because npm runs the script inside `factory/`. The command verifies the checksum file and the
-   manifest by content, starts the new project from an empty volume (init creates the roles and an empty database),
-   restores the dump with `pg_restore --exit-on-error` (an object that already exists stops it), re-applies the
-   database-level rights that a dump does not carry, and compares row counts and foreign keys with the manifest. On
+   manifest by content, starts the new project from an empty volume (init creates the roles and empty databases, the
+   Temporal ones included), restores the dump with `pg_restore --exit-on-error` (an object that already exists stops
+   it), restores the Temporal dumps of the backup into the empty Temporal databases the same way, re-applies the
+   database-level rights that a dump does not carry, and compares row counts and foreign keys with the manifest (and the
+   row counts of every Temporal table). On
    success it prints `restored and verified in project agent-factory-restored-<hex> (loopback port <n>); the old stack
    was not touched` and keeps the project running. On failure it removes only what carries its own run label and
    prints the problems; exit code 1 (2 on a usage error). It never touches the old stack. Write the project name down
@@ -222,4 +225,5 @@ the embedder answers again; nothing has to be repaired.
 ## Not covered
 
 No schedule, no encryption, no off-host copy of the backups or the secrets, no retention, no continuous archive, and no
-recovery procedure for the Temporal pair: see `deployment.md` "Not covered".
+recovery procedure for the Temporal server itself (only its two databases are in the backup): see `deployment.md`
+"Temporal in backup and recovery" and "Not covered".

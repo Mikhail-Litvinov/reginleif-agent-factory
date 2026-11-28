@@ -12,7 +12,13 @@ import { OwnedDir } from "../deploy/owned.ts";
 import { createTestStack, leftovers, type TestStack } from "./helpers.ts";
 import { createHash } from "node:crypto";
 
-const BACKUP_CLI = new URL("../deploy/backup/backup.ts", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
+import { TEMPORAL_DATABASES } from "../deploy/init-postconditions.ts";
+
+// Files of one backup of the test stack: the application dump, its checksum and the manifest, and a dump with its checksum
+// for each Temporal database (docs/agent-factory/deployment.md, "Temporal in backup and recovery").
+const FILES_PER_BACKUP = 3 + 2 * TEMPORAL_DATABASES.length;
+
+const BACKUP_CLI =new URL("../deploy/backup/backup.ts", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
 const CHECK_CLI = new URL("../deploy/backup/restore-check.ts", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
 
 describe("backup and restore check", () => {
@@ -37,7 +43,8 @@ describe("backup and restore check", () => {
 		const files = await readdir(join(work, "good"));
 		for (const file of files) await copyFile(join(work, "good", file), join(dir, file));
 		const manifestFile = files.find((f) => f.endsWith(".manifest.json")) as string;
-		const dumpFile = files.find((f) => f.endsWith(".dump")) as string;
+		// The application dump is the one the manifest names; the Temporal dumps have the database in their name.
+		const dumpFile = (JSON.parse(await readFile(join(work, "good", manifestFile), "utf8")) as Manifest).dump.file;
 		return { dir, manifestPath: join(dir, manifestFile), dumpPath: join(dir, dumpFile), sumPath: join(dir, `${dumpFile}.sha256`) };
 	};
 
@@ -89,9 +96,17 @@ describe("backup and restore check", () => {
 
 	it("writes the dump, its checksum and a manifest with versions, row counts and foreign keys", async () => {
 		const files = (await readdir(join(work, "good"))).sort();
-		assert.equal(files.length, 3, files.join(", "));
+		// The test stack has the Temporal databases (made by init): three files, plus a dump and its checksum for each of them.
+		assert.equal(files.length, FILES_PER_BACKUP, files.join(", "));
 		assert.ok(files.every((f) => !f.endsWith(".partial")));
 		const m = good.manifest;
+		assert.deepEqual(m.temporal?.databases.map((entry) => entry.database), [...TEMPORAL_DATABASES]);
+		for (const entry of m.temporal?.databases ?? []) {
+			assert.match(entry.dump.file, new RegExp(`^af-\\d{8}T\\d{6}Z-[0-9a-f]{8}\\.${entry.database}\\.dump$`));
+			const temporalSum = createHash("sha256").update(await readFile(join(work, "good", entry.dump.file))).digest("hex");
+			assert.equal(entry.dump.sha256, temporalSum);
+			assert.equal((await readFile(join(work, "good", `${entry.dump.file}.sha256`), "utf8")).split(" ")[0], temporalSum);
+		}
 		assert.equal(m.database, "agent_factory");
 		assert.match(m.serverVersion, /^16\./);
 		assert.deepEqual(m.rowCounts, { "public.child": 200, "public.empty_table": 0, "public.parent": 50 });
@@ -110,7 +125,7 @@ describe("backup and restore check", () => {
 		assert.notEqual(a.dumpPath, b.dumpPath);
 		for (const one of [a, b]) await verifyBackupFiles(one.manifestPath);
 		const files = await readdir(target);
-		assert.equal(files.length, 6, files.join(", "));
+		assert.equal(files.length, 2 * FILES_PER_BACKUP, files.join(", "));
 		assert.ok(files.every((f) => !f.endsWith(".partial")));
 		assert.match(a.manifest.dump.file, /^af-\d{8}T\d{6}Z-[0-9a-f]{8}\.dump$/);
 	});

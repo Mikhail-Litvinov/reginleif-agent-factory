@@ -19,6 +19,8 @@
 // (EEXIST) instead of overwriting, in this order, so that a crash or a failure leaves no file that looks complete:
 //   <name>.dump          -> pg_dump output, published after pg_dump succeeded
 //   <name>.dump.sha256   -> "<hex>  <name>.dump"
+//   <name>.<db>.dump and .sha256 -> the same for each Temporal database (af_temporal, af_temporal_visibility), when the
+//                           server has them; dumped as af_temporal, each in its own snapshot, listed in the manifest
 //   <name>.manifest.json -> published last: its presence marks a finished backup
 // Cleanup acts on identity, not on names (../owned.ts): the run records the identity (device and file index) of the
 // staging directory and of every file it creates, a published name carries the identity of the staged file it was
@@ -36,8 +38,23 @@ import { DATABASE, FOREIGN_KEYS_SQL, PsqlSession, ROW_COUNTS_SQL, execArgs, find
 import { pathsAccessProblems, restrictDirectory } from "../acl.ts";
 import { parseCliArgs, reportCliFailure } from "../cli-args.ts";
 import { OwnedDir, OwnedFiles } from "../owned.ts";
+import { TEMPORAL_DATABASES, TEMPORAL_ROLE } from "../init-postconditions.ts";
 
 export const MANIFEST_FORMAT = "agent-factory-backup-1";
+
+export interface DumpFile {
+	readonly file: string;
+	readonly sha256: string;
+	readonly bytes: number;
+}
+
+// One Temporal database, dumped on its own (docs/agent-factory/database.md, Backup): its dump and the row counts read in
+// the snapshot the dump used.
+export interface TemporalDump {
+	readonly database: string;
+	readonly dump: DumpFile;
+	readonly rowCounts: Record<string, number>;
+}
 
 export interface Manifest {
 	readonly format: string;
@@ -46,9 +63,12 @@ export interface Manifest {
 	readonly serverVersionNum: number;
 	readonly image: string;
 	readonly database: string;
-	readonly dump: { readonly file: string; readonly sha256: string; readonly bytes: number };
+	readonly dump: DumpFile;
 	readonly rowCounts: Record<string, number>;
 	readonly foreignKeys: ForeignKey[];
+	// Present when the server has the Temporal databases (both of them, in TEMPORAL_DATABASES order). A backup of a server
+	// that does not have them carries no such field; a server that has only one of them is refused, never half saved.
+	readonly temporal?: { readonly databases: readonly TemporalDump[] };
 }
 
 export interface BackupOptions {
@@ -152,10 +172,53 @@ export const captureDump = async (child: ChildProcessByStdio<null, Readable, Rea
 	}
 };
 
-const dumpProcess = (container: string, snapshot: string): ChildProcessByStdio<null, Readable, Readable> => {
+const dumpProcess = (container: string, snapshot: string, role = "af_backup", database = DATABASE): ChildProcessByStdio<null, Readable, Readable> => {
 	if (!/^[0-9A-F-]+$/.test(snapshot)) throw new Error("unexpected snapshot id");
-	const program = `pg_dump -Fc --snapshot=${snapshot} -U af_backup -d ${DATABASE}`;
-	return spawn("docker", execArgs(container, "af_backup", program), { stdio: ["ignore", "pipe", "pipe"] });
+	const program = `pg_dump -Fc --snapshot=${snapshot} -U ${role} -d ${database}`;
+	return spawn("docker", execArgs(container, role, program), { stdio: ["ignore", "pipe", "pipe"] });
+};
+
+// Which of the Temporal databases exist, read as af_backup (the catalog lists every database to every role).
+const TEMPORAL_PRESENT_SQL = `SELECT coalesce(string_agg(datname, ',' ORDER BY datname), '') FROM pg_database WHERE datname IN (${TEMPORAL_DATABASES.map((d) => `'${d}'`).join(", ")});`;
+
+// The names of the Temporal dump files of a run: <name>.<database>.dump and its .sha256.
+export const temporalDumpFile = (name: string, database: string): string => `${name}.${database}.dump`;
+
+// Dumps one Temporal database as its own role (af_temporal: the only account with a right on it; af_backup has none, by
+// design), in its own REPEATABLE READ snapshot, so the row counts describe the dump exactly. The two Temporal databases are
+// separate snapshots: they are one pair by backup run, not by transaction; the application database is the same (decided in
+// docs/agent-factory/database.md, Backup: the pair is reconciled after a restore, not made atomic).
+const dumpTemporalDatabase = async (
+	container: string,
+	database: string,
+	name: string,
+	staging: OwnedDir,
+	published: string[],
+	target: string,
+	leftovers: string[],
+): Promise<TemporalDump> => {
+	const session = new PsqlSession(container, TEMPORAL_ROLE, { database });
+	try {
+		session.execute("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;");
+		const snapshot = await session.query("SELECT pg_export_snapshot();");
+		const rowCounts = JSON.parse(await session.query(ROW_COUNTS_SQL)) as Record<string, number>;
+		const stagedDump = join(staging.path, `dump-${database}`);
+		const stagedSum = join(staging.path, `sha256-${database}`);
+		const file = temporalDumpFile(name, database);
+		const dumped = await captureDump(dumpProcess(container, snapshot, TEMPORAL_ROLE, database), stagedDump, staging.files);
+		await staging.files.publish(stagedDump, join(target, file));
+		published.push(join(target, file));
+		await writeStaged(staging.files, stagedSum, `${dumped.sha256}  ${file}\n`);
+		await staging.files.publish(stagedSum, join(target, `${file}.sha256`));
+		published.push(join(target, `${file}.sha256`));
+		return { database, dump: { file, sha256: dumped.sha256, bytes: dumped.bytes }, rowCounts };
+	} finally {
+		try {
+			await session.close();
+		} catch (error) {
+			leftovers.push(`the psql session of ${database} did not close: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
 };
 
 // A name that is unique per run: the UTC second plus 32 random bits. Exclusive creation of every file backs it up: a
@@ -225,6 +288,8 @@ export const backup = async (options: BackupOptions): Promise<BackupResult> => {
 	let session: PsqlSession | undefined;
 	let result: BackupResult | undefined;
 	let failure: { readonly error: unknown } | undefined;
+	const extraPublished: string[] = []; // the Temporal dump files: released with the three names below on success
+	const extraLeftovers: string[] = [];
 	try {
 		session = new PsqlSession(container, "af_backup");
 		session.execute("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;");
@@ -240,6 +305,19 @@ export const backup = async (options: BackupOptions): Promise<BackupResult> => {
 		await options.hooks?.afterDumpPublished?.(staging.path);
 		await writeStaged(staging.files, stagedSum, `${dumped.sha256}  ${name}.dump\n`);
 		await staging.files.publish(stagedSum, sumPath);
+
+		// The Temporal databases: both or none. One alone is a server in an unknown state; a backup that quietly leaves the
+		// other out would restore into a Temporal that has lost half of its history.
+		const temporalPresent = (await session.query(TEMPORAL_PRESENT_SQL)).split(",").filter((database) => database !== "");
+		let temporal: Manifest["temporal"];
+		if (temporalPresent.length > 0) {
+			if (temporalPresent.length !== TEMPORAL_DATABASES.length) {
+				throw new Error(`refused: the server has only ${temporalPresent.join(", ")} of the Temporal databases ${TEMPORAL_DATABASES.join(", ")}; repair it (node deploy/bootstrap-temporal.ts) before a backup`);
+			}
+			const databases: TemporalDump[] = [];
+			for (const database of TEMPORAL_DATABASES) databases.push(await dumpTemporalDatabase(container, database, name, staging, extraPublished, target, extraLeftovers));
+			temporal = { databases };
+		}
 		const manifest: Manifest = {
 			format: MANIFEST_FORMAT,
 			createdAt: new Date().toISOString(),
@@ -250,6 +328,7 @@ export const backup = async (options: BackupOptions): Promise<BackupResult> => {
 			dump: { file: `${name}.dump`, sha256: dumped.sha256, bytes: dumped.bytes },
 			rowCounts,
 			foreignKeys,
+			...(temporal ? { temporal } : {}),
 		};
 		await writeStaged(staging.files, stagedManifest, `${JSON.stringify(manifest, null, 2)}\n`);
 		// The manifest is published last: its presence marks a finished backup.
@@ -259,7 +338,7 @@ export const backup = async (options: BackupOptions): Promise<BackupResult> => {
 		failure = { error };
 	}
 
-	const leftovers: string[] = [];
+	const leftovers: string[] = [...extraLeftovers];
 	if (session) {
 		try {
 			await session.close();
@@ -267,9 +346,9 @@ export const backup = async (options: BackupOptions): Promise<BackupResult> => {
 			leftovers.push(`the psql session did not close: ${error instanceof Error ? error.message : String(error)}`);
 		}
 	}
-	// A finished run keeps its three published names; every other name it recorded, and the staging directory, go.
-	// A failed run removes the published names too, each only if it still is the file this run linked there.
-	if (result) for (const path of [dumpPath, sumPath, manifestPath]) staging.files.release(path);
+	// A finished run keeps its published names (three, plus two per Temporal database); every other name it recorded, and the
+	// staging directory, go. A failed run removes the published names too, each only if it still is the file this run linked there.
+	if (result) for (const path of [dumpPath, sumPath, manifestPath, ...extraPublished]) staging.files.release(path);
 	try {
 		leftovers.push(...(await staging.remove()));
 	} catch (error) {
@@ -297,6 +376,9 @@ if (import.meta.main) {
 		const tables = Object.keys(result.manifest.rowCounts).length;
 		console.log(`backup written: ${result.manifestPath}`);
 		console.log(`dump: ${result.dumpPath} (${result.manifest.dump.bytes} bytes, sha256 ${result.manifest.dump.sha256}); ${tables} tables counted`);
+		for (const entry of result.manifest.temporal?.databases ?? []) {
+			console.log(`dump: ${entry.database} (${entry.dump.bytes} bytes, sha256 ${entry.dump.sha256}); ${Object.keys(entry.rowCounts).length} tables counted`);
+		}
 		for (const leftover of result.leftovers) console.error(`warning: cleanup left: ${leftover}`);
 	} catch (error) {
 		reportCliFailure(error, "backup failed", USAGE);

@@ -33,7 +33,7 @@ describe("database accounts", () => {
 		const rows = await psql(c, "af_backup", "SELECT rolname FROM pg_roles WHERE rolsuper OR rolcreatedb OR rolcreaterole OR rolreplication OR rolbypassrls ORDER BY 1;");
 		assert.equal(rows, "af_bootstrap");
 		const all = await psql(c, "af_backup", "SELECT rolname FROM pg_roles WHERE rolname LIKE 'af\\_%' ORDER BY 1;");
-		assert.equal(all, ["af_api", "af_backup", "af_bootstrap", "af_control", "af_migrator", "af_reader"].join("\n"));
+		assert.equal(all, ["af_api", "af_backup", "af_bootstrap", "af_control", "af_migrator", "af_reader", "af_temporal"].join("\n"));
 	});
 
 	it("the superuser is refused over TCP with the right password, accepted on the local socket", async () => {

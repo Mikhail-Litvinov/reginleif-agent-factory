@@ -1,7 +1,7 @@
 // Creates the secrets directory of the Agent Factory database: one file with a random password per account.
 //
 //   node deploy/setup-secrets.ts <directory>          create what is missing, then verify the access
-//   node deploy/setup-secrets.ts --check <directory>  verify readiness only (changes nothing): all six files present and
+//   node deploy/setup-secrets.ts --check <directory>  verify readiness only (changes nothing): all seven files present and
 //                                                     valid, access restricted, and the place cannot be committed
 //   node deploy/setup-secrets.ts --check-access <directory>  only the access rule that backup.ts applies to its target
 //                                                     (no secret file needed, the place is not judged); exit 1 when too wide
@@ -31,7 +31,8 @@ import { UsageError, parseCliArgs, reportCliFailure } from "./cli-args.ts";
 import { idOfStats, sameId } from "./identity.ts";
 
 // One secret per account; the first is the bootstrap superuser of the server (init and recovery only).
-export const SECRET_NAMES = ["af_bootstrap", "af_migrator", "af_api", "af_control", "af_backup", "af_reader"] as const;
+// af_temporal is the role of the Temporal databases (init/20-temporal.sh, deploy/bootstrap-temporal.ts).
+export const SECRET_NAMES = ["af_bootstrap", "af_migrator", "af_api", "af_control", "af_backup", "af_reader", "af_temporal"] as const;
 
 // 32 random bytes = 256 bits, base64url so that the text holds only A-Z a-z 0-9 _ - (the init script checks it).
 const PASSWORD_BYTES = 32;
@@ -46,7 +47,7 @@ export interface SecretsResult {
 
 const secretFiles = (directory: string): string[] => SECRET_NAMES.map((n) => join(directory, n)).filter((f) => existsSync(f));
 
-// What the init script accepts as a password (init/10-roles.sh: the file's text without trailing newlines, non-empty,
+// What the init scripts accept as a password (init/lib/bootstrap.sh and init/lib/temporal.sql: the file's text without trailing newlines, non-empty,
 // only A-Z a-z 0-9 _ -). A file that fails it would start a role with no usable password.
 const VALID_PASSWORD = /^[A-Za-z0-9_-]+$/;
 
@@ -122,7 +123,7 @@ export const worktreeProblems = (paths: string[]): string[] => {
 	return problems;
 };
 
-// Everything that must hold before the stack may be started from `directory`: it exists, holds all six secret files, each
+// Everything that must hold before the stack may be started from `directory`: it exists, holds all seven secret files, each
 // with a valid password, the access is exactly the allowed holders, and the place cannot be committed (worktreeProblems).
 // The generic access check (verifySecretsAccess) stays what backup directories are verified with. Read-only; synchronous.
 export const secretsReadiness = (directory: string): string[] => {

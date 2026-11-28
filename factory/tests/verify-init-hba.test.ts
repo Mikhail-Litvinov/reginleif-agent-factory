@@ -17,7 +17,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { after, before, describe, it } from "node:test";
-import { APPLICATION_ROLES, BOOTSTRAP_ROLE, CHECKS, INTENDED_HBA_RULES, hbaRuleProblems, type HbaRule } from "../deploy/init-postconditions.ts";
+import { APPLICATION_ROLES, BOOTSTRAP_ROLE, CHECKS, INTENDED_HBA_RULES, TEMPORAL_DATABASES, TEMPORAL_ROLE, hbaRuleProblems, type HbaRule } from "../deploy/init-postconditions.ts";
 import { run, tryPsql } from "../deploy/lib.ts";
 import { checkActiveHba, probeRefusedByRules, probeWrongPassword, verifyInit } from "../deploy/verify-init.ts";
 import { sharedStack, type TestStack } from "./helpers.ts";
@@ -33,6 +33,9 @@ const asReported = (rules: readonly (typeof INTENDED_HBA_RULES)[number][]): HbaR
 		error: null,
 	}));
 const intendedReport = (): HbaRule[] => asReported(INTENDED_HBA_RULES);
+// The authentication checks: one rule comparison, the bootstrap refusal, the Temporal role's refusal, then per application
+// role a refusal in the Temporal databases and a wrong-password probe, and the Temporal role's wrong-password probe.
+const AUTHENTICATION_CHECKS = 3 + 2 * APPLICATION_ROLES.length + 1;
 const legacyBootstrap: HbaRule = { line_number: 99, type: "host", database: ["all"], user_name: [BOOTSTRAP_ROLE], address: "samenet", auth_method: "scram-sha-256", error: null };
 
 describe("hbaRuleProblems", () => {
@@ -77,8 +80,8 @@ describe("hbaRuleProblems", () => {
 		[swapped[1], swapped[2]] = [swapped[2] as HbaRule, swapped[1] as HbaRule];
 		assert.ok(hbaRuleProblems(swapped).length > 0, "reordered");
 
-		const extra = [...intendedReport(), { ...legacyBootstrap, line_number: 4 }];
-		assert.match(hbaRuleProblems(extra).join("\n"), /line 4.*unexpected rule/);
+		const extra = [...intendedReport(), { ...legacyBootstrap, line_number: 5 }];
+		assert.match(hbaRuleProblems(extra).join("\n"), /line 5.*unexpected rule/);
 
 		assert.match(hbaRuleProblems(intendedReport().slice(0, 2)).join("\n"), /is missing/);
 
@@ -89,11 +92,18 @@ describe("hbaRuleProblems", () => {
 		const otherNetwork = intendedReport();
 		otherNetwork[2] = { ...(otherNetwork[2] as HbaRule), address: "all" };
 		assert.ok(hbaRuleProblems(otherNetwork).length > 0, "a wider address");
+
+		const temporalWidened = intendedReport();
+		temporalWidened[3] = { ...(temporalWidened[3] as HbaRule), database: ["af_temporal", "af_temporal_visibility", "agent_factory"] };
+		assert.ok(hbaRuleProblems(temporalWidened).length > 0, "the Temporal role let into the application database");
+		const temporalAnyRole = intendedReport();
+		temporalAnyRole[3] = { ...(temporalAnyRole[3] as HbaRule), user_name: [TEMPORAL_ROLE, "af_api"] };
+		assert.ok(hbaRuleProblems(temporalAnyRole).length > 0, "an application role let into the Temporal databases");
 	});
 
 	it("reports every method that does not prove a password, on any of the rules: trust, peer, ident, md5, password, cert, gss", () => {
 		for (const method of ["trust", "peer", "ident", "md5", "password", "cert", "gss"]) {
-			for (const index of [0, 2]) {
+			for (const index of [0, 2, 3]) {
 				const rules = intendedReport();
 				rules[index] = { ...(rules[index] as HbaRule), auth_method: method };
 				const problems = hbaRuleProblems(rules);
@@ -111,15 +121,75 @@ describe("hbaRuleProblems", () => {
 	});
 });
 
+describe("hbaRuleProblems without the Temporal part (the upgrade and the rollback)", () => {
+	const withoutTemporalRule = (): HbaRule[] => intendedReport().filter((rule) => !(rule.user_name ?? []).includes(TEMPORAL_ROLE));
+
+	it("accepts the legacy file of three rules and the current file of four, and the legacy file is a problem when Temporal is required", () => {
+		assert.equal(withoutTemporalRule().length, INTENDED_HBA_RULES.length - 1);
+		assert.deepEqual(hbaRuleProblems(withoutTemporalRule(), false), []);
+		assert.deepEqual(hbaRuleProblems(intendedReport(), false), []);
+		const required = hbaRuleProblems(withoutTemporalRule(), true);
+		assert.ok(required.length > 0);
+		assert.match(required.join("\n"), /is missing/);
+	});
+
+	it("still rejects every other difference: a trust rule, a legacy bootstrap rule, a reordering, an extra rule, a missing reject", () => {
+		for (const base of [withoutTemporalRule(), intendedReport()]) {
+			const trust = base.map((rule) => ({ ...rule }));
+			trust[2] = { ...(trust[2] as HbaRule), auth_method: "trust" };
+			assert.ok(hbaRuleProblems(trust, false).length > 0, "trust");
+
+			const legacy = base.map((rule) => ({ ...rule }));
+			legacy.splice(1, 0, legacyBootstrap);
+			assert.match(hbaRuleProblems(legacy, false).join("\n"), /af_bootstrap/);
+
+			const swapped = base.map((rule) => ({ ...rule }));
+			[swapped[1], swapped[2]] = [swapped[2] as HbaRule, swapped[1] as HbaRule];
+			assert.ok(hbaRuleProblems(swapped, false).length > 0, "reordered");
+
+			assert.match(hbaRuleProblems([...base, { ...legacyBootstrap, line_number: 50 }], false).join("\n"), /unexpected rule/);
+
+			const noReject = base.map((rule) => ({ ...rule }));
+			noReject.splice(1, 1);
+			assert.match(hbaRuleProblems(noReject, false).join("\n"), /reject/);
+		}
+	});
+
+	it("tolerates only the intended Temporal rule: any other rule that names the Temporal role is still a problem with the flag", () => {
+		const variants: Array<[string, Partial<HbaRule>]> = [
+			["a widened list of databases", { database: ["af_temporal", "agent_factory"] }],
+			["every database", { database: ["all"] }],
+			["an application role together with Temporal", { user_name: [TEMPORAL_ROLE, "af_api"] }],
+			["every role", { user_name: ["all"] }],
+			["a method that does not prove the password", { auth_method: "trust" }],
+			["a wider address", { address: "all" }],
+		];
+		for (const [label, change] of variants) {
+			const changed = intendedReport();
+			changed[3] = { ...(changed[3] as HbaRule), ...change };
+			assert.ok(hbaRuleProblems(changed, false).length > 0, `${label} must not be hidden by the flag`);
+			assert.ok(hbaRuleProblems(changed, true).length > 0, `${label} must be a problem without the flag`);
+		}
+		// The same rule written as an extra rule in the legacy file (three intended ones, then a widened Temporal rule).
+		const extra = [...withoutTemporalRule(), { ...(intendedReport()[3] as HbaRule), line_number: 60, database: ["all"] }];
+		assert.match(hbaRuleProblems(extra, false).join("\n"), /unexpected rule/);
+	});
+});
+
 describe("the authentication checks in the list of checks", () => {
-	it("one wrong-password probe per role that may log in, one refusal probe for the bootstrap role, one rule comparison", () => {
+	it("one wrong-password probe per role that may log in, one refusal probe for the bootstrap role, one rule comparison, and the two sides of the Temporal separation", () => {
 		const authentication = CHECKS.filter((check) => /^authentication/.test(check.name));
-		assert.equal(authentication.length, 2 + APPLICATION_ROLES.length, authentication.map((c) => c.name).join("\n"));
-		for (const role of APPLICATION_ROLES) {
+		assert.equal(authentication.length, AUTHENTICATION_CHECKS, authentication.map((c) => c.name).join("\n"));
+		for (const role of [...APPLICATION_ROLES, TEMPORAL_ROLE]) {
 			assert.equal(authentication.filter((c) => c.kind === "login" && c.role === role && c.wrongPassword === true).length, 1, role);
 		}
 		assert.equal(authentication.filter((c) => c.kind === "refused" && c.role === BOOTSTRAP_ROLE).length, 1);
 		assert.equal(authentication.filter((c) => c.kind === "hba").length, 1);
+		// The Temporal role is refused outside its databases, and each application role is refused in both Temporal databases.
+		assert.equal(authentication.filter((c) => c.kind === "refused" && c.role === TEMPORAL_ROLE).length, 1);
+		for (const role of APPLICATION_ROLES) {
+			assert.equal(authentication.filter((c) => c.kind === "refused" && c.role === role && c.databases.join() === TEMPORAL_DATABASES.join()).length, 1, role);
+		}
 	});
 
 	it("the superuser check of the role attributes is not repeated by a second check", () => {
@@ -146,7 +216,7 @@ describe("the active authentication rules of the real stack", () => {
 	it("all of them are part of the full check, and pass there", async () => {
 		const results = await verifyInit({ container: stack.container });
 		const names = results.filter((r) => /^authentication/.test(r.name));
-		assert.equal(names.length, 2 + APPLICATION_ROLES.length, results.map((r) => r.name).join("\n"));
+		assert.equal(names.length, AUTHENTICATION_CHECKS, results.map((r) => r.name).join("\n"));
 		assert.deepEqual(names.filter((r) => !r.ok), []);
 	});
 });
@@ -157,8 +227,9 @@ describe("a scratch server whose rules the tests set", () => {
 	const LOCAL = "local all all scram-sha-256";
 	const BOOTSTRAP_REJECT = `host all ${BOOTSTRAP_ROLE} all reject`;
 	const APPLICATION = `host agent_factory ${APPLICATION_ROLES.join(",")} samenet scram-sha-256`;
+	const TEMPORAL = `host ${TEMPORAL_DATABASES.join(",")} ${TEMPORAL_ROLE} samenet scram-sha-256`;
 	const LEGACY_BOOTSTRAP = `host all ${BOOTSTRAP_ROLE} samenet scram-sha-256`;
-	const INTENDED = [LOCAL, BOOTSTRAP_REJECT, APPLICATION];
+	const INTENDED = [LOCAL, BOOTSTRAP_REJECT, APPLICATION, TEMPORAL];
 	let stack: TestStack;
 	let dir = "";
 	const asPostgres = (script: string) => run("docker", ["exec", "-u", "postgres", stack.container, "sh", "-c", script]);
@@ -204,6 +275,8 @@ describe("a scratch server whose rules the tests set", () => {
 				`ALTER ROLE ${BOOTSTRAP_ROLE} PASSWORD '$(cat /run/secrets/${BOOTSTRAP_ROLE})'`,
 				...APPLICATION_ROLES.map((role) => `CREATE ROLE ${role} LOGIN PASSWORD '$(cat /run/secrets/${role})'`),
 				"CREATE DATABASE agent_factory",
+				`CREATE ROLE ${TEMPORAL_ROLE} LOGIN PASSWORD '$(cat /run/secrets/${TEMPORAL_ROLE})'`,
+				...TEMPORAL_DATABASES.map((database) => `CREATE DATABASE ${database} OWNER ${TEMPORAL_ROLE}`),
 			];
 			const prepared = await asRoot(statements.map((statement) => `${scratchPsql} -c "${statement}"`).join(" && "));
 			assert.equal(prepared.code, 0, prepared.stderr);
@@ -238,10 +311,20 @@ describe("a scratch server whose rules the tests set", () => {
 			assert.equal(right.code, 0, `${role}: ${right.stderr}`);
 			assert.equal(await wrongPassword(role), null, role);
 		}
+		// The Temporal role gets into both of its databases and into nothing else; no application role gets into either of them.
+		for (const database of TEMPORAL_DATABASES) {
+			const right = await tryPsql(stack.container, TEMPORAL_ROLE, "select 1;", { database, tcp: true, port: PORT });
+			assert.equal(right.code, 0, `${TEMPORAL_ROLE} in ${database}: ${right.stderr}`);
+			assert.equal(await probeWrongPassword(stack.container, TEMPORAL_ROLE, { database, port: PORT }), null, database);
+			for (const role of APPLICATION_ROLES) assert.equal(await probeRefusedByRules(stack.container, role, { database, port: PORT }), null, `${role} in ${database}`);
+		}
+		for (const database of ["agent_factory", "postgres", "template1"]) {
+			assert.equal(await probeRefusedByRules(stack.container, TEMPORAL_ROLE, { database, port: PORT }), null, `${TEMPORAL_ROLE} in ${database}`);
+		}
 	});
 
 	it("a legacy scram rule for af_bootstrap: the rule comparison reports it, and the bootstrap login that gets in is reported", async () => {
-		await load([LOCAL, LEGACY_BOOTSTRAP, BOOTSTRAP_REJECT, APPLICATION]);
+		await load([LOCAL, LEGACY_BOOTSTRAP, BOOTSTRAP_REJECT, APPLICATION, TEMPORAL]);
 		const problems = await checkActiveHba(stack.container, { port: PORT });
 		assert.ok(problems.length > 0, "a rule that lets af_bootstrap in over the network must fail the check");
 		assert.match(problems.join("\n"), /af_bootstrap/);
@@ -250,21 +333,21 @@ describe("a scratch server whose rules the tests set", () => {
 	});
 
 	it("a missing bootstrap reject: the rule comparison reports it", async () => {
-		await load([LOCAL, APPLICATION]);
+		await load([LOCAL, APPLICATION, TEMPORAL]);
 		const problems = await checkActiveHba(stack.container, { port: PORT });
 		assert.ok(problems.length > 0, "the missing reject must fail the check");
 		assert.match(problems.join("\n"), /reject/);
 	});
 
 	it("the file on disk is intended but the server still runs an older rule set: the rule comparison reports the file as newer than the load, and the logins see it too", async () => {
-		await load([LOCAL, LEGACY_BOOTSTRAP, APPLICATION]);
+		await load([LOCAL, LEGACY_BOOTSTRAP, APPLICATION, TEMPORAL]);
 		await changeAfterLoad(INTENDED);
 		assert.match((await checkActiveHba(stack.container, { port: PORT })).join("\n"), /modified after the server last loaded it/);
 		assert.match((await refusedBootstrap()) ?? "", /accepted a login as af_bootstrap/);
 	});
 
 	it("a loaded rule that lets af_bootstrap into agent_factory only (before the reject): the probe of postgres passes, the probe of agent_factory reports it, and so does the check", async () => {
-		await load([LOCAL, "host agent_factory af_bootstrap samenet scram-sha-256", BOOTSTRAP_REJECT, APPLICATION]);
+		await load([LOCAL, "host agent_factory af_bootstrap samenet scram-sha-256", BOOTSTRAP_REJECT, APPLICATION, TEMPORAL]);
 		assert.equal(await probeRefusedByRules(stack.container, BOOTSTRAP_ROLE, { database: "postgres", port: PORT }), null);
 		assert.match((await probeRefusedByRules(stack.container, BOOTSTRAP_ROLE, { database: "agent_factory", port: PORT })) ?? "", /accepted a login as af_bootstrap/);
 		assert.match((await checkActiveHba(stack.container, { port: PORT })).join("\n"), /af_bootstrap/);
@@ -272,18 +355,18 @@ describe("a scratch server whose rules the tests set", () => {
 
 	it("the refusal check probes every database of the cluster", () => {
 		const check = CHECKS.find((c) => c.kind === "refused" && c.role === BOOTSTRAP_ROLE);
-		assert.deepEqual(check?.kind === "refused" ? [...check.databases].sort() : null, ["agent_factory", "postgres", "template1"]);
+		assert.deepEqual(check?.kind === "refused" ? [...check.databases].sort() : null, ["af_temporal", "af_temporal_visibility", "agent_factory", "postgres", "template1"]);
 	});
 
 	it("a loaded rule that lets one role in with any password, the file on disk being intended: the probe of that role reports it, the others pass", async () => {
-		await load([LOCAL, BOOTSTRAP_REJECT, "host agent_factory af_reader samenet trust", APPLICATION]);
+		await load([LOCAL, BOOTSTRAP_REJECT, "host agent_factory af_reader samenet trust", APPLICATION, TEMPORAL]);
 		await changeAfterLoad(INTENDED);
 		assert.match((await wrongPassword("af_reader")) ?? "", /accepted/);
 		for (const role of APPLICATION_ROLES.filter((r) => r !== "af_reader")) assert.equal(await wrongPassword(role), null, role);
 	});
 
 	it("a trust rule: the rule comparison reports it, and a wrong password is accepted", async () => {
-		await load([LOCAL, BOOTSTRAP_REJECT, "host agent_factory af_api,af_control,af_backup,af_reader,af_migrator samenet trust"]);
+		await load([LOCAL, BOOTSTRAP_REJECT, "host agent_factory af_api,af_control,af_backup,af_reader,af_migrator samenet trust", TEMPORAL]);
 		const problems = await checkActiveHba(stack.container, { port: PORT });
 		assert.match(problems.join("\n"), /trust/);
 		assert.match((await wrongPassword("af_api")) ?? "", /accepted/);
