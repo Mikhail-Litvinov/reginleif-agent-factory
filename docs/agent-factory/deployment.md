@@ -127,7 +127,7 @@ Nothing else on the machine is touched: the stack neither uses nor removes other
 
 ## Migrations
 
-The tables come from the numbered files `factory/db/migrations/0001_core.sql` to `0009_standing_revision.sql`
+The tables come from the numbered files `factory/db/migrations/0001_core.sql` to `0010_control_registry_grants.sql`
 (`modules.md` lists what each adds). They are applied by one command, after the stack is healthy. It connects as
 `af_migrator` with the password in the secrets directory and uses the port `AF_PG_PORT` (default 55432), so the same
 two variables as for compose must be set:

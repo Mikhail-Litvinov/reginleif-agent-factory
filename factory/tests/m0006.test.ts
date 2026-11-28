@@ -73,7 +73,7 @@ it("enforces database grants and registry token binding", async () => {
     else if (table === "registry_records") await sql`INSERT INTO registry_records (id, status, source) VALUES (${randomUUID()}, 'draft', 'agent_proposal')`;
     // database.md line 531 and 535-543: af_control reads like af_api, inserts only precedents and drafts (registry_records)
     // and updates nothing in the registry; only af_api inserts and updates the other tables.
-    else if (role === "control") await assert.rejects(sql.unsafe(`INSERT INTO ${table} (id) VALUES ($1)`, [randomUUID()]), /permission denied/i);
+    else if (role === "control") await assert.rejects(sql.unsafe(`INSERT INTO ${table} (id) VALUES ($1)`, [randomUUID()]), table === "registry_inquiry_results" ? /gate-found records/i : /permission denied/i); // migration 0010: control may insert gate-found results only (guard trigger)
     else await sql.unsafe(`INSERT INTO ${table} (id) VALUES ($1)`, [randomUUID()]);
    }
    if (role === "backup" || role === "control") await assert.rejects(sql`INSERT INTO registry_inquiries (id) VALUES (${randomUUID()})`, /permission denied/i);
