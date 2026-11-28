@@ -123,7 +123,7 @@ which drops unknown keys.
 - The status in PostgreSQL is a projection written by `PersistTaskEvent`, with a row version for optimistic locking.
 - A mutation through the API: one transaction writes the decision, the event and an outbox row under the caller's
   idempotency key (unique). The answer says *recorded*, never *applied*. The relay delivers it as a Temporal Update whose
-  id is the outbox id. The validator checks only the form (it cannot run activities); the handler checks the decision and
+  id is the decision id (1:1 with the outbox row). The validator checks only the form (it cannot run activities); the handler checks the decision and
   the outcome is written back as `applied` or `refused` with a reason. Every press is recorded, refused ones included.
   Clients show the delivery state.
 - Temporal removes duplicate Updates only within one workflow run. The workflow carries the ids it has handled through
