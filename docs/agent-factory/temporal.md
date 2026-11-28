@@ -64,7 +64,10 @@ Main path by state (all moves follow the architecture's table; each arrow is one
   that goes to BLOCKED `check_environment` with the reason, handled first by the chief engineer; it is never counted as
   passed and never ignored.
 - **Reviewer (D20).** `RequestReview` selects an enabled agent whose provider differs from the providers of the
-  implementer runs. When the reviewer's usage limit is spent, the task stays VERIFYING with the reason "waiting for the
+  implementer runs, that is not itself an agent of an implementer run, and whose declared `capabilities.roles`
+  (agent-adapters.md, `getCapabilities`) lists `reviewer`. No spec line settled whether a planner may review; the rule is
+  that any agent, a planner included, reviews only when its `capabilities.roles` lists `reviewer`. The lowest agent id
+  of the eligible ones is picked. When the reviewer's usage limit is spent, the task stays VERIFYING with the reason "waiting for the
   reviewer's limit" and one notice to the chief engineer, and the workflow sleeps until the known reset time (`limit.maxWait` caps one sleep;
   without a known reset time the task goes to BLOCKED `usage_limit`). When no such agent exists the task goes to BLOCKED
   `check_environment`.

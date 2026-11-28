@@ -436,7 +436,7 @@ Hidden columns are named in each entry; `commit_xid` is hidden on every stream r
 - **TaskRun** (`task_runs`): `id, task_id, attempt_number, role, agent_id, worker_id|null, temporal_activity_id|null,
   execution_id|null, session_id|null, workspace_id|null, task_revision: int, policy_id, regulation_version_id,
   regulation_seen_id|null, contract_version, status, gpu_wait_since|null, started_at|null, heartbeat_at|null,
-  finished_at|null, exit_code|null, error_code|null, error_message|null, result_summary|null, usage_metrics: json,
+  finished_at|null, exit_code|null, error_code|null, error_message|null, result_summary|null, usage_metrics: json (`{tokens_in: int, tokens_out: int, cost_estimate: number}`, the cost in the currency of the policy's `max_cost`; keys absent while unmeasured),
   participant, role_assignment_id|null, profile_rights: json, agent_version_id, created_at, row_version`.
 - **TaskEvent** (`task_events`, stream): `id, seq: int, task_id, run_id|null, event_type, actor_type:
   E(owner|worker|workflow|system), actor_id|null, payload: json, correlation_id|null, dedupe_key|null, created_at`.
