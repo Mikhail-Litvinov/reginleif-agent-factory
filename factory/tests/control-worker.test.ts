@@ -2,6 +2,7 @@
 // start-to-close is not below the workflow task timeout, and otherwise polls only queue `control` with no non-local activity.
 import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
+import type { Client } from "@temporalio/client";
 import type { TestWorkflowEnvironment } from "@temporalio/testing";
 import { startTimeSkipping } from "./temporal/bench.ts";
 import type { SettingsReader } from "../db/repo/settings.ts";
@@ -9,6 +10,10 @@ import { WORKFLOW_TASK_TIMEOUT_SECONDS, allTimeoutKeys, createActivityCatalog, i
 import { controlSettingsProblems, createControlWorker } from "../control/worker.ts";
 import type { ControlActivities } from "../control/activities/index.ts";
 import { makeStub, stubSettings } from "./temporal/task-stub.ts";
+
+// The time-skipping server does not implement CreateSchedule, so the start's Schedule call gets a client that accepts it. The
+// Schedule itself is checked by machine-liveness-schedule-client.test.ts (fake Schedule API) and machine-liveness-schedule.test.ts.
+const acceptingClient = (): Client => ({ schedule: { create: async () => undefined } }) as unknown as Client;
 
 const readerOf = (snapshot: Record<string, unknown>): SettingsReader => ({ snapshot: async (keys) => Object.fromEntries(keys.filter((key) => key in snapshot).map((key) => [key, snapshot[key]])) }) as SettingsReader;
 
@@ -74,7 +79,7 @@ describe("Control Worker start check", () => {
 		delete snapshot[keys[0] as string];
 		delete snapshot[keys[3] as string];
 		await assert.rejects(
-			createControlWorker({ connection: null as never, settings: readerOf(snapshot), activities: makeStub({}).activities as unknown as ControlActivities }),
+			createControlWorker({ connection: null as never, client: null as never, settings: readerOf(snapshot), activities: makeStub({}).activities as unknown as ControlActivities }),
 			(error: Error) => error.message.startsWith("Control Worker does not start: ") && error.message.includes(keys[0] as string) && error.message.includes(keys[3] as string),
 		);
 	});
@@ -82,7 +87,7 @@ describe("Control Worker start check", () => {
 	it("createControlWorker refuses to start when a local S is not below the bound", async () => {
 		const key = localSKeys()[0] as string;
 		await assert.rejects(
-			createControlWorker({ connection: null as never, settings: readerOf(stubSettings({ [key]: 12 })), activities: makeStub({}).activities as unknown as ControlActivities }),
+			createControlWorker({ connection: null as never, client: null as never, settings: readerOf(stubSettings({ [key]: 12 })), activities: makeStub({}).activities as unknown as ControlActivities }),
 			(error: Error) => error.message === `Control Worker does not start: ${key} must be below 10`,
 		);
 	});
@@ -95,7 +100,7 @@ describe("Control Worker creation", () => {
 
 	it("valid settings give a Worker on queue `control` with non-local activities off", async () => {
 		const worker = await createControlWorker({
-			connection: env.nativeConnection, settings: readerOf(stubSettings()), activities: makeStub({}).activities as unknown as ControlActivities,
+			connection: env.nativeConnection, client: acceptingClient(), settings: readerOf(stubSettings()), activities: makeStub({}).activities as unknown as ControlActivities,
 		});
 		try {
 			const options = worker.options as unknown as { taskQueue: string; enableNonLocalActivities: boolean };

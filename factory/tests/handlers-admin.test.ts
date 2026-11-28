@@ -480,3 +480,16 @@ test('policy loosening needs the second press, a tightening does not, every chan
   assert.equal(stale409.json.code, 'version_conflict');
   assert.equal(stale409.json.current_row_version, version + 2);
 });
+
+test('registration records an out-of-range contract as outdated, and an in-range one as online', async () => {
+  const machine = (id: string, contract: number) => ({ machine_id: id, name: id, platform: 'linux', capabilities: {}, version: '1.0.0', contract_version: contract });
+  const rowId = randomUUID();
+  await client`INSERT INTO workers (id, name, platform, status, concurrency_limit) VALUES (${rowId}, 'contract', 'linux', 'online', 1)`;
+  const token = await credential('worker', { workerId: rowId });
+  const status = async () => (await client`SELECT status FROM workers WHERE id = ${rowId}`)[0]!.status as string;
+  // The handler's current contract is 1 (its default); contract 2 is out of range, so the row is outdated, never online.
+  assert.equal((await call(on, 'POST', '/workers/register', token, { body: machine('machine-c', 2) })).status, 200);
+  assert.equal(await status(), 'outdated');
+  assert.equal((await call(on, 'POST', '/workers/register', token, { body: machine('machine-c', 1) })).status, 200);
+  assert.equal(await status(), 'online');
+});

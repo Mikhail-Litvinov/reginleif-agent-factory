@@ -6,6 +6,7 @@ import { type TestWorkflowEnvironment } from "@temporalio/testing";
 import { WithStartWorkflowOperation, type Client, type WorkflowHandle } from "@temporalio/client";
 import type { TaskWorkflow as TaskWorkflowType } from "../../workflows/task.ts";
 import { allTimeoutKeys } from "../../control/activity-catalog.ts";
+import { LIVENESS_SETTING_KEYS } from "../../control/liveness-settings.ts";
 import { CONTROL_WORKFLOWS_PATH } from "../../control/worker.ts";
 import { CONTROL_QUEUE, taskWorkflowId } from "../../control/workflow-client.ts";
 import type { ReadDecisionResult, PersistTaskEventInput, RecordDecisionOutcomeInput } from "../../control/activities/index.ts";
@@ -13,9 +14,9 @@ import { DecisionNotFoundError, TASK_CLOSED } from "../../control/activities/ref
 import { HISTORY_MAX_EVENTS_KEY } from "../../workflows/task.ts";
 import { initialState, type HandledOutcome, type TaskState, type UpdateKind } from "../../workflows/task-state.ts";
 
-/** Every timeout setting at 7 s: below the 10 s workflow task timeout, a value the stubs never wait for (no real time passes). */
+/** Every timeout and liveness setting at 7 s (bench values; the stubs never wait, no real time passes; 7 s is below the 10 s workflow task timeout). */
 export const stubSettings = (extra: Record<string, unknown> = {}): Record<string, unknown> => ({
-	...Object.fromEntries(allTimeoutKeys().map((key) => [key, 7])),
+	...Object.fromEntries([...allTimeoutKeys(), ...LIVENESS_SETTING_KEYS].map((key) => [key, 7])),
 	...extra,
 });
 

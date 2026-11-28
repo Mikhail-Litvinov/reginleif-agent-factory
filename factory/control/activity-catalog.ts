@@ -47,6 +47,8 @@ export const ACTIVITIES = {
 	CleanupWorkspace: machine(["S", "Q"]),
 	RunGpuJob: { place: "gpu", kinds: ["S", "Q", "H"] },
 	ReconcileMachine: machine(["S"]),
+	// Package 57: one pass of MachineLivenessWorkflow over the `workers` rows (local, S only, as LoadSettings).
+	MachineLiveness: local(["S"]),
 } as const satisfies Record<string, ActivityDef>;
 
 export type ActivityName = keyof typeof ACTIVITIES;

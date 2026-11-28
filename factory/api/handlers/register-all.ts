@@ -19,7 +19,7 @@ type Options = {
 // The single list of handler groups. Server startup calls this one function; a new group is added here and nowhere else.
 export function registerAllHandlers(api: ReturnType<typeof createApiServer>, repo: Repo, options: Options = {}): void {
   const { now, queueGatewayEnabled, contractVersion, client, embed } = options;
-  registerAdminHandlers(api, { repo, now, queueGatewayEnabled });
+  registerAdminHandlers(api, { repo, now, queueGatewayEnabled, contractVersion });
   registerTasks(api, repo, { clock: now, contractVersion });
   registerClientHandlers(api, repo, client);
   registerRegistryHandlers(api, repo, { now, embed });
