@@ -57,6 +57,13 @@ export const settingKey = (name: ActivityName, kind: TimeoutKind): string => `ac
 export const allTimeoutKeys = (): string[] =>
 	(Object.keys(ACTIVITIES) as ActivityName[]).flatMap((name) => ACTIVITIES[name].kinds.map((kind) => settingKey(name, kind)));
 
+/** Every `act.*` key of the catalog whose value is absent or not a positive number of seconds (all of them, not the first). */
+export const invalidTimeoutKeys = (snapshot: Readonly<Record<string, unknown>>): string[] =>
+	allTimeoutKeys().filter((key) => {
+		const value = snapshot[key];
+		return typeof value !== "number" || !Number.isFinite(value) || value <= 0;
+	});
+
 export interface ActivityCatalog {
 	readonly def: (name: ActivityName) => ActivityDef;
 	/** Task queue for a machine activity; `local` activities have none (no activity task exists). */
@@ -90,4 +97,17 @@ export const createActivityCatalog = (snapshot: Readonly<Record<string, unknown>
 	};
 };
 
-export const loadActivityCatalog = async (settings: SettingsReader): Promise<ActivityCatalog> => createActivityCatalog(await settings.snapshot(allTimeoutKeys()));
+/**
+ * The workflow task timeout of TaskWorkflow, seconds. Source: the Temporal server default (10 s); `startTask` sets none.
+ * A local activity runs inside a workflow task, so its start-to-close must stay below this (temporal.md, D28).
+ */
+export const WORKFLOW_TASK_TIMEOUT_SECONDS = 10;
+
+/** The local activities whose `S` is not below the workflow task timeout (the bound check of the Control Worker and the tests). */
+export const localTimeoutViolations = (catalog: ActivityCatalog, bound: number = WORKFLOW_TASK_TIMEOUT_SECONDS): string[] =>
+	catalog.localNames().filter((name) => {
+		const s = catalog.timeouts(name).S;
+		return s !== undefined && s >= bound;
+	}).map((name) => `${settingKey(name, "S")} must be below ${bound}`);
+
+export const loadActivityCatalog =async (settings: SettingsReader): Promise<ActivityCatalog> => createActivityCatalog(await settings.snapshot(allTimeoutKeys()));
