@@ -8,6 +8,6 @@ const cleanups = new Cleanups();
 const secretsDir = await newSecretsDir(cleanups);
 const port = await freePort();
 const { project, runId } = trackedProject(cleanups);
-await runChecked("docker", stackArgs({ project, secretsDir, port, runId }, "up", "-d"), { env: stackEnv({ project, secretsDir, port, runId }) });
+await runChecked("docker", stackArgs({ project, secretsDir, port, runId }, "up", "-d", "postgres"), { env: stackEnv({ project, secretsDir, port, runId }) });
 process.stdout.write(JSON.stringify({ runId, secretsDir, token: OwnedDir.tokenOf(secretsDir) }));
 process.exit(0);

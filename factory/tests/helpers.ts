@@ -195,7 +195,7 @@ export const newBenchStackInfo = async (cleanups: Cleanups): Promise<SharedStack
 
 /** Starts the bench stack and waits until it is healthy. */
 export const startBenchStack = async (info: SharedStackInfo): Promise<string> => {
-	await runChecked("docker", stackArgs(info, "-f", BENCH_COMPOSE_FILE, "up", "-d"), { env: benchStackEnv(info) });
+	await runChecked("docker", stackArgs(info, "-f", BENCH_COMPOSE_FILE, "up", "-d", "postgres"), { env: benchStackEnv(info) });
 	const container = await findContainer(info.project);
 	await waitHealthy(container);
 	return container;

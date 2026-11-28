@@ -98,11 +98,18 @@ uses a passfile that exists only while the command runs.
 
    `$env:AF_RUN_ID = $hex; $env:AF_PG_PORT = '55432'`
 
-   `& $proveVolume "agent-factory-restored-$hex"; docker compose -p "agent-factory-restored-$hex" -f factory/deploy/compose.yml -f factory/deploy/compose.run.yml up -d`
+   `& $proveVolume "agent-factory-restored-$hex"; docker compose -p "agent-factory-restored-$hex" -f factory/deploy/compose.yml -f factory/deploy/compose.run.yml up -d postgres`
 
    Wait until this prints `healthy` (run it again until it does), and point the applications at `127.0.0.1:55432`:
 
    `docker inspect --format '{{.State.Health.Status}}' "agent-factory-restored-$hex-postgres-1"`
+
+   Then reconcile the restored Temporal state with the application tables (`database.md` "The Temporal databases") and
+   only then bring the Temporal server up in this project (the order of the Temporal part of a recovery is in "Temporal
+   server" below). Naming the service `temporal` starts the schema step
+   first, which waits for the database and moves the restored schema forward if the backup was older than the images:
+
+   `docker compose -p "agent-factory-restored-$hex" -f factory/deploy/compose.yml -f factory/deploy/compose.run.yml up -d temporal`
 
    From now on the project is `agent-factory-restored-<hex>`: every later command that names `agent-factory` (stop,
    start, `down`, and `backup.ts --project agent-factory`) must name this project instead, for example
@@ -225,5 +232,24 @@ the embedder answers again; nothing has to be repaired.
 ## Not covered
 
 No schedule, no encryption, no off-host copy of the backups or the secrets, no retention, no continuous archive, and no
-recovery procedure for the Temporal server itself (only its two databases are in the backup): see `deployment.md`
+copy of the Temporal server's own state beyond its two databases (the server keeps nothing else): see `deployment.md`
 "Temporal in backup and recovery" and "Not covered".
+
+## Temporal server
+
+The server and its schema step are containers that hold no data; everything they need is in the two Temporal databases,
+which are in the backup. So the recovery of the Temporal part is the order below, and each step waits for the one before:
+
+1. PostgreSQL is restored and healthy (the sections above). The Temporal role and the two empty databases come from init,
+   the dumps from `restore.ts`.
+2. The schema step (`temporal-setup`) runs. It is forward only: it creates a missing schema, and applies only the
+   versions the restored database does not have. It never goes back, so a backup taken under an older image is brought up
+   to the image's schema, and a backup taken under a newer one is not started by an older image (use the image of the
+   backup's minor version or later).
+3. The server (`temporal`) starts and becomes healthy. `numHistoryShards` must be the value the cluster was built with
+   (`deployment.md` "Temporal server"); the restored data does not work with another one.
+4. Workers and the API start last: they connect to the server. The namespaces are rows of the restored database, so
+   they come back with it (the stack itself creates none).
+
+The workflows that were running at the time of the backup resume from their history in the restored database; what
+happened after the backup is lost with the rest of the data written after it (see "What a restore loses").

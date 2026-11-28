@@ -12,6 +12,21 @@ services:
       af.run: "${AF_RUN_ID:?set AF_RUN_ID}"
       af.owner: "${AF_OWNER:-}"
       af.secrets: "${AF_SECRETS_LABEL:-}"
+  temporal-setup:
+    labels:
+      af.run: "${AF_RUN_ID:?set AF_RUN_ID}"
+      af.owner: "${AF_OWNER:-}"
+      af.secrets: "${AF_SECRETS_LABEL:-}"
+  temporal:
+    labels:
+      af.run: "${AF_RUN_ID:?set AF_RUN_ID}"
+      af.owner: "${AF_OWNER:-}"
+      af.secrets: "${AF_SECRETS_LABEL:-}"
+  temporal-ui:
+    labels:
+      af.run: "${AF_RUN_ID:?set AF_RUN_ID}"
+      af.owner: "${AF_OWNER:-}"
+      af.secrets: "${AF_SECRETS_LABEL:-}"
 
 volumes:
   pgdata:

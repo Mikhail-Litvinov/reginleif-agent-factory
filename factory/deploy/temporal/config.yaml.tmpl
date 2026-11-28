@@ -1,0 +1,109 @@
+# Temporal server configuration of the Agent Factory (phase 3). A template, not a config: the wrapper
+# deploy/temporal/server-entrypoint.sh copies it line by line into tmpfs and replaces the password marker of the two
+# datastores (the only two places the marker appears: the wrapper refuses any other count) by the content of the secret
+# af_temporal, so no password is ever in this file, in the environment or in an argument of the container.
+#
+# Base: config/development-postgres12.yaml of temporalio/temporal v1.32.2, changed to this deployment:
+#  - SQL persistence (postgres12 plugin) on the database af_temporal and SQL visibility on af_temporal_visibility,
+#    both created by the Postgres init scripts (deploy/postgres/init/20-temporal.sh); no Elasticsearch, no auto-setup.
+#  - The frontend listens on the container address (the published port is 127.0.0.1 only, see compose.yml); the other
+#    services, which only talk to each other inside the one process, listen on the loopback of the container.
+#  - No metrics endpoint, no archival, no dynamic config file: nothing this deployment does not use.
+
+log:
+  stdout: true
+  level: info
+
+persistence:
+  defaultStore: default
+  visibilityStore: visibility
+  # numHistoryShards: 512. Source: the Temporal blog post "Scaling Temporal: the basics" (temporal.io/blog/scaling-temporal-the-basics):
+  # "Temporal recommends that small production clusters use 512 shards" (its test cluster used the development
+  # default of 4 and was rebuilt with 512). The same post says the shard count is the one setting that cannot be changed
+  # after the cluster is built. Fixed here, never derived from another setting: the number is written into the
+  # persistence database at the first start, so changing it needs a new cluster and a new database. Therefore the
+  # upgrade procedure (docs/agent-factory/deployment.md, "Upgrading Temporal") never touches it, and the server refuses
+  # to start when the stored value differs from this one.
+  numHistoryShards: 512
+  datastores:
+    default:
+      sql:
+        pluginName: "postgres12"
+        databaseName: "af_temporal"
+        connectAddr: "postgres:5432"
+        connectProtocol: "tcp"
+        user: "af_temporal"
+        password: "__AF_TEMPORAL_PASSWORD__"
+        # 20 and 1h: the values of development-postgres12.yaml for a small installation (one worker process).
+        maxConns: 20
+        maxIdleConns: 20
+        maxConnLifetime: "1h"
+    visibility:
+      sql:
+        pluginName: "postgres12"
+        databaseName: "af_temporal_visibility"
+        connectAddr: "postgres:5432"
+        connectProtocol: "tcp"
+        user: "af_temporal"
+        password: "__AF_TEMPORAL_PASSWORD__"
+        maxConns: 10
+        maxIdleConns: 10
+        maxConnLifetime: "1h"
+
+global:
+  membership:
+    maxJoinDuration: 30s
+    # The services of the one process find each other on the loopback.
+    broadcastAddress: "127.0.0.1"
+
+services:
+  frontend:
+    rpc:
+      grpcPort: 7233
+      membershipPort: 6933
+      bindOnIP: "0.0.0.0"
+      httpPort: 7243
+  matching:
+    rpc:
+      grpcPort: 7235
+      membershipPort: 6935
+      bindOnLocalHost: true
+  history:
+    rpc:
+      grpcPort: 7234
+      membershipPort: 6934
+      bindOnLocalHost: true
+  worker:
+    rpc:
+      grpcPort: 7239
+      membershipPort: 6939
+      bindOnLocalHost: true
+
+clusterMetadata:
+  enableGlobalNamespace: false
+  failoverVersionIncrement: 10
+  masterClusterName: "active"
+  currentClusterName: "active"
+  clusterInformation:
+    active:
+      enabled: true
+      initialFailoverVersion: 1
+      rpcName: "frontend"
+      rpcAddress: "127.0.0.1:7233"
+      httpAddress: "127.0.0.1:7243"
+
+dcRedirectionPolicy:
+  policy: "noop"
+
+archival:
+  history:
+    state: "disabled"
+  visibility:
+    state: "disabled"
+
+namespaceDefaults:
+  archival:
+    history:
+      state: "disabled"
+    visibility:
+      state: "disabled"

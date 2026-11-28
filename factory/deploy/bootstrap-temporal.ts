@@ -6,7 +6,7 @@
 //   node deploy/bootstrap-temporal.ts [--project agent-factory | --container <container name>]
 //
 // Order: make the secret (node deploy/setup-secrets.ts, which adds only the missing af_temporal file), recreate the stack so
-// the container mounts it and the new pg_hba.conf (docker compose up -d), then run this. It runs as af_bootstrap over the
+// the container mounts it and the new pg_hba.conf (docker compose up -d postgres), then run this. It runs as af_bootstrap over the
 // local socket, the only way that role may connect. Idempotent: a second run changes nothing but re-applies the password of
 // the secret file, so it is also how a rotated af_temporal secret reaches the server. It never touches agent_factory.
 // Exit 0 when the objects exist and the role can log in to its database; 1 on a failure; 2 on a wrong argument.
@@ -39,7 +39,7 @@ export const bootstrapTemporal = async (options: BootstrapOptions = {}): Promise
 	// A container made before the secret existed does not mount it: say what to do instead of failing inside psql.
 	const mounted = await run("docker", ["exec", container, "test", "-s", SECRET_PATH]);
 	if (mounted.code !== 0) {
-		throw new Error(`the container does not have the secret ${SECRET_PATH}: make it with node deploy/setup-secrets.ts and recreate the stack with docker compose up -d, then run this again`);
+		throw new Error(`the container does not have the secret ${SECRET_PATH}: make it with node deploy/setup-secrets.ts and recreate the database with docker compose up -d postgres, then run this again`);
 	}
 
 	await applyTemporalSql(container);
@@ -48,7 +48,7 @@ export const bootstrapTemporal = async (options: BootstrapOptions = {}): Promise
 	// password of its secret file. This also proves the pg_hba.conf line, so a container that still runs the old file fails here.
 	const login = await tryPsql(container, TEMPORAL_ROLE, "select 1;", { database: TEMPORAL_DATABASES[0], tcp: true });
 	if (login.code !== 0 || login.stdout.trim() !== "1") {
-		throw new Error(`the objects exist, but ${TEMPORAL_ROLE} cannot log in to ${TEMPORAL_DATABASES[0]} over TCP: ${firstLine(login.stderr, `exit ${login.code}`)} (the stack must run the pg_hba.conf of this version: docker compose up -d --force-recreate)`);
+		throw new Error(`the objects exist, but ${TEMPORAL_ROLE} cannot log in to ${TEMPORAL_DATABASES[0]} over TCP: ${firstLine(login.stderr, `exit ${login.code}`)} (the stack must run the pg_hba.conf of this version: docker compose up -d --force-recreate postgres)`);
 	}
 	return container;
 };

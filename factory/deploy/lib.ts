@@ -308,7 +308,8 @@ export const stackArgs = (options: StackOptions, ...rest: string[]): string[] =>
 // Starts a compose project of the server and waits until it is healthy; returns the container id.
 export const startStack = async (options: StackOptions): Promise<string> => {
 	assertRunId(options.runId);
-	await runChecked("docker", stackArgs(options, "up", "-d"), { env: stackEnv(options) });
+	// The database alone: Temporal (services temporal-setup, temporal) is started by the tests that need it.
+	await runChecked("docker", stackArgs(options, "up", "-d", "postgres"), { env: stackEnv(options) });
 	const container = await findContainer(options.project);
 	await waitHealthy(container);
 	return container;

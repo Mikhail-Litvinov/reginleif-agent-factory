@@ -429,7 +429,7 @@ describe("secrets", () => {
 			const result = await run("docker", ownedComposeArgs(project, runId, "config"), { env });
 			assert.notEqual(result.code, 0);
 			assert.match(result.stderr, /AF_SECRETS_DIR/);
-			const up = await run("docker", ownedComposeArgs(project, runId, "up", "-d"), { env });
+			const up = await run("docker", ownedComposeArgs(project, runId, "up", "-d", "postgres"), { env });
 			assert.notEqual(up.code, 0);
 			assert.deepEqual(await leftovers(runId), []);
 		} finally {

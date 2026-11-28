@@ -62,7 +62,7 @@ describe("restart", () => {
 	it("survive a forced recreate of the container", async () => {
 		await writeRow();
 		const old = stack.container;
-		const recreate = await compose(stack, "up", "-d", "--force-recreate");
+		const recreate = await compose(stack, "up", "-d", "--force-recreate", "postgres");
 		assert.equal(recreate.code, 0, recreate.stderr);
 		stack.container = await findContainer(stack.project);
 		assert.notEqual(stack.container, old, "the container must be a new one");
@@ -78,7 +78,7 @@ describe("restart", () => {
 		assert.equal(gone.stdout.trim(), "", "the container must be gone after the removal");
 		const volume = await run("docker", ["volume", "inspect", `${stack.project}_pgdata`]);
 		assert.equal(volume.code, 0, "the volume must stay after down");
-		const up = await compose(stack, "up", "-d");
+		const up = await compose(stack, "up", "-d", "postgres");
 		assert.equal(up.code, 0, up.stderr);
 		stack.container = await findContainer(stack.project);
 		await waitHealthy(stack.container);

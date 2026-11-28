@@ -74,7 +74,9 @@ const legacyStack = async (cleanups: Cleanups): Promise<Fixture> => {
 	await restrictDir(backups);
 	await writeLegacyTree(repo);
 	const fixture: Fixture = { project, runId, secretsDir, port, repo, backups, old: join(root.path, "old"), container: `${project}-postgres-1`, env: stackEnv({ project, secretsDir, port, runId }) };
-	await composeUpFrom(fixture.project, join(repo, "factory", "deploy", "compose.yml"), RUN_LABEL_FILE, fixture.env);
+	// The legacy compose file is labelled by the legacy revision's own run file: this revision's names the Temporal services,
+	// which the legacy file does not have (compose refuses a run file that names a service the base file lacks).
+	await composeUpFrom(fixture.project, join(repo, "factory", "deploy", "compose.yml"), join(repo, "factory", "deploy", "compose.run.yml"), fixture.env);
 	await waitHealthy(fixture.container);
 	await exec(fixture, "sh", "-c", `echo ${SENTINEL} > ${DATA}/${SENTINEL}`);
 	return fixture;
@@ -113,9 +115,12 @@ const stepsOf = (text: string, fixture: Fixture): string[] =>
 		.map(({ code }) => code)
 		.filter((code) => !NOT_A_STEP.test(code))
 		.map((code) => {
-			const adapted = adaptCommand(code, { project: fixture.project });
+			// The run file belongs to the compose file it labels: the copy of the legacy deploy has its own (the legacy file has no
+			// Temporal services), every other command runs this revision's files copied over the repository's deploy directory.
+			const runFile = code.includes("$old/compose.yml") ? join(fixture.old, "compose.run.yml") : RUN_LABEL_FILE;
+			const adapted = adaptCommand(code, { project: fixture.project, runFile });
 			// (the added run file's path is the worktree's, which may contain the name)
-			assert.doesNotMatch(adapted.replaceAll(RUN_LABEL_FILE, "").replaceAll("/etc/agent-factory/", ""), /agent-factory/, `no command keeps the real project's name: ${code}`);
+			assert.doesNotMatch(adapted.replaceAll(runFile, "").replaceAll("/etc/agent-factory/", ""), /agent-factory/, `no command keeps the real project's name: ${code}`);
 			return /\b(backup|verify-init)\.ts\b/.test(adapted) && !/--(project|container)\b/.test(adapted) ? `${adapted} --project ${fixture.project}` : adapted;
 		});
 
@@ -229,7 +234,9 @@ describe("upgrade of a running legacy stack, by the commands of the doc", () => 
 			assert.ok(update, "the update step is there");
 			await play(fixture, [update]);
 			const deploy = join(fixture.repo, "factory", "deploy", "compose.yml");
-			await composeUpFrom(fixture.project, deploy, RUN_LABEL_FILE, fixture.env);
+			// The database alone, as the doc's own steps start it on a database made by an older revision (Temporal needs the role
+			// that revision's volume does not have).
+			await composeUpFrom(fixture.project, deploy, RUN_LABEL_FILE, fixture.env, "postgres");
 			let restarts = 0;
 			for (let i = 0; i < 100 && restarts < 2; i++) {
 				restarts = Number((await run("docker", ["inspect", "--format", "{{.RestartCount}}", fixture.container])).stdout.trim() || "0");

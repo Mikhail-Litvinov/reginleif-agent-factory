@@ -25,7 +25,8 @@ of this phase: the registry is built before it (G5, [governance.md](governance.m
 
 | File | What it does | Depends on |
 |---|---|---|
-| `F/deploy/compose.yml` | PostgreSQL (with `pgvector`); restart policy; ports on loopback only | none |
+| `F/deploy/compose.yml` | PostgreSQL (with `pgvector`); the Temporal server, its one-shot schema step and its UI (profile `ui`, off by default); restart policy; ports on loopback only | none |
+| `F/deploy/temporal/` | The server's config template (`numHistoryShards`, two PostgreSQL datastores), the entrypoint that fills in the password from the secret at start, and the schema step (`temporal-sql-tool`, forward only) | compose, `F/deploy/postgres/` |
 | `F/deploy/postgres/` | Init: roles af_migrator, af_api, af_control, af_backup, af_reader and the socket-only superuser af_bootstrap (database.md Accounts); `pg_hba.conf` | compose |
 | `F/deploy/setup-secrets.ts` | Creates one random password file per account, never overwrites | none |
 | `F/deploy/backup/` | Dump with af_backup, checksum, restore into a scratch database, row-count and FK check | postgres |

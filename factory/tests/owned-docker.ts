@@ -33,8 +33,8 @@ export const createVolume = (runId: string, name: string): Promise<string> => cr
  * `docker compose up -d` of a stack whose compose file is not this revision's (a legacy fixture). The labels come from the
  * second compose file (deploy/compose.run.yml of this revision, `labelFile`), as for every stack of a test.
  */
-export const composeUpFrom = (project: string, composeFile: string, labelFile: string, env: Record<string, string>): Promise<string> =>
-	runChecked("docker", ["compose", "-p", project, "-f", composeFile, "-f", labelFile, "up", "-d"], { env });
+export const composeUpFrom = (project: string, composeFile: string, labelFile: string, env: Record<string, string>, ...services: string[]): Promise<string> =>
+	runChecked("docker", ["compose", "-p", project, "-f", composeFile, "-f", labelFile, "up", "-d", ...services], { env });
 
 /** `docker network create`. */
 export const createNetwork = (runId: string, name: string): Promise<string> => created(["network", "create", ...ownerFlags(runId), name]);

@@ -4,6 +4,8 @@
 # The stack refuses to start without AF_SECRETS_DIR: there is no default inside the repository, and no password
 # text anywhere in this file or in the environment of the container.
 # AF_PG_PORT (default 55432) is the port on 127.0.0.1; the server is never published on another address.
+# Temporal (services temporal-setup, temporal and, with --profile ui, temporal-ui) is part of the same stack; its ports
+# AF_TEMPORAL_PORT (7233) and AF_TEMPORAL_UI_PORT (8233) are on 127.0.0.1 as well. `up -d postgres` starts the database alone.
 # Container, volume and network names derive from the project name, so a test project (-p) never meets this one.
 
 name: agent-factory
@@ -71,6 +73,86 @@ services:
       retries: 5
       start_period: 60s
       start_interval: 1s
+
+  # Temporal (phase 3). Three services, all stored in the one Postgres above: persistence in the database af_temporal and
+  # SQL visibility in af_temporal_visibility (no Elasticsearch, no auto-setup image). Versions and the upgrade rule:
+  # docs/agent-factory/deployment.md, "Temporal". The images are pinned by version and by digest like postgres (the digest
+  # wins; the tag documents it).
+  #
+  # The schema step: creates the schema of both databases on the first start and applies every newer versioned file on a
+  # later one, forward only; it exits when done and the server waits for that exit.
+  temporal-setup:
+    image: temporalio/admin-tools:1.32.2@sha256:4a95866efba29d7e17ab012df5232795e8b0ad0f7d5f9d1ec4df321f7792a754
+    # A one-shot job: never restarted by docker (a host reboot included); `docker compose up` runs it again every time.
+    restart: "no"
+    # Root only to read the secret file (mode 0600, owned by the host user); the script runs temporal-sql-tool as the
+    # image's user `temporal` (deploy/temporal/setup-schema.sh).
+    user: "0:0"
+    entrypoint: ["sh", "/etc/temporal/setup-schema.sh"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./temporal/setup-schema.sh:/etc/temporal/setup-schema.sh:ro
+    tmpfs:
+      # The password handover file between the root part and the `temporal` part of the script, removed as soon as it is
+      # read: in memory only, never in the layer or the host.
+      - /run/af-temporal-setup:mode=0700,size=1m
+    secrets:
+      - af_temporal
+
+  temporal:
+    image: temporalio/server:1.32.2@sha256:7bf69188a6232fea14869b9cef3d94aa82a1601d99517f7e86c71f22da4e0670
+    restart: unless-stopped
+    stop_grace_period: 30s
+    # Root only to read the secret file and write the config into tmpfs; the server runs as the image's user `temporal`
+    # (deploy/temporal/server-entrypoint.sh). The config template carries no password, the wrapper adds it in tmpfs.
+    user: "0:0"
+    entrypoint: ["sh", "/etc/temporal/server-entrypoint.sh"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      temporal-setup:
+        condition: service_completed_successfully
+    # AF_TEMPORAL_PORT (default 7233) is the frontend gRPC port on 127.0.0.1; never published on another address.
+    ports:
+      - target: 7233
+        published: "${AF_TEMPORAL_PORT:-7233}"
+        host_ip: 127.0.0.1
+        protocol: tcp
+    volumes:
+      - ./temporal/config.yaml.tmpl:/etc/temporal/config.yaml.tmpl:ro
+      - ./temporal/server-entrypoint.sh:/etc/temporal/server-entrypoint.sh:ro
+    tmpfs:
+      - /run/af-temporal:mode=0700,size=1m
+    secrets:
+      - af_temporal
+    healthcheck:
+      # The HTTP API of the frontend answers a request that needs the cluster record in the database, so "healthy" means a
+      # server that reached its persistence, not only an open port.
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:7243/api/v1/cluster-info"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+      start_interval: 1s
+
+  # The web UI: off unless the profile `ui` is asked for (docker compose --profile ui up -d). Port AF_TEMPORAL_UI_PORT
+  # (default 8233) on 127.0.0.1 only. It holds no data of its own and no secret.
+  temporal-ui:
+    image: temporalio/ui:2.58.1@sha256:ac3c13eddb4547d830991bb5eee93a5d97140134522b7297fdb2be1fe25ef925
+    profiles: ["ui"]
+    restart: unless-stopped
+    depends_on:
+      temporal:
+        condition: service_healthy
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+    ports:
+      - target: 8080
+        published: "${AF_TEMPORAL_UI_PORT:-8233}"
+        host_ip: 127.0.0.1
+        protocol: tcp
 
 volumes:
   pgdata:

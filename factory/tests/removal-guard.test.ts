@@ -34,6 +34,8 @@ const SHELL_ALLOWED: Record<string, string[]> = {
 	"tests/roles.test.ts": [`trap 'rm -f "$f"' EXIT`],
 	"deploy/postgres/entrypoint.sh": ['rm -f -- "$health_passfile.new"', 'rm -rf -- "$init_dir"'], // its own files in the container's tmpfs
 	"deploy/postgres/init/lib/bootstrap.sh": ['rm -f "$passfile"'],
+	"deploy/temporal/server-entrypoint.sh": ['rm -f "$config.new"'], // its own half-written config in the container's tmpfs
+	"deploy/temporal/setup-schema.sh": ['rm -f "$handover"'], // the password handover file in the container's tmpfs
 	"deploy/postgres/init/99-finish.sh": ['rm -f -- "$PGSERVICEFILE"'],
 	"tests/verify-init.test.ts": ['rm -f -- "\\$PGSERVICEFILE"'], // a regex that checks 99-finish.sh still contains the line above
 	"tests/interrupted-init.test.ts": [

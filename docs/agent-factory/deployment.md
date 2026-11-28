@@ -74,6 +74,11 @@ data volume `agent-factory_pgdata` and the network `agent-factory_default`. The 
 only (`AF_PG_PORT` changes the port). Restart policy `unless-stopped`. Idle memory of the running container: about
 50 MiB.
 
+Next to it the same compose file holds the Temporal services, started separately (see "Temporal server"): the
+one-shot schema step `temporal-setup` and the server `temporal` (`temporalio/server`, pinned by digest, published on
+`127.0.0.1:7233` only), and the web UI `temporal-ui`, which belongs to the compose profile `ui` and does not start unless
+that profile is asked for.
+
 Nothing else on the machine is touched: the stack neither uses nor removes other containers, volumes or networks.
 
 ## Install
@@ -105,9 +110,9 @@ Nothing else on the machine is touched: the stack neither uses nor removes other
 
    Back these files up apart from the database backup (see "Not covered"): without them a restored database cannot be
    reached by anyone but the bootstrap role of a scratch server.
-3. Start:
+3. Start the database (the Temporal services are started afterwards, see "Temporal server"):
 
-   `$env:AF_SECRETS_DIR = $secrets; & $proveVolume 'agent-factory'; docker compose -p agent-factory -f factory/deploy/compose.yml up -d`
+   `$env:AF_SECRETS_DIR = $secrets; & $proveVolume 'agent-factory'; docker compose -p agent-factory -f factory/deploy/compose.yml up -d postgres`
 
    The first start creates the roles and the `agent_factory` database (`factory/deploy/postgres/init/10-roles.sh`) and the
    role and databases of Temporal (`20-temporal.sh`, see "Adding Temporal to an existing installation"). The
@@ -480,7 +485,10 @@ Upgrade, in this order:
 
 8. Create the container of the new revision on the same volume, with the same secrets directory and port:
 
-   `& $proveVolume 'agent-factory'; docker compose -p agent-factory -f factory/deploy/compose.yml up -d`
+   `& $proveVolume 'agent-factory'; docker compose -p agent-factory -f factory/deploy/compose.yml up -d postgres`
+
+   (`up -d postgres` names the service on purpose: the file now also holds the Temporal services, which cannot start
+   on a volume that has no Temporal role yet. They are started by "Adding Temporal to an existing installation".)
 
 9. Wait for `healthy` (at most 3 minutes), then confirm that this is the new container on the old data before any
    client connects. Each line below stops with `refusing` when its fact is wrong; when one does, do not start any client
@@ -577,7 +585,7 @@ service again:
 
    `if ((docker inspect --format '{{json .Config.Labels}}' agent-factory-oneoff | ConvertFrom-Json).'com.docker.compose.oneoff' -ne 'True') { throw "refusing: not a one-off container" } else { docker rm agent-factory-oneoff }`
 
-   `& $proveVolume 'agent-factory'; docker compose -p agent-factory -f factory/deploy/compose.yml up -d`
+   `& $proveVolume 'agent-factory'; docker compose -p agent-factory -f factory/deploy/compose.yml up -d postgres`
 
    Then confirm as in step 9 (the record of step 4 exists only when step 4 was run before the update; without it, check
    the health, the entrypoint and `verify-init.ts --with-marker --without-temporal`). The new container needs the
@@ -601,7 +609,7 @@ same idempotent SQL (`factory/deploy/postgres/init/lib/temporal.sql`) the init s
    Temporal role). A stack made before the marker existed was recreated by "Upgrade of a running stack" above (do that
    first); a stack that already has the marker is recreated by the command of its step 8:
 
-   `$env:AF_SECRETS_DIR = $secrets; & $proveVolume 'agent-factory'; docker compose -p agent-factory -f factory/deploy/compose.yml up -d`
+   `$env:AF_SECRETS_DIR = $secrets; & $proveVolume 'agent-factory'; docker compose -p agent-factory -f factory/deploy/compose.yml up -d postgres`
 
    Wait until the container is `healthy`.
 
@@ -625,10 +633,76 @@ The command can be repeated at any time: when everything is in place it changes 
 by hand (an attribute of the role, a missing database, a wrong owner, a grant to PUBLIC) it puts it back. It also sets
 the role's password again from the secret file, so it is the way a changed `af_temporal` secret reaches the server.
 
+## Temporal server
+
+The Temporal server is three compose services next to Postgres. They hold no data: all of it is in the databases
+`af_temporal` (persistence) and `af_temporal_visibility` (visibility, SQL, no Elasticsearch) that "Adding Temporal to an
+existing installation" or the first start made. Their images are pinned by digest in `factory/deploy/compose.yml`, the
+way the Postgres image is:
+
+| Service | Image | Role |
+|---|---|---|
+| `temporal-setup` | `temporalio/admin-tools:1.32.2` (digest `sha256:4a95866e...`) | one-shot: creates and updates the schema of both databases, then exits |
+| `temporal` | `temporalio/server:1.32.2` (digest `sha256:7bf69188...`) | the server, frontend gRPC on `127.0.0.1:7233` |
+| `temporal-ui` | `temporalio/ui:2.58.1` (digest `sha256:ac3c13ed...`) | the web UI, only with the profile `ui`, `127.0.0.1:8233` |
+
+All ports are published on `127.0.0.1` only. `AF_TEMPORAL_PORT` and `AF_TEMPORAL_UI_PORT` change the two host ports (the
+same way `AF_PG_PORT` does for Postgres). The Python and TypeScript SDK of the application connects to
+`127.0.0.1:7233`. The stack creates no namespace: the application registers its own.
+
+**Start.** The `af_temporal` secret and the role and databases must exist (Install, or "Adding Temporal to an existing
+installation"). Then, from the repository root, with `AF_SECRETS_DIR` set as above:
+
+`docker compose -p agent-factory -f factory/deploy/compose.yml up -d temporal`
+
+This starts Postgres if it is not running, waits until it is `healthy`, runs the schema step to its end, and only then
+starts the server, which becomes `healthy` when its HTTP API answers a request that needs the cluster record in the
+database. `docker compose ... up -d` without a service name starts everything but the UI. The UI is started with the
+profile:
+
+`docker compose -p agent-factory -f factory/deploy/compose.yml --profile ui up -d temporal-ui`
+
+**The schema step** runs at every `up`, not only at the first. `temporal-sql-tool` creates the versioning tables when
+they are missing and then applies every versioned file above the version stored in the database, for the persistence
+database and then the visibility database. It is forward only (never `--overwrite`, which drops the tables) and does
+nothing when the database is at the version of the image, so it is safe to run again after a restart or a restore. If it
+fails the server does not start, and `docker compose ... logs temporal-setup` says why.
+
+**Passwords.** The server's configuration (`factory/deploy/temporal/config.yaml.tmpl`) holds a marker instead of the
+password; the wrapper writes the real configuration into tmpfs from the secret file, then runs the server as the image's
+unprivileged user. The schema tool takes its password only from a flag or the variable `SQL_PASSWORD` (it does not read a
+passfile); the script sets the variable on the one command that needs it, so no password is in `docker inspect`, in the
+container's environment or in any command line. `factory/tests/temporal-compose.test.ts` scans all three.
+
+**`numHistoryShards` is 512 and is never changed.** The number is written into the persistence database at the first
+start and cannot be changed afterwards, and the server refuses to start when the stored value differs from the
+configuration. 512 is the value the Temporal project recommends for a small production cluster ("Scaling Temporal: the
+basics", temporal.io/blog; the development default is 4); the comment in `config.yaml.tmpl` names the source. A different
+number means a new cluster in a new database.
+
+**Restart and reboot.** `docker compose restart temporal` and a stop of the whole stack followed by a start of every
+container started at once with no order (what a reboot does: Docker starts the containers with `unless-stopped` together,
+without the `depends_on` order) both leave the workflow history in place. A server that is started before Postgres can
+answer exits, and the restart policy starts it again until it does not. `factory/tests/temporal-compose.test.ts` runs a
+workflow, does each of the two, and reads the history back. A reboot of the machine itself and a restart of Docker
+Desktop were not tested here (the Docker daemon was not to be restarted).
+
+**Upgrade.** The rule (`audit.md`) is one minor version at a time, each at its latest patch: from 1.32 to 1.33, never
+1.32 to 1.34. For each step, in this order: take a backup ("Backup"), set the new image tags and digests of
+`temporal-setup`, `temporal` and `temporal-ui` in `compose.yml`, then run `up -d temporal`. The order of the work is the
+order of the compose dependencies: the persistence schema, then the visibility schema (both by `temporal-setup` with the
+new admin-tools image), then the server binary. The schema tools are forward only, so a rollback is the binary only: put
+the previous server tag back and run `up -d temporal` again; the schema stays at the newer version. If the previous
+binary does not start on it, the way back is a restore from the backup taken before the step. `numHistoryShards` is not
+touched by an upgrade.
+
+**Recovery order.** PostgreSQL restored and healthy, then the schema step, then the server, then workers and the API;
+`recovery.md` ("Temporal server") has the steps, and "Temporal in backup and recovery" below says what the backup holds.
+
 ## Temporal in backup and recovery
 
-Only the Postgres side of Temporal is covered; the Temporal server (its container, schema tool and workers) is not part
-of this package. When the server holds both Temporal databases the backup carries them too, in this order: the
+Only the Postgres side of Temporal is backed up: the Temporal server keeps no state of its own outside the two
+databases, so its container and its schema step are made again from `compose.yml` ("Temporal server" above). When the server holds both Temporal databases the backup carries them too, in this order: the
 application dump first, then each of `af_temporal` and `af_temporal_visibility`, dumped as the role `af_temporal` with
 `pg_dump -Fc`, each in its own snapshot. The files are `af-<UTC stamp>-<8 hex>.<database>.dump` and a `.sha256` file
 for each, next to the application dump, and the manifest gets a `temporal` section with the databases and their row
@@ -644,8 +718,8 @@ does not match is refused by content, like the application dump.
 The three dumps are not one snapshot: the application database and the two Temporal databases are read at slightly
 different moments, so after a restore the workflow state that Temporal holds and the application tables it refers to
 can differ by what happened in between. Reconcile them after the restore as `database.md` ("The Temporal databases")
-describes, before the Temporal server is started on the restored project. The Temporal server itself is not restored by
-these tools.
+describes, before the Temporal server is started on the restored project. These tools restore the databases and do not
+start the Temporal server; its place in the recovery order is in "Temporal server" above and in `recovery.md`.
 
 ## Backup
 
@@ -749,7 +823,8 @@ injected clock, so nothing waits in real time. `npm --prefix factory run typeche
 - Encryption of backups and of the secrets directory (the secrets are protected by Windows file rights only).
 - An off-host copy: backups and secrets are on the same machine and the same disk as the data.
 - Retention: old backups are never deleted.
-- The Temporal server itself (its container, schema tool and workers): not part of this package. Only its Postgres side
-  is covered (the role, the two databases, their backup and restore): "Adding Temporal to an existing installation" and
-  "Temporal in backup and recovery".
-- Reboot and Docker restart behaviour: not tested.
+- Temporal workers and the application's workflows: not part of this package. The Temporal server, its schema step and
+  its Postgres side are covered ("Temporal server", "Adding Temporal to an existing installation" and "Temporal in
+  backup and recovery").
+- Reboot and Docker restart behaviour of the Postgres container alone: not tested. The Temporal stack's restart and
+  reboot cases are tested ("Temporal server").

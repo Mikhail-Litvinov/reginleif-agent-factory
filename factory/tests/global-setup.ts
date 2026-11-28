@@ -34,12 +34,12 @@ export const globalSetup = async (): Promise<void> => {
 		// Registered before the stack exists: removing nothing is a no-op.
 		cleanups.add(() => removeOwned(runId));
 		const info: SharedStackInfo = { project, runId, secretsDir, port };
-		await runChecked("docker", stackArgs(info, "up", "-d"), { env: stackEnv(info) });
+		await runChecked("docker", stackArgs(info, "up", "-d", "postgres"), { env: stackEnv(info) });
 		process.env[SHARED_STACK_ENV] = JSON.stringify(info);
 		// The bench stack (own secrets, run id and port; test pg_hba.conf), up next to the shared one; its health is awaited by
 		// the first bench file, like the shared stack's.
 		const bench = await newBenchStackInfo(cleanups);
-		await runChecked("docker", stackArgs(bench, "-f", BENCH_COMPOSE_FILE, "up", "-d"), { env: benchStackEnv(bench) });
+		await runChecked("docker", stackArgs(bench, "-f", BENCH_COMPOSE_FILE, "up", "-d", "postgres"), { env: benchStackEnv(bench) });
 		process.env[BENCH_STACK_ENV] = JSON.stringify(bench);
 	} catch (error) {
 		try {
