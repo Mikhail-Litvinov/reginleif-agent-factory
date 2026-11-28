@@ -51,6 +51,14 @@ connections, so the bench uses the same binary from GitHub: asset `temporal-test
 (`AF_TEMPORAL_TEST_CACHE` moves the folder, `AF_TEMPORAL_TEST_SERVER` names the file). With the file there the run is offline; without
 it the bench falls back to the SDK's cached download into that same folder with a 3650 day ttl, which needs the network once.
 
+The bench pins that binary by sha256 (`PINNED_TEST_SERVER_SHA256` in `factory/tests/temporal/bench.ts`). A file with another hash is
+refused before any worker starts; the error names the file and both hashes. The pin for `win32-x64` (`temporal-test-server.exe`,
+61239296 bytes) is `36676b457046032de40307e23f2bcd372ae419d993928047a9f58c96e833f2f8`. Its source is the GitHub release 1.41.1 of
+`temporalio/sdk-java`, asset `temporal-test-server_1.41.1_windows_amd64.zip`. Install: download that zip from the release page, unpack
+it into a new empty folder, copy `temporal-test-server.exe` to `~/.agent-factory/temporal-test-server/`, then run
+`Get-FileHash -Algorithm SHA256` on it and check that the hash equals the pin. A platform with no pin is refused until its hash is
+added to the map. The unit test `factory/tests/temporal/test-server-pin.test.ts` covers the accept, refuse and unpinned cases.
+
 ## State, decision and queue checks
 
 Table-driven where the rule is data; each can fail (a cell removed, a check dropped).
