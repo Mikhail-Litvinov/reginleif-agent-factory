@@ -1,0 +1,163 @@
+# Envoy configuration of the TLS front (phase 3, package 49). The wrapper deploy/proxy/entrypoint.sh renders it into tmpfs,
+# replacing the API port marker (it stands once, in the cluster "api" below) by the API port of the host; everything else
+# is read as written.
+# Rules and the reasons: docs/agent-factory/security.md (S6, T25, D28) and docs/agent-factory/deployment.md, "TLS proxy".
+#
+#  - Listener "temporal" (container port 7234): mTLS. A connection without a client certificate from the proxy's CA is
+#    refused in the handshake. The caller's identity is the URI SAN of its certificate; only the identities named below are
+#    allowed, and only the methods named for them. Everything else is answered PERMISSION_DENIED (HTTP 403, gRPC status 7).
+#  - Listener "api" (container port 8443): TLS with the proxy's own server certificate and no client certificate; the API
+#    authenticates by device token (security.md D5). Reaches the API process on the host loopback.
+#  - Admin interface: 127.0.0.1 inside the container only (health check), never published.
+static_resources:
+  listeners:
+    - name: temporal
+      address:
+        socket_address: { address: 0.0.0.0, port_value: 7234 }
+      filter_chains:
+        - transport_socket:
+            name: envoy.transport_sockets.tls
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
+              require_client_certificate: true
+              common_tls_context:
+                alpn_protocols: ["h2"]
+                # TLS 1.2 is the floor of NIST SP 800-52 rev. 2; TLS 1.3 is what current gRPC clients negotiate anyway.
+                tls_params: { tls_minimum_protocol_version: TLSv1_2 }
+                tls_certificates:
+                  - certificate_chain: { filename: /run/af-proxy/server.crt }
+                    private_key: { filename: /run/af-proxy/server.key }
+                validation_context:
+                  trusted_ca: { filename: /run/af-proxy/ca.crt }
+          filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: temporal
+                codec_type: HTTP2
+                access_log:
+                  - name: envoy.access_loggers.stdout
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
+                      log_format:
+                        text_format_source:
+                          inline_string: "temporal peer=%DOWNSTREAM_PEER_URI_SAN% path=%REQ(:PATH)% http=%RESPONSE_CODE% grpc=%GRPC_STATUS% flags=%RESPONSE_FLAGS%\n"
+                route_config:
+                  name: temporal
+                  virtual_hosts:
+                    - name: temporal
+                      domains: ["*"]
+                      routes:
+                        - match: { prefix: "/" }
+                          # No route timeout: a poll is a long-lived call (the server holds it up to about a minute) and the
+                          # default of 15 s would cut it.
+                          route: { cluster: temporal, timeout: 0s }
+                http_filters:
+                  - name: envoy.filters.http.rbac
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.rbac.v3.RBAC
+                      rules:
+                        # ALLOW with named policies: a call that matches no policy is denied (default deny).
+                        action: ALLOW
+                        policies:
+                          # A worker (security.md S6): the activity task calls of its queue, nothing that starts, changes or
+                          # decides a workflow. "authenticated.principal_name" is the URI SAN of the client certificate.
+                          worker-activity-calls:
+                            permissions:
+                              - or_rules:
+                                  rules:
+                                    # The calls the TypeScript worker itself makes around its polling (observed through the proxy log):
+                                    # the server's capabilities, the namespace's capabilities, and the worker's own shutdown notice.
+                                    - url_path: { path: { exact: /temporal.api.workflowservice.v1.WorkflowService/GetSystemInfo } }
+                                    - url_path: { path: { exact: /temporal.api.workflowservice.v1.WorkflowService/DescribeNamespace } }
+                                    - url_path: { path: { exact: /temporal.api.workflowservice.v1.WorkflowService/ShutdownWorker } }
+                                    - url_path: { path: { exact: /temporal.api.workflowservice.v1.WorkflowService/PollActivityTaskQueue } }
+                                    - url_path: { path: { exact: /temporal.api.workflowservice.v1.WorkflowService/RespondActivityTaskCompleted } }
+                                    - url_path: { path: { exact: /temporal.api.workflowservice.v1.WorkflowService/RespondActivityTaskCompletedById } }
+                                    - url_path: { path: { exact: /temporal.api.workflowservice.v1.WorkflowService/RespondActivityTaskFailed } }
+                                    - url_path: { path: { exact: /temporal.api.workflowservice.v1.WorkflowService/RespondActivityTaskFailedById } }
+                                    - url_path: { path: { exact: /temporal.api.workflowservice.v1.WorkflowService/RespondActivityTaskCanceled } }
+                                    - url_path: { path: { exact: /temporal.api.workflowservice.v1.WorkflowService/RespondActivityTaskCanceledById } }
+                                    - url_path: { path: { exact: /temporal.api.workflowservice.v1.WorkflowService/RecordActivityTaskHeartbeat } }
+                                    - url_path: { path: { exact: /temporal.api.workflowservice.v1.WorkflowService/RecordActivityTaskHeartbeatById } }
+                            principals:
+                              - authenticated: { principal_name: { prefix: "spiffe://agent-factory/worker/" } }
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+    - name: api
+      address:
+        socket_address: { address: 0.0.0.0, port_value: 8443 }
+      filter_chains:
+        - transport_socket:
+            name: envoy.transport_sockets.tls
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
+              common_tls_context:
+                alpn_protocols: ["h2", "http/1.1"]
+                tls_params: { tls_minimum_protocol_version: TLSv1_2 }
+                tls_certificates:
+                  - certificate_chain: { filename: /run/af-proxy/server.crt }
+                    private_key: { filename: /run/af-proxy/server.key }
+          filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: api
+                codec_type: AUTO
+                access_log:
+                  - name: envoy.access_loggers.stdout
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
+                      log_format:
+                        text_format_source:
+                          inline_string: "api method=%REQ(:METHOD)% path=%REQ(:PATH)% http=%RESPONSE_CODE% flags=%RESPONSE_FLAGS%\n"
+                route_config:
+                  name: api
+                  virtual_hosts:
+                    - name: api
+                      domains: ["*"]
+                      routes:
+                        - match: { prefix: "/" }
+                          # 0s: the API streams events; the API sets its own limits (api.md).
+                          route: { cluster: api, timeout: 0s }
+                http_filters:
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+  clusters:
+    - name: temporal
+      type: STRICT_DNS
+      dns_lookup_family: V4_ONLY
+      connect_timeout: 5s
+      typed_extension_protocol_options:
+        envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+          "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+          explicit_http_config:
+            http2_protocol_options: {}
+      load_assignment:
+        cluster_name: temporal
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: temporal, port_value: 7233 }
+    - name: api
+      type: STRICT_DNS
+      dns_lookup_family: V4_ONLY
+      connect_timeout: 5s
+      load_assignment:
+        cluster_name: api
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    # The API is a host process on the loopback (T25); the container reaches the host through the
+                    # host-gateway entry of the compose service.
+                    socket_address: { address: host.docker.internal, port_value: __AF_API_PORT__ }
+
+admin:
+  address:
+    socket_address: { address: 127.0.0.1, port_value: 9901 }

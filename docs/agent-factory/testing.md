@@ -274,9 +274,12 @@ design, not the suite.
 | S5 ComfyUI job found after restart | queue a job, restart the worker before completion, look up by prompt id | the same job is found in queue or history and collected once | job lost, or queued twice. Needs ComfyUI running |
 | S6 worker credentials cannot decide | with the worker's certificate and token: start a workflow, send an Update, poll workflow tasks, call a decision route; then poll and complete an activity of its own queue; then run a workflow with server steps and read its history (D28) | the first four are refused; polling and completing succeed; the history has no activity task of the `control` queue | any of the first four is accepted, or polling is refused, or a server step appears as an activity task. Also runs with a connection that has no certificate: refused |
 
-State: S1, S2 and S4 are confirmed (S1 without a heartbeat timeout; S2 and S4 with fake agents). S6 is confirmed for the
-methods and the missing certificate; the D28 part has not been run and belongs to phase 3, where the first workflow
-with server steps exists (Temporal comes after the registry, phase 2).
+State: S1, S2 and S4 are confirmed (S1 without a heartbeat timeout; S2 and S4 with fake agents). S6 runs as the bench
+test `factory/tests/proxy.test.ts` against the real proxy of `factory/deploy/proxy/` (`deployment.md`, "TLS proxy"), with
+certificates made by the documented command: the four refused methods, polling and completing an activity of the
+worker's own queue, the refused missing certificate and the refused certificate of another CA, the owner's controls on
+the loopback port, and the D28 part (a workflow of server steps on the queue `control` leaves no activity task in its
+history). A proof that must be repeated is the same test file; there is no separate script.
 
 Each proof also runs a control: the same call with the owner or Control Worker identity must succeed, so a refusal is not a
 broken harness.
