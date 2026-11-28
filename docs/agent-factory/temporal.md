@@ -19,7 +19,9 @@ state table, same operation matrix), with dangerous operations and the physical 
 its own. The outbox relay is a loop in the Control Worker process, not a workflow. Priorities, queues of
 tasks and concurrency limits (spec 17) are checked in `SelectAgent` against PostgreSQL, not by a second scheduler. The
 relay starts a workflow only after it reads the task's state in PostgreSQL: a task in a final state, or one whose
-workflow already ran, never starts again, so an expired history cannot restart it (architecture, state ownership).
+workflow already ran, never starts again, so an expired history cannot restart it (architecture, state ownership). The rows
+of one task are delivered in insertion order, a delivery has a limit of attempts, and a `sent` row is closed to `done` once
+PostgreSQL shows its effect: see "Delivery order" below.
 
 `TaskWorkflow` keeps in memory: status, `revision`, counters (`attempt`, `rework`, `autoFix`), `executionId` and machine of
 the current run (empty when no run is alive), worktree reference, `pauseRequested`, `stopping`, `endUnconfirmed`,
@@ -242,7 +244,7 @@ an activity reaches it only on a heartbeat, so the workflow never relies on it f
 
 ## Operations (spec 5.3)
 
-All operations are Updates delivered by the outbox relay; the Update id is the outbox id. Ids are `approve`, `reject`,
+All operations are Updates delivered by the outbox relay; the Update id is the decision id (one decision has exactly one `deliver_decision` outbox row, 1:1 by `decision_id`). Ids are `approve`, `reject`,
 `request_changes`, `cancel`, `pause`, `resume`, `revise_requirements`, `add_feedback`, `change_priority`,
 `resolve_block`, `force_close`, `allow_agent`. They are exactly the decision kinds of `task_decisions` (database.md) except `physical_decision` (D34): the chief
 engineer's routine physical decision is applied at insert on the standing or physical task, is never an Update and has
@@ -348,6 +350,40 @@ AWAITING_APPROVAL and PAUSED wait for the owner by design; BLOCKED waits for its
 the owner when `blockHandler = owner`, and the owner can always resolve it; the owner's cancel is always possible, so
 none is a dead end. CANCELLING waits for the machine and has `force_close` for a machine that never returns.
 
+## Delivery order
+
+The relay ([modules.md](modules.md), `control/outbox-relay.ts`) leases rows with `for update skip locked` on the database
+clock and delivers at least once; the repeat is harmless because Temporal and `handled` deduplicate by the decision id.
+Three rules sit on top of that, and the settings they use are chosen, not measured (no measurement run exists; they are
+`settings` rows with defaults in code, read at relay start).
+
+**Per-task order.** A row with a `task_id` is claimable only when no older row of the same task (lower `seq`) is `pending`
+(leased or waiting for its retry time) or `failed`. The rule is in the claim query itself, so two relays on one database
+cannot deliver two rows of one task out of order, and one claim takes one row per task. A `sent` or `done` older row does
+not block: `sent` already reached Temporal, and what follows it is ordered by the workflow's own mutex. Rows without a
+task id are not ordered.
+
+**Retry limit.** A failed delivery releases the row with a delay and counts the claim in `attempts`. The delay is
+`min(relay.retryMaxSeconds, relay.retrySeconds x 2^(attempts - 1))`: 30 s, 60 s, 120 s, 240 s, 480 s, then 600 s. When
+`attempts` reaches `relay.maxAttempts` (8, about 35 minutes of trying) the row goes to `failed` and the relay raises one
+notification `retry_limit_exceeded` for it (dedup key `outbox-failed:<outbox id>`, the row's `task_id`), so the owner sees
+a stuck delivery once, not on every round; if the notice cannot be written the row is released instead, never failed
+unseen. A row that no retry can fix (an unknown kind, a missing task or decision, a `deliver_decision` row without them) takes the same road at once, on its first claim. `failed` is not
+retried by the relay, and it blocks the later rows of its task, because delivering them past a lost one would break the
+order. The owner acts through administration: closes the row (`done`) when its effect is not needed, or puts it back to
+`pending` to try again (one open notice per row, so a second failure does not raise another until the first is resolved).
+Defaults: `relay.leaseSeconds` 60, `relay.retrySeconds` 30, `relay.maxAttempts` 8, `relay.retryMaxSeconds` 600.
+A lease that expired (a relay that died) is taken over by the next claim and counts as an attempt as well.
+
+**Sent and done.** `sent` is not final for the two kinds whose effect PostgreSQL can show: the index of database.md
+(`next_attempt_at where state in ('pending','sent')`) keeps `sent` rows in the relay's working set, the cleanup rule keeps
+only `done` rows, and the relay "re-reads an unresolved decision" (`RecordDecisionOutcome`, above). So `start_workflow`
+and `deliver_decision` end `sent` when Temporal accepted them, and a sweep closes them to `done` when PostgreSQL shows the
+effect: for `start_workflow` the task is no longer `CREATED`, has a `workflow_run_id`, or is gone; for `deliver_decision`
+the decision is `applied` or `refused`, or is gone. An unconfirmed `sent` row is looked at again after `relay.retrySeconds`
+(`next_attempt_at`), never delivered again by the sweep. `wake` (a Signal), `stop_run` and `cleanup` (an activity return)
+have nothing further to confirm and end `done` directly, as does `notify`.
+
 ## Continue-As-New
 
 Triggered when `continueAsNewSuggested` is true or `history.maxEvents` is passed, only at a quiet point: no activity in
@@ -377,8 +413,8 @@ workflows resume; activity timers fire as recorded, so a completed attempt with 
 collected by the lookup, not repeated. External effects retry only after the target check (`external`).
 
 **D. PostgreSQL down.** (1) API refuses mutations, nothing is confirmed. (2) Server steps fail as `infra` and retry;
-`PersistTaskEvent` is idempotent by event id. (3) After recovery the relay re-sends outbox rows in `pending`; a row
-already applied is recognised by `handled` (or by the unique key), so no decision is lost or doubled. (4) The projection
+`PersistTaskEvent` is idempotent by event id. (3) After recovery the relay re-sends outbox rows in `pending` (and closes `sent` rows once their effect is visible,
+"Delivery order"); a row already applied is recognised by `handled` (or by the unique key), so no decision is lost or doubled. (4) The projection
 is rebuilt from the workflow's own events if a row version lags: the workflow is the writer.
 
 **E. Agent dies while changing code.** (1) `MonitorExecution` returns `died` or `unclear` from the lookup table. (2)

@@ -166,7 +166,7 @@ the registry exists.
 | `F/workflows/task.ts` | TaskWorkflow (queue `control`, id `task-<uuid>`): states, 12 update kinds, signal `wake` | contracts |
 | `F/workflows/machine-liveness.ts` | MachineLivenessWorkflow, a Schedule; marks machines offline | contracts |
 | `F/control/activities/` | PrepareTask, ResolveDependencies, SelectAgent, ReadDecision, RecordDecisionOutcome, PersistTaskEvent, NotifyUser, CreateChildTasks, RequestReview, LoadSettings. All are local activities (D28) | repo |
-| `F/control/outbox-relay.ts` | Loop in the Control Worker: lease, start or update the workflow, mark sent; press once (`relay-press-once`) | repo |
+| `F/control/outbox-relay.ts` | Loop in the Control Worker: lease (one row per task at a time, in order), start or update the workflow, mark sent, close `sent` rows to `done` once PostgreSQL shows the effect, fail a row after `relay.maxAttempts` with one notice; press once (`relay-press-once`) | repo |
 | `F/control/routing.ts` | SelectAgent stages: hard filters, ranking, stored decision | repo, adapters (capabilities as data only) |
 | `F/tests/replay/` | Saved histories replayed against current workflow code | workflows |
 | `F/tests/fakes/` | Fake machine activities and fake adapter for lifecycle runs | contracts |

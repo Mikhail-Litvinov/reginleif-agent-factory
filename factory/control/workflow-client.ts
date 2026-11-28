@@ -1,6 +1,7 @@
 // WorkflowClient (modules.md Phase 3): the API and the outbox relay reach Temporal only through this interface. An
 // Update carries only a decision id (D-rule: the workflow reads the content from PostgreSQL by a local activity), and
-// the Update id equals the outbox row id, so a repeat of the same row is the same Update (temporal.md "handled").
+// the Update id is the decision id (one decision has one deliver_decision outbox row, 1:1 by decision_id), so a repeat of
+// the same row is the same Update (temporal.md "handled").
 import { Client, WorkflowIdConflictPolicy, WorkflowIdReusePolicy } from "@temporalio/client";
 
 export const CONTROL_QUEUE = "control";
