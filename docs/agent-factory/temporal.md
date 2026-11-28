@@ -269,7 +269,9 @@ stored outcome and has no effect. A refusal inside the handler returns the refus
 workflow failure), so Update failures mean only faults.
 
 Refusal codes: `not_allowed_in_state`, `revision_stale`, `actor_not_allowed`, `already_resolved`, `block_kind_mismatch`,
-`block_handled`, `task_closed`. The first four, `block_kind_mismatch` and `block_handled` (a `resolve_block` of the
+`block_handled`, `task_closed`, `invalid_payload`. `invalid_payload` is a `change_priority` whose `priority` is not a finite
+number or an `allow_agent` whose `agent_id` is not a non-empty string; the validator sees only the decision id, so the
+handler finds it after `ReadDecision`, as the last check, after the state, block kind and revision checks. The first four, `block_kind_mismatch` and `block_handled` (a `resolve_block` of the
 chief engineer after the owner took the block, or after `call_owner` made the owner the handler; the loser of the race
 by row version) come from the handler; an engineer's choice that raises a cost or does a dangerous operation is refused
 `owner_only` by the API before any outbox row exists (HTTP 422, not a workflow refusal). `task_closed` is written by the relay when

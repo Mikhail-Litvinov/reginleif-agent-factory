@@ -23,7 +23,8 @@ section 12. Tables: [database.md](database.md).
   `/decisions/{id}`.
 - `applied` and `refused`: seen only by reading the decision; `refused` carries `refusal_reason` and notifies the owner.
   The reasons are `not_allowed_in_state`, `revision_stale`, `actor_not_allowed`, `already_resolved`,
-  `block_kind_mismatch`, `block_handled` (a second resolution of a block that lost a race) and `task_closed`; they are
+  `block_kind_mismatch`, `block_handled` (a second resolution of a block that lost a race), `task_closed` and `invalid_payload` (a malformed
+  `change_priority` or `allow_agent` value that the API accepted in form but the workflow cannot apply); they are
   refusals recorded by the workflow, never HTTP errors. The API refuses `block_handled` at once, as an HTTP error, only when
   its own read already shows the block resolved or handed over (below, Who handles a block).
 - Creates without a workflow decision (projects, agents, tokens, dependencies) answer 201 with the row; a task answers

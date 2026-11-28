@@ -102,6 +102,7 @@ const rejects = async (p: Promise<unknown>, type: string) =>
 	assert.rejects(p, (e: { type?: string; nonRetryable?: boolean }) => e.type === type && e.nonRetryable === true);
 
 const repoOf = (edges: Record<string, string[]>, statuses: Record<string, string> = {}) => ({
+	projects: { get: async (id: string) => (id === "p" ? { id, repositoryUrl: "https://example.invalid/repo.git", defaultBranch: "main" } : undefined) },
 	tasks: {
 		get: async (id: string) => (id === "missing" ? undefined : { id, projectId: "p", title: "T", description: null, priority: 1, status: statuses[id] ?? "READY" }),
 		getRevision: async (_id: string, n: number) => (n === 1 ? { requirements: "r", acceptanceCriteria: [], constraints: {} } : undefined),
@@ -112,13 +113,18 @@ const repoOf = (edges: Record<string, string[]>, statuses: Record<string, string
 test("PrepareTask returns the snapshot; unknown task or revision is non-retryable", async () => {
 	const ok = await PrepareTask(repoOf({}), { taskId: "t", revision: 1 });
 	assert.equal(ok.requirements, "r");
+	assert.equal(ok.repositoryUrl, "https://example.invalid/repo.git");
+	assert.equal(ok.defaultBranch, "main");
 	await rejects(PrepareTask(repoOf({}), { taskId: "missing", revision: 1 }), UNKNOWN_TASK);
 	await rejects(PrepareTask(repoOf({}), { taskId: "t", revision: 9 }), UNKNOWN_TASK);
 });
 
 test("ResolveDependencies splits open from accepted; a cycle is refused non-retryably", async () => {
 	const r = await ResolveDependencies(repoOf({ t: ["done", "wait"] }, { done: "ACCEPTED" }), { taskId: "t" });
-	assert.deepEqual(r, { open: ["wait"], satisfied: ["done"] });
+	assert.deepEqual(r, { open: ["wait"], satisfied: ["done"], failed: [] });
+	// D15: a dependency that ended in a final state other than ACCEPTED is `failed`, never `open`.
+	const ended = await ResolveDependencies(repoOf({ t: ["a", "b", "c", "d"] }, { a: "REJECTED", b: "CANCELLED", c: "FAILED", d: "ACCEPTED" }), { taskId: "t" });
+	assert.deepEqual(ended, { open: [], satisfied: ["d"], failed: ["a", "b", "c"] });
 	await rejects(ResolveDependencies(repoOf({ t: ["u"], u: ["v"], v: ["t"] }), { taskId: "t" }), DEPENDENCY_CYCLE);
 	assert.deepEqual(await findCycle(async (id) => ({ a: ["b"], b: ["a"] } as Record<string, string[]>)[id] ?? [], "a"), ["a", "b", "a"]);
 	assert.equal(await findCycle(async (id) => ({ a: ["b", "c"], b: ["c"] } as Record<string, string[]>)[id] ?? [], "a"), null);

@@ -172,7 +172,7 @@ describe("ReadDecision refusals (stub rows)", () => {
 	});
 
 	test("every refusal code is a code the handler can name", () => {
-		const named: RefusalCode[] = ["not_allowed_in_state", "revision_stale", "actor_not_allowed", "already_resolved", "block_kind_mismatch", "block_handled", "task_closed"];
+		const named: RefusalCode[] = ["not_allowed_in_state", "revision_stale", "actor_not_allowed", "already_resolved", "block_kind_mismatch", "block_handled", "task_closed", "invalid_payload"];
 		assert.deepEqual([...refusalCodes], named);
 	});
 });

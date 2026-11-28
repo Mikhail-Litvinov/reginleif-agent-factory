@@ -16,15 +16,20 @@ export interface PreparedTask {
 	requirements: string | null;
 	acceptanceCriteria: unknown;
 	constraints: unknown;
+	/** Where a run's worktree is cut from: the project's repository and default branch (null without a project). */
+	repositoryUrl: string | null;
+	defaultBranch: string | null;
 }
 
-export const PrepareTask = async (repo: Pick<Repo, "tasks">, { taskId, revision }: PrepareTaskInput): Promise<PreparedTask> => {
+export const PrepareTask = async (repo: Pick<Repo, "tasks" | "projects">, { taskId, revision }: PrepareTaskInput): Promise<PreparedTask> => {
 	const task = await repo.tasks.get(taskId);
 	if (!task) throw ApplicationFailure.nonRetryable(`unknown task ${taskId}`, UNKNOWN_TASK);
 	const rev = await repo.tasks.getRevision(taskId, revision);
 	if (!rev) throw ApplicationFailure.nonRetryable(`unknown revision ${revision} of task ${taskId}`, UNKNOWN_TASK);
+	const project = task.projectId === null ? null : await repo.projects.get(task.projectId);
 	return {
 		taskId, revision, projectId: task.projectId, title: task.title, description: task.description, priority: task.priority,
 		requirements: rev.requirements, acceptanceCriteria: rev.acceptanceCriteria, constraints: rev.constraints,
+		repositoryUrl: project?.repositoryUrl ?? null, defaultBranch: project?.defaultBranch ?? null,
 	};
 };
