@@ -33,7 +33,7 @@ const SHELL_ALLOWED: Record<string, string[]> = {
 	"deploy/lib.ts": [`trap 'rm -f "$f"' EXIT`], // the passfile script deletes its own mktemp file
 	"tests/roles.test.ts": [`trap 'rm -f "$f"' EXIT`],
 	"deploy/postgres/entrypoint.sh": ['rm -f -- "$health_passfile.new"', 'rm -rf -- "$init_dir"'], // its own files in the container's tmpfs
-	"deploy/postgres/init/10-roles.sh": ['rm -f "$passfile"'],
+	"deploy/postgres/init/lib/bootstrap.sh": ['rm -f "$passfile"'],
 	"deploy/postgres/init/99-finish.sh": ['rm -f -- "$PGSERVICEFILE"'],
 	"tests/verify-init.test.ts": ['rm -f -- "\\$PGSERVICEFILE"'], // a regex that checks 99-finish.sh still contains the line above
 	"tests/interrupted-init.test.ts": [

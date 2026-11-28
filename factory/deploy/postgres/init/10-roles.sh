@@ -15,15 +15,8 @@
 # superuser; the migration step needs nothing more for it.
 
 # The entrypoint sources this file when it is not executable (a Windows bind mount), so no `exit` here.
-af_password() {
-	local name="$1" value
-	[ -s "/run/secrets/$name" ] || { echo "init: secret $name is missing or empty" >&2; return 1; }
-	value=$(<"/run/secrets/$name")
-	case "$value" in
-		*[!A-Za-z0-9_-]*) echo "init: secret $name may hold only A-Z a-z 0-9 _ -" >&2; return 1 ;;
-	esac
-	REPLY="$value"
-}
+# af_password and af_psql_bootstrap are shared with 20-temporal.sh.
+. /docker-entrypoint-initdb.d/lib/bootstrap.sh
 
 af_init_roles() {
 	local migrator api control backup reader
@@ -60,24 +53,6 @@ af_init_roles() {
 			"ALTER DEFAULT PRIVILEGES FOR ROLE af_migrator IN SCHEMA public GRANT SELECT ON TABLES TO af_backup;" \
 			"ALTER DEFAULT PRIVILEGES FOR ROLE af_migrator IN SCHEMA public GRANT SELECT ON SEQUENCES TO af_backup;"
 	} | af_psql_bootstrap
-}
-
-# psql as the bootstrap role with its own passfile (mode 0600, removed on return). The entrypoint wrapper
-# (../entrypoint.sh) exports no real password variable, only the path of its libpq service file, which 99-finish.sh
-# removes at the end; this passfile is separate so the role statements do not depend on that file (libpq prefers the
-# service file's password where both exist; both hold the same one). A passfile path is a path, not a secret.
-# The passfile lives in the wrapper's tmpfs directory AF_INIT_DIR, which the wrapper's EXIT trap removes on every way out
-# (a signal or a failing step between the write and the removal below included); it is never made anywhere else.
-af_psql_bootstrap() {
-	local passfile status
-	af_password af_bootstrap || return 1
-	[ -n "${AF_INIT_DIR:-}" ] && [ -d "$AF_INIT_DIR" ] || { echo "init: AF_INIT_DIR (the wrapper's temporary directory) is not set" >&2; return 1; }
-	passfile=$(umask 077 && mktemp "$AF_INIT_DIR/pgpass.XXXXXX") || return 1
-	printf '*:*:*:%s:%s\n' "$POSTGRES_USER" "$REPLY" > "$passfile"
-	( unset PGPASSWORD; PGPASSFILE="$passfile" exec psql -v ON_ERROR_STOP=1 --quiet --no-psqlrc -w --username "$POSTGRES_USER" --dbname postgres )
-	status=$?
-	rm -f "$passfile"
-	return $status
 }
 
 af_init_roles

@@ -19,13 +19,17 @@ import { basename, dirname, join, resolve } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { parseCliArgs, reportCliFailure } from "../cli-args.ts";
 import { createSecrets } from "../setup-secrets.ts";
-import { MANIFEST_FORMAT, streamDump, type Manifest } from "./backup.ts";
+import { applyTemporalSql } from "../bootstrap-temporal.ts";
+import { TEMPORAL_DATABASES } from "../init-postconditions.ts";
+import { MANIFEST_FORMAT, streamDump, type DumpFile, type Manifest } from "./backup.ts";
 import { DATABASE, FOREIGN_KEYS_SQL, ROW_COUNTS_SQL, execArgs, freePort, newRunId, psql, removeOwned, startStack, type ForeignKey } from "../lib.ts";
 import { OwnedDir } from "../owned.ts";
 
 // The names a finished backup has (backup.ts): <stamp>-<8 hex>. Only the final manifest counts; a `.partial` is not one.
 export const MANIFEST_NAME = /^af-\d{8}T\d{6}Z-[0-9a-f]{8}\.manifest\.json$/;
 export const DUMP_NAME = /^af-\d{8}T\d{6}Z-[0-9a-f]{8}\.dump$/;
+// The dump of one Temporal database of that backup: af-<stamp>-<8 hex>.<database>.dump (backup.ts, temporalDumpFile).
+const temporalDumpName = (database: string): RegExp => new RegExp(`^af-\\d{8}T\\d{6}Z-[0-9a-f]{8}\\.${database}\\.dump$`);
 
 export interface RestoreCheckOptions {
 	readonly manifestPath: string;
@@ -83,38 +87,64 @@ export const manifestProblems = (value: unknown): string[] => {
 	if (typeof value.createdAt === "string" && Number.isNaN(Date.parse(value.createdAt))) problems.push("createdAt is not a date");
 	if (typeof value.serverVersionNum !== "number" || !Number.isFinite(value.serverVersionNum)) problems.push("serverVersionNum is not a number");
 	if (value.database !== DATABASE) problems.push(`database is not ${DATABASE}`);
-	const dump = value.dump;
-	if (!isObject(dump)) problems.push("dump is missing");
-	else {
-		if (typeof dump.file !== "string" || !DUMP_NAME.test(dump.file)) problems.push("dump.file is not an af-<stamp>-<8 hex>.dump file name");
-		if (typeof dump.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(dump.sha256)) problems.push("dump.sha256 is not 64 hex digits");
-		if (typeof dump.bytes !== "number" || !Number.isInteger(dump.bytes) || dump.bytes < 0) problems.push("dump.bytes is not a non-negative integer");
-	}
-	const counts = value.rowCounts;
-	if (!isObject(counts)) problems.push("rowCounts is not an object");
-	else if (!Object.values(counts).every((count) => typeof count === "number" && Number.isInteger(count) && count >= 0)) {
-		problems.push("rowCounts holds a value that is not a non-negative integer");
-	}
+	problems.push(...dumpProblems("dump", value.dump, DUMP_NAME, "af-<stamp>-<8 hex>.dump"));
+	problems.push(...countsProblems("rowCounts", value.rowCounts));
 	if (!Array.isArray(value.foreignKeys)) problems.push("foreignKeys is not an array");
 	else if (!value.foreignKeys.every((fk) => isObject(fk) && typeof fk.table === "string" && typeof fk.name === "string" && typeof fk.definition === "string" && typeof fk.validated === "boolean")) {
 		problems.push("foreignKeys holds an entry without table, name, definition and validated");
 	}
+	// The Temporal part is optional (a server without Temporal has none), but when it is there it is whole: both databases,
+	// in the fixed order, each with its dump and row counts.
+	if (value.temporal !== undefined) {
+		const temporal = value.temporal;
+		if (!isObject(temporal) || !Array.isArray(temporal.databases)) problems.push("temporal.databases is not an array");
+		else if (temporal.databases.length !== TEMPORAL_DATABASES.length) problems.push(`temporal.databases does not hold exactly ${TEMPORAL_DATABASES.join(", ")}`);
+		else {
+			TEMPORAL_DATABASES.forEach((database, index) => {
+				const entry = (temporal.databases as unknown[])[index];
+				if (!isObject(entry) || entry.database !== database) problems.push(`temporal.databases[${index}] is not ${database}`);
+				else {
+					problems.push(...dumpProblems(`temporal ${database} dump`, entry.dump, temporalDumpName(database), `af-<stamp>-<8 hex>.${database}.dump`));
+					problems.push(...countsProblems(`temporal ${database} rowCounts`, entry.rowCounts));
+				}
+			});
+		}
+	}
 	return problems;
 };
+
+const dumpProblems = (label: string, dump: unknown, namePattern: RegExp, nameText: string): string[] => {
+	if (!isObject(dump)) return [`${label} is missing`];
+	const problems: string[] = [];
+	if (typeof dump.file !== "string" || !namePattern.test(dump.file)) problems.push(`${label}.file is not an ${nameText} file name`);
+	if (typeof dump.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(dump.sha256)) problems.push(`${label}.sha256 is not 64 hex digits`);
+	if (typeof dump.bytes !== "number" || !Number.isInteger(dump.bytes) || dump.bytes < 0) problems.push(`${label}.bytes is not a non-negative integer`);
+	return problems;
+};
+
+const countsProblems = (label: string, counts: unknown): string[] => {
+	if (!isObject(counts)) return [`${label} is not an object`];
+	if (!Object.values(counts).every((count) => typeof count === "number" && Number.isInteger(count) && count >= 0)) return [`${label} holds a value that is not a non-negative integer`];
+	return [];
+};
+
+export interface TemporalDumpPath {
+	readonly database: string;
+	readonly path: string;
+	readonly dump: DumpFile;
+}
 
 export interface VerifiedBackup {
 	readonly manifest: Manifest;
 	readonly dumpPath: string;
+	// Empty when the backup holds no Temporal section.
+	readonly temporalDumps: readonly TemporalDumpPath[];
 }
 
-// Verifies the files of a backup and returns what restore needs. Rejects with the full list of problems when anything
-// is missing or wrong: the manifest (shape and every field), the dump (present, not empty, size and sha256 as the
-// manifest says) and the checksum file (required, exactly "<64 hex>  <dump file>\n", with the real sum). An empty dump
-// is invalid, so it never passes by being the same as an empty record.
-export const verifyBackupFiles = async (manifestPath: string): Promise<VerifiedBackup> => {
-	const path = resolve(manifestPath);
-	const manifest = await readManifest(path);
-	const dumpPath = join(dirname(path), basename(manifest.dump.file));
+// The problems of one dump file against its manifest entry: not empty, size and sha256 as the manifest says, and the
+// checksum file (required, exactly "<64 hex>  <dump file>\n", with the real sum). `label` is "" for the main dump and
+// "<database> " for a Temporal one. Throws "dump file missing" when the file cannot be read at all.
+const dumpFileProblems = async (dumpPath: string, dump: DumpFile, label: string): Promise<string[]> => {
 	const problems: string[] = [];
 	let actualSum = "";
 	let size = 0;
@@ -122,27 +152,50 @@ export const verifyBackupFiles = async (manifestPath: string): Promise<VerifiedB
 		size = (await stat(dumpPath)).size;
 		actualSum = await sha256OfFile(dumpPath);
 	} catch {
-		throw new Error(`dump file missing: ${dumpPath}`);
+		throw new Error(`${label}dump file missing: ${dumpPath}`);
 	}
-	if (size === 0) problems.push("the dump file is empty");
-	if (manifest.dump.bytes !== size) problems.push(`dump size differs from the manifest: ${size} bytes, the manifest says ${manifest.dump.bytes}`);
-	if (manifest.dump.sha256 !== actualSum) problems.push("checksum mismatch: the dump differs from the manifest");
+	if (size === 0) problems.push(`the ${label}dump file is empty`);
+	if (dump.bytes !== size) problems.push(`${label}dump size differs from the manifest: ${size} bytes, the manifest says ${dump.bytes}`);
+	if (dump.sha256 !== actualSum) problems.push(`checksum mismatch: the ${label}dump differs from the manifest`);
 	let sidecar: string | undefined;
 	try {
 		sidecar = await readFile(`${dumpPath}.sha256`, "utf8");
 	} catch {
-		problems.push(`checksum file missing: ${dumpPath}.sha256`);
+		problems.push(`${label}checksum file missing: ${dumpPath}.sha256`);
 	}
 	if (sidecar !== undefined) {
 		const match = /^([0-9a-f]{64}) {2}(\S+)\n$/.exec(sidecar);
-		if (!match) problems.push("checksum file is malformed: expected '<64 hex digits>  <dump file>' and a newline");
+		if (!match) problems.push(`${label}checksum file is malformed: expected '<64 hex digits>  <dump file>' and a newline`);
 		else {
-			if (match[2] !== basename(manifest.dump.file)) problems.push(`checksum file names ${match[2]}, not ${basename(manifest.dump.file)}`);
-			if (match[1] !== actualSum) problems.push("checksum mismatch: the dump differs from its .sha256 file");
+			if (match[2] !== basename(dump.file)) problems.push(`${label}checksum file names ${match[2]}, not ${basename(dump.file)}`);
+			if (match[1] !== actualSum) problems.push(`checksum mismatch: the ${label}dump differs from its .sha256 file`);
 		}
 	}
+	return problems;
+};
+
+// Verifies the files of a backup and returns what restore needs. Rejects with the full list of problems when anything
+// is missing or wrong: the manifest (shape and every field), the dump (present, not empty, size and sha256 as the
+// manifest says) and the checksum file (required, exactly "<64 hex>  <dump file>\n", with the real sum), and the same
+// for each Temporal dump the manifest names. An empty dump is invalid, so it never passes by being the same as an empty
+// record. A missing main dump throws at once; a missing Temporal dump is one more problem in the list.
+export const verifyBackupFiles = async (manifestPath: string): Promise<VerifiedBackup> => {
+	const path = resolve(manifestPath);
+	const manifest = await readManifest(path);
+	const dumpPath = join(dirname(path), basename(manifest.dump.file));
+	const problems = await dumpFileProblems(dumpPath, manifest.dump, "");
+	const temporalDumps: TemporalDumpPath[] = [];
+	for (const entry of manifest.temporal?.databases ?? []) {
+		const temporalPath = join(dirname(path), basename(entry.dump.file));
+		try {
+			problems.push(...(await dumpFileProblems(temporalPath, entry.dump, `${entry.database} `)));
+		} catch (error) {
+			problems.push(error instanceof Error ? error.message : String(error));
+		}
+		temporalDumps.push({ database: entry.database, path: temporalPath, dump: entry.dump });
+	}
 	if (problems.length > 0) throw new Error(problems.join("; "));
-	return { manifest, dumpPath };
+	return { manifest, dumpPath, temporalDumps };
 };
 
 export interface DumpDigestExpectation {
@@ -159,8 +212,8 @@ export interface RestoreDumpHooks {
 // ends both) and hashes THE BYTES THAT pg_restore CONSUMES while they pass. The restore counts only when those bytes are
 // the ones the manifest names: a file that changed after verifyBackupFiles read it is caught here, because the check
 // is on what was consumed, not on an earlier read of the same path. Resolves with an error text ("" on success).
-export const restoreDump = async (container: string, dumpPath: string, expected: DumpDigestExpectation, hooks: RestoreDumpHooks = {}): Promise<string> => {
-	const program = `pg_restore --exit-on-error --no-password -U af_bootstrap -d ${DATABASE}`;
+export const restoreDump = async (container: string, dumpPath: string, expected: DumpDigestExpectation, hooks: RestoreDumpHooks = {}, database: string = DATABASE): Promise<string> => {
+	const program = `pg_restore --exit-on-error --no-password -U af_bootstrap -d ${database}`;
 	await hooks.beforeFeed?.();
 	const child = spawn("docker", execArgs(container, "af_bootstrap", program), { stdio: ["pipe", "ignore", "pipe"] });
 	let stderr = "";
@@ -203,18 +256,34 @@ export const applyDatabaseGrants = async (container: string): Promise<void> => {
 	]);
 };
 
+// Restores each Temporal dump into its database (made by init, owned by af_temporal; the dump carries the ownership of
+// its objects). Resolves with the first error text, "" when all went through.
+export const restoreTemporalDumps = async (container: string, dumps: readonly TemporalDumpPath[], hooks: RestoreDumpHooks = {}): Promise<string> => {
+	for (const entry of dumps) {
+		const error = await restoreDump(container, entry.path, entry.dump, hooks, entry.database);
+		if (error) return `${entry.database}: ${error}`;
+	}
+	return "";
+};
+
 const keyOf = (fk: ForeignKey): string => `${fk.table}|${fk.name}|${fk.definition}`;
 
-export const compareCatalog = (manifest: Manifest, counts: Record<string, number>, keys: ForeignKey[]): string[] => {
+// Row counts of one database against the manifest's; `label` prefixes each problem ("" for the application database).
+const compareRowCounts = (expectedCounts: Record<string, number>, counts: Record<string, number>, label: string): string[] => {
 	const problems: string[] = [];
-	const tables = new Set([...Object.keys(manifest.rowCounts), ...Object.keys(counts)]);
+	const tables = new Set([...Object.keys(expectedCounts), ...Object.keys(counts)]);
 	for (const table of [...tables].sort()) {
-		const expected = manifest.rowCounts[table];
+		const expected = expectedCounts[table];
 		const actual = counts[table];
-		if (expected === undefined) problems.push(`table ${table} exists after restore but not in the manifest`);
-		else if (actual === undefined) problems.push(`table ${table} is missing after restore`);
-		else if (expected !== actual) problems.push(`table ${table}: ${expected} rows in the backup, ${actual} after restore`);
+		if (expected === undefined) problems.push(`${label}table ${table} exists after restore but not in the manifest`);
+		else if (actual === undefined) problems.push(`${label}table ${table} is missing after restore`);
+		else if (expected !== actual) problems.push(`${label}table ${table}: ${expected} rows in the backup, ${actual} after restore`);
 	}
+	return problems;
+};
+
+export const compareCatalog = (manifest: Manifest, counts: Record<string, number>, keys: ForeignKey[]): string[] => {
+	const problems = compareRowCounts(manifest.rowCounts, counts, "");
 	const expectedKeys = new Set(manifest.foreignKeys.map(keyOf));
 	const actualKeys = new Set(keys.map(keyOf));
 	for (const key of expectedKeys) if (!actualKeys.has(key)) problems.push(`foreign key missing after restore: ${key}`);
@@ -240,6 +309,19 @@ export const compareRestored = async (container: string, manifest: Manifest): Pr
 	const counts = JSON.parse(countsText) as Record<string, number>;
 	const keys = JSON.parse(keysText) as ForeignKey[];
 	problems.push(...compareCatalog(manifest, counts, keys));
+	problems.push(...(await compareTemporalRestored(container, manifest)));
+	return problems;
+};
+
+// The Temporal databases of a restored server against the manifest's row counts (read as the superuser over the socket).
+// Nothing to compare when the backup has no Temporal section. A Temporal database that has data the manifest does not
+// know, or lost a table it names, is a problem like in the application database.
+export const compareTemporalRestored = async (container: string, manifest: Manifest): Promise<string[]> => {
+	const problems: string[] = [];
+	for (const entry of manifest.temporal?.databases ?? []) {
+		const countsText = await psql(container, "af_bootstrap", ROW_COUNTS_SQL, { database: entry.database });
+		problems.push(...compareRowCounts(entry.rowCounts, JSON.parse(countsText) as Record<string, number>, `${entry.database}: `));
+	}
 	return problems;
 };
 
@@ -252,7 +334,7 @@ export const restoreCheck = async (options: RestoreCheckOptions): Promise<Restor
 		if (/^manifest (missing|is )/.test(message) || message.startsWith("dump file missing")) throw error;
 		return { ok: false, problems: message.split("; ") };
 	}
-	const { manifest, dumpPath } = verified;
+	const { manifest, dumpPath, temporalDumps } = verified;
 
 	// A server the caller passes in is theirs to close; otherwise this check starts its own and removes it.
 	let own: ScratchServer | undefined;
@@ -261,6 +343,8 @@ export const restoreCheck = async (options: RestoreCheckOptions): Promise<Restor
 		await scratch.prepare();
 		const restoreError = await restoreDump(scratch.container, dumpPath, manifest.dump, options.hooks);
 		if (restoreError) return { ok: false, problems: [restoreError] };
+		const temporalError = await restoreTemporalDumps(scratch.container, temporalDumps, options.hooks);
+		if (temporalError) return { ok: false, problems: [temporalError] };
 		await applyDatabaseGrants(scratch.container);
 		const problems = await compareRestored(scratch.container, manifest);
 		return { ok: problems.length === 0, problems };
@@ -318,6 +402,9 @@ export const startScratch = async (prefix: string): Promise<ScratchServer> => {
 				if (dirty) {
 					await psql(container, "af_bootstrap", `DROP DATABASE ${DATABASE} WITH (FORCE); CREATE DATABASE ${DATABASE} OWNER af_migrator;`, { database: "postgres" });
 					await psql(container, "af_bootstrap", "CREATE EXTENSION vector;");
+					// The Temporal databases are emptied the same way: dropped, then made again by the one file init runs.
+					await psql(container, "af_bootstrap", TEMPORAL_DATABASES.map((database) => `DROP DATABASE IF EXISTS ${database} WITH (FORCE);`).join(" "), { database: "postgres" });
+					await applyTemporalSql(container);
 				}
 				dirty = true;
 			},
@@ -333,7 +420,7 @@ if (import.meta.main) {
 	try {
 		const { values } = parseCliArgs(process.argv.slice(2), { flags: { "--manifest": "value", "--prefix": "value" }, required: ["--manifest"] });
 		const result = await restoreCheck({ manifestPath: values["--manifest"] as string, prefix: values["--prefix"] });
-		if (result.ok) console.log("restore check passed: checksum, row counts and foreign keys match the backup");
+		if (result.ok) console.log("restore check passed: checksum, row counts and foreign keys match the backup (the Temporal databases too, when it holds them)");
 		else {
 			console.error("restore check FAILED:");
 			for (const problem of result.problems) console.error(`  - ${problem}`);

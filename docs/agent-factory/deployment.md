@@ -81,7 +81,7 @@ Nothing else on the machine is touched: the stack neither uses nor removes other
 1. Install the node dependencies once, from the repository root: `npm --prefix factory install` (no runtime packages,
    only the TypeScript checker). Node 24 or newer runs the TypeScript files directly.
 2. Make the secrets directory. It holds one file per account (`af_bootstrap`, `af_migrator`, `af_api`, `af_control`,
-   `af_backup`, `af_reader`), each a random 43-character password. Existing files are never overwritten, so the
+   `af_backup`, `af_reader`, `af_temporal`), each a random 43-character password. Existing files are never overwritten, so the
    command is safe to repeat:
 
    `node factory/deploy/setup-secrets.ts $secrets`
@@ -99,7 +99,7 @@ Nothing else on the machine is touched: the stack neither uses nor removes other
 
    `node factory/deploy/setup-secrets.ts --check $secrets`
 
-   It prints `secrets ready` and exits 0 only when the directory holds all six valid secret files, their access is
+   It prints `secrets ready` and exits 0 only when the directory holds all seven valid secret files, their access is
    exactly those three holders, and the place cannot be committed; otherwise it lists the problems and exits 1 (2 on a
    usage error).
 
@@ -109,7 +109,8 @@ Nothing else on the machine is touched: the stack neither uses nor removes other
 
    `$env:AF_SECRETS_DIR = $secrets; & $proveVolume 'agent-factory'; docker compose -p agent-factory -f factory/deploy/compose.yml up -d`
 
-   The first start creates the roles and the `agent_factory` database (`factory/deploy/postgres/init/10-roles.sh`). The
+   The first start creates the roles and the `agent_factory` database (`factory/deploy/postgres/init/10-roles.sh`) and the
+   role and databases of Temporal (`20-temporal.sh`, see "Adding Temporal to an existing installation"). The
    server restarts once at the end of init, so for a minute the container reports `starting`. Wait for it, by running
    this line again until it prints `healthy` (if the container stops instead, see "A start that refuses"):
 
@@ -266,9 +267,10 @@ record of a completed initialisation is refused (see "A start that refuses" belo
 
 ## Accounts
 
-The six accounts and their rights are in `database.md` "Accounts and rights". Only the application database is reachable
-over the network and only by the five application accounts; `af_bootstrap` (the superuser) works only on the container's
-local socket, for init and recovery.
+The seven accounts and their rights are in `database.md` "Accounts and rights". The application database is reachable
+over the network only by the five application accounts; `af_bootstrap` (the superuser) works only on the container's
+local socket, for init and recovery. The seventh account, `af_temporal`, belongs to Temporal: it reaches only the two
+Temporal databases (`database.md` "The Temporal databases"), and no application account reaches those.
 
 The `pg_hba.conf` host lines for the application accounts use the address `samenet`: a connection is accepted only
 from a subnet the server itself is attached to, which is the project's own docker network (`agent-factory_default`; in
@@ -350,12 +352,14 @@ backup before it, the proof that the same data is served afterwards and the way 
 below; a stack that already restarts in a loop has its own way out there. The two commands that do the marking are
 described here. The check is a script, read-only, run from the repository root:
 
-`node factory/deploy/verify-init.ts`
+`node factory/deploy/verify-init.ts --without-temporal`
 
-For another project name, run the same command with `--project` and the name added at the end; for a container made by
+(Without the flag the command also judges the Temporal part, see below; a database made before Temporal existed has
+none, hence the flag in this marking.) For another project name, run the same command with `--project` and the name added at the end; for a container made by
 hand that belongs to no project (the restart-loop way out below), name the container instead, as in the checks of that procedure (the two options
 cannot be combined: exit 2). It verifies, as `af_backup` in one session, every postcondition of
-`init/10-roles.sh` and `init/99-finish.sh`: the six roles and their attributes (only `af_bootstrap` is a superuser;
+`init/10-roles.sh`, `init/20-temporal.sh` and `init/99-finish.sh`: the seven roles (`af_bootstrap`, the five application
+roles and `af_temporal`) and their attributes (only `af_bootstrap` is a superuser;
 no other role may create roles or databases, replicate or bypass row security), that no role is a member of another,
 the read-only and timeout settings of `af_reader`, the owner of the database and of its schemas, the connect and schema
 rights of `PUBLIC` and of the application roles, the effective privileges of every role on every table, view, sequence
@@ -374,6 +378,16 @@ them pass (1 when any fails, 2 on a wrong argument). The list of checks is `fact
 test (`factory/tests/verify-init.test.ts`) fails when a statement of the init scripts has no check, so the two cannot
 drift apart. Passwords are not in the catalogs, so they are proved by the real logins, not read.
 
+The same command also proves the two Temporal databases (their owner, that the Temporal role logs in to each with the
+password of its secret file, that it is refused by the rules and holds no right in `agent_factory`, `postgres` and
+`template1`, and that no application role holds any right in a Temporal database). A database made before Temporal
+existed has neither the role nor the databases, so for it (the marking below and the steps of the upgrade that run
+against it) the command takes the flag --without-temporal: the role `af_temporal`, its databases and its rule in
+`pg_hba.conf` are then neither required nor forbidden (the rule is accepted only in its intended form, absent or present;
+any other rule that names the Temporal role is still reported), and everything else is checked as above. The flag is never used on a
+new installation, and `deploy/bootstrap-temporal.ts` ("Adding Temporal to an existing installation") is what makes a
+legacy database complete, after which the command without the flag must pass.
+
 If any check fails, do not create the marker: the database is half-made or was changed, and the recovery is a restore
 from a known-good backup (`recovery.md`), not a marking.
 
@@ -386,7 +400,7 @@ project name:
 
 Then confirm it, which adds the check that the marker exists:
 
-`node factory/deploy/verify-init.ts --with-marker`
+`node factory/deploy/verify-init.ts --with-marker --without-temporal`
 
 Start (or wait for the next automatic attempt) and wait for `healthy` as in Install step 3. Do not use `compose start`
 or `docker start` on the old container to bring it back after an update: they restart the container as it was made, with
@@ -416,6 +430,12 @@ Upgrade, in this order:
 
    `git pull --ff-only`
 
+   The new revision mounts a seventh secret, `af_temporal`, which the old directory does not have, and compose refuses to
+   create the container (step 8) while a secret file is missing. Add it now; the command creates only the files that
+   are missing and leaves the six that exist as they are:
+
+   `node factory/deploy/setup-secrets.ts $secrets`
+
 3. Take a backup and check it restores (see "Backup" and "Restore check"). The backup command prints `backup written: <manifest path>`;
    the check takes exactly that manifest, never "the newest one" of the directory, which may belong to another backup:
 
@@ -438,9 +458,11 @@ Upgrade, in this order:
    The record must show a container id, the volume `agent-factory_pgdata` and a system identifier of about 19 digits.
 
 5. Check the database that runs, with the old container still up (read-only; every line must be `ok`, see "A start that
-   refuses" for what it covers):
+   refuses" for what it covers). The database was made before Temporal existed and has no Temporal role or databases
+   yet, so the Temporal part is left out (the flag --without-temporal, here and in every check of this section until
+   "Adding Temporal to an existing installation" has been run):
 
-   `node factory/deploy/verify-init.ts`
+   `node factory/deploy/verify-init.ts --without-temporal`
 
    When it exits 1, do not go on: restore from a known-good backup (`recovery.md`).
 
@@ -448,7 +470,7 @@ Upgrade, in this order:
 
    `docker exec -u postgres agent-factory-postgres-1 touch /var/lib/postgresql/data/.af-init-complete`
 
-   `node factory/deploy/verify-init.ts --with-marker`
+   `node factory/deploy/verify-init.ts --with-marker --without-temporal`
 
 7. Stop the old container and wait until the daemon has recorded the stop:
 
@@ -480,7 +502,12 @@ Upgrade, in this order:
 
    `$sysid = ((docker exec -u postgres agent-factory-postgres-1 /usr/lib/postgresql/16/bin/pg_controldata /var/lib/postgresql/data | Select-String 'Database system identifier').Line -replace '\D', ''); if (-not $r.system -or -not $sysid -or $sysid -ne $r.system) { throw "refusing: the database is not the one recorded, or an identifier is missing" }`
 
-   `node factory/deploy/verify-init.ts --with-marker`
+   `node factory/deploy/verify-init.ts --with-marker --without-temporal`
+
+The upgrade ends here, and the stack runs without Temporal: the new container has the rule of the Temporal role in its
+`pg_hba.conf` and mounts its secret, but the role and the databases are not made yet (an existing data directory does
+not run the init scripts again). When Temporal is wanted, run "Adding Temporal to an existing installation" below once
+the upgrade has passed; from then on the checks are run without the flag --without-temporal.
 
 Roll back, when step 9 failed or the new revision is not wanted. The old revision is started again from the copy of
 step 1, on the same volume (the data was not changed by the upgrade except for the marker file, which the old revision
@@ -505,7 +532,10 @@ the repository; it is made again from the copy:
 
    `$sysid = ((docker exec -u postgres agent-factory-postgres-1 /usr/lib/postgresql/16/bin/pg_controldata /var/lib/postgresql/data | Select-String 'Database system identifier').Line -replace '\D', ''); if (-not $r.system -or -not $sysid -or $sysid -ne $r.system) { throw "refusing: the database is not the one recorded, or an identifier is missing" }`
 
-   `node factory/deploy/verify-init.ts --with-marker`
+   `node factory/deploy/verify-init.ts --with-marker --without-temporal`
+
+   (The old revision does not know the Temporal role. Whether or not Temporal was added in between, the database keeps it
+   and the old revision ignores it; the flag --without-temporal makes the check neither require nor forbid it.)
 
 A stack that already restarts in a loop (the repository was updated and `up -d` was run before the database was
 marked): the container never becomes healthy and `docker logs agent-factory-postgres-1` says `refusing to start`. The
@@ -532,11 +562,11 @@ service again:
 
    `$i = 0; while ($i -lt 60 -and (docker exec agent-factory-oneoff pg_isready -h 127.0.0.1 -U af_backup) -notmatch 'accepting') { Start-Sleep 3; $i++ }`
 
-   `node factory/deploy/verify-init.ts --container agent-factory-oneoff`
+   `node factory/deploy/verify-init.ts --container agent-factory-oneoff --without-temporal`
 
    `docker exec -u postgres agent-factory-oneoff touch /var/lib/postgresql/data/.af-init-complete`
 
-   `node factory/deploy/verify-init.ts --container agent-factory-oneoff --with-marker`
+   `node factory/deploy/verify-init.ts --container agent-factory-oneoff --with-marker --without-temporal`
 
 4. Stop the one-off container, wait for the stop, remove it (only after checking that it is the one-off container of
    this project) and make the container of the service on the marked volume:
@@ -550,7 +580,72 @@ service again:
    `& $proveVolume 'agent-factory'; docker compose -p agent-factory -f factory/deploy/compose.yml up -d`
 
    Then confirm as in step 9 (the record of step 4 exists only when step 4 was run before the update; without it, check
-   the health, the entrypoint and `verify-init.ts --with-marker`).
+   the health, the entrypoint and `verify-init.ts --with-marker --without-temporal`). The new container needs the
+   `af_temporal` secret, so run `node factory/deploy/setup-secrets.ts $secrets` before this `up -d` when the secrets
+   directory is older than this revision.
+
+## Adding Temporal to an existing installation
+
+A new installation gets the Temporal role and its two databases from `20-temporal.sh` at the first start, and needs
+nothing from this section. An installation whose data directory exists already does not run the init scripts again, so
+the role and the databases are added by one command that runs as `af_bootstrap` over the local socket and applies the
+same idempotent SQL (`factory/deploy/postgres/init/lib/temporal.sql`) the init script applies. It never touches
+`agent_factory`. In this order, from the repository root:
+
+1. Add the missing secret. The command creates only the file that is missing (`af_temporal`) and leaves every other
+   file as it is:
+
+   `node factory/deploy/setup-secrets.ts $secrets`
+
+2. Recreate the stack, so the container mounts the seventh secret and the new `pg_hba.conf` (with the rule of the
+   Temporal role). A stack made before the marker existed was recreated by "Upgrade of a running stack" above (do that
+   first); a stack that already has the marker is recreated by the command of its step 8:
+
+   `$env:AF_SECRETS_DIR = $secrets; & $proveVolume 'agent-factory'; docker compose -p agent-factory -f factory/deploy/compose.yml up -d`
+
+   Wait until the container is `healthy`.
+
+3. Apply the role and the databases:
+
+   `node factory/deploy/bootstrap-temporal.ts`
+
+   For another project or container the same command takes `--project` and a project name, or `--container` and a
+   container name, added at the end (not both). On success it prints that `af_temporal` and the two databases
+   `af_temporal` and `af_temporal_visibility` are in place and that the role logs in over TCP to its database. It exits 1
+   with the reason when the secret `af_temporal` is not mounted in the container (step 1 or 2 was skipped), when the
+   container does not exist or when the login does not work, and 2 on a wrong argument.
+
+4. Check the whole set, which now includes the Temporal role, the ownership and the rights of both databases, and the
+   two sides of the separation (the Temporal role is refused by the rules and holds no right in `agent_factory`,
+   `postgres` and `template1`, and no application role holds any right in a Temporal database):
+
+   `node factory/deploy/verify-init.ts`
+
+The command can be repeated at any time: when everything is in place it changes nothing, and when something was changed
+by hand (an attribute of the role, a missing database, a wrong owner, a grant to PUBLIC) it puts it back. It also sets
+the role's password again from the secret file, so it is the way a changed `af_temporal` secret reaches the server.
+
+## Temporal in backup and recovery
+
+Only the Postgres side of Temporal is covered; the Temporal server (its container, schema tool and workers) is not part
+of this package. When the server holds both Temporal databases the backup carries them too, in this order: the
+application dump first, then each of `af_temporal` and `af_temporal_visibility`, dumped as the role `af_temporal` with
+`pg_dump -Fc`, each in its own snapshot. The files are `af-<UTC stamp>-<8 hex>.<database>.dump` and a `.sha256` file
+for each, next to the application dump, and the manifest gets a `temporal` section with the databases and their row
+counts. A server that holds both databases is backed up with both, and one that holds neither (a stack that was never
+given Temporal) is backed up as before, with no `temporal` section. A server that holds only one of them is refused
+before a backup is written, with the advice to repair it with `node factory/deploy/bootstrap-temporal.ts`.
+
+The restore check restores the Temporal dumps into the empty databases its scratch server made at its own init, as the
+role `af_temporal`, and compares the row counts with the manifest, exactly as it does for the application database;
+`restore.ts` does the same in the new project. A backup with a `temporal` section whose file is missing or whose checksum
+does not match is refused by content, like the application dump.
+
+The three dumps are not one snapshot: the application database and the two Temporal databases are read at slightly
+different moments, so after a restore the workflow state that Temporal holds and the application tables it refers to
+can differ by what happened in between. Reconcile them after the restore as `database.md` ("The Temporal databases")
+describes, before the Temporal server is started on the restored project. The Temporal server itself is not restored by
+these tools.
 
 ## Backup
 
@@ -587,7 +682,9 @@ before the first dump byte is written, so no dump is ever written under an acces
 It writes `af-<UTC stamp>-<8 hex>.dump`, `.dump.sha256` and `.manifest.json`; the UTC stamp has the form `yyyyMMddTHHmmssZ`. The name is the UTC time plus 8 random hex digits, so two runs never
 share a name, also when started at once into one directory; every file is created exclusively (an existing file is
 never overwritten or removed), and the manifest is linked into place last, so only a backup with a manifest is
-complete. A failed write or a dying `pg_dump` removes this run's own partial files and exits non-zero. Row counts and
+complete. When the server holds the two Temporal databases, each also gets its own `.<database>.dump` and `.sha256`
+file (see "Temporal in backup and recovery"). A failed write or a dying `pg_dump` removes this run's own partial files
+and exits non-zero. Row counts and
 foreign keys in the manifest come from the same snapshot as the dump, so a backup taken while the application writes
 is still consistent. The command first waits for a healthy server (bounded, 60 s) instead of failing on a starting
 one. No password is in any command line or environment: each tool gets a passfile that exists only while it runs. On
@@ -611,7 +708,9 @@ selects only by that label, so nothing else on the machine can be removed. It ta
 means all matched; 1 lists the differences or errors; 2 means a usage error.
 
 The check also covers the tables of the applied migrations: row counts and foreign keys are compared per table, so
-a backup of a migrated database is proven table by table.
+a backup of a migrated database is proven table by table. A backup with a `temporal` section is checked the same way for
+each Temporal database: its dump and checksum by content, the restore into the scratch server's empty Temporal
+databases, and the row counts.
 
 ## Restore
 
@@ -620,7 +719,8 @@ root, with `$manifest` set as above:
 
 `npm --prefix factory run restore -- --manifest $manifest --secrets $secrets`
 
-It picks a free loopback port itself; to choose one, run the same command with `--port` and a port number added at the end. The
+A backup with a `temporal` section is restored into the new project's Temporal databases too, and their row counts are
+compared with the manifest. It picks a free loopback port itself; to choose one, run the same command with `--port` and a port number added at the end. The
 whole procedure, including the manual switch-over, is in `recovery.md`.
 
 ## Tests
@@ -633,7 +733,8 @@ is never removed for being named like a test's or being found next to it. `facto
 when any other file under `factory/` holds a removal command. `factory/tests/first-start.test.ts` covers the first
 start (no password in any process, no trust rule ever written, wrapper started as documented), and
 `factory/tests/verify-init.test.ts` covers `verify-init.ts` against a real database with a table of deliberate
-breakages. `factory/tests/volume-identity.test.ts` runs every command of this document and of `recovery.md` that
+breakages. `factory/tests/temporal-bootstrap.test.ts` covers the Temporal role and databases: the isolation in both
+directions, the bootstrap command run twice and its repair of drift. `factory/tests/volume-identity.test.ts` runs every command of this document and of `recovery.md` that
 mounts or removes the data volume against a same-name volume that compose did not make: each must refuse and leave it
 whole. `factory/tests/docs-commands.test.ts` runs the emergency volume copy of `recovery.md` (existing name, full disk,
 interruption, unprotected directory), and `factory/tests/upgrade-rehearsal.test.ts` the upgrade, rollback and
@@ -648,5 +749,7 @@ injected clock, so nothing waits in real time. `npm --prefix factory run typeche
 - Encryption of backups and of the secrets directory (the secrets are protected by Windows file rights only).
 - An off-host copy: backups and secrets are on the same machine and the same disk as the data.
 - Retention: old backups are never deleted.
-- The Temporal pair (server and its database) of the architecture: not part of phase 1.
+- The Temporal server itself (its container, schema tool and workers): not part of this package. Only its Postgres side
+  is covered (the role, the two databases, their backup and restore): "Adding Temporal to an existing installation" and
+  "Temporal in backup and recovery".
 - Reboot and Docker restart behaviour: not tested.

@@ -1,17 +1,20 @@
-// Checks that a RUNNING database of this stack is completely initialised: every statement of init/10-roles.sh and every
-// step of init/99-finish.sh left its result (the list is deploy/init-postconditions.ts, which a test keeps equal to the
+// Checks that a RUNNING database of this stack is completely initialised: every statement of init/10-roles.sh and
+// init/lib/temporal.sql (the role and databases of Temporal) and every step of init/99-finish.sh left its result (the list is deploy/init-postconditions.ts, which a test keeps equal to the
 // init scripts). It only reads. Used before marking a database that was made before the marker existed
 // (docs/agent-factory/deployment.md "A start that refuses"): the marker is created only when every check passes.
 //
-//   node deploy/verify-init.ts [--project agent-factory | --container <container name>] [--with-marker]
+//   node deploy/verify-init.ts [--project agent-factory | --container <container name>] [--with-marker] [--without-temporal]
 //
 // --container names the container directly, for one made by hand that belongs to no compose project (the upgrade and the
 // restart-loop procedures); it cannot be combined with --project.
 //
 // Prints one line per check, `ok   <name>` or `FAIL <name>: <detail>`, and exits 0 when all pass, 1 when any fails, 2 on a
 // wrong argument. --with-marker adds the check that the marker .af-init-complete exists (a database not yet marked fails
-// that one by definition, so it is asked for only after marking).
-import { APPLICATION_ROLES, BOOTSTRAP_ROLE, CHECKS, HBA_RULES_SQL, hbaRuleProblems, type Check, type HbaRule, type SqlCheck } from "./init-postconditions.ts";
+// that one by definition, so it is asked for only after marking). --without-temporal leaves the Temporal part out: the role
+// af_temporal, its databases and its rule in pg_hba.conf are neither required nor forbidden, so a database made before
+// Temporal existed passes before deploy/bootstrap-temporal.ts has run, and one that has it passes too (the rollback to
+// the old revision). It is for the upgrade of such a stack, never for a new installation.
+import { APPLICATION_ROLES, BOOTSTRAP_ROLE, CHECKS, HBA_RULES_SQL, buildChecks, hbaRuleProblems, type Check, type HbaRule, type SqlCheck } from "./init-postconditions.ts";
 import { UsageError, parseCliArgs, reportCliFailure } from "./cli-args.ts";
 import { DATABASE, findContainer, run, tryPsql } from "./lib.ts";
 
@@ -26,6 +29,9 @@ export interface VerifyOptions {
 	// The container to check; found from the project when absent.
 	readonly container?: string;
 	readonly withMarker?: boolean;
+	// Leave the Temporal part out: its role, databases and pg_hba rule are neither required nor forbidden (none is probed).
+	// For the upgrade of a stack made before Temporal existed, and for the rollback of one that has it.
+	readonly withoutTemporal?: boolean;
 }
 
 // The role whose login runs the catalog checks: the one the healthcheck uses anyway, with no rights beyond reading.
@@ -46,7 +52,7 @@ export interface ServerOptions {
 
 // The problems of the rules the server really uses. Read as the bootstrap role over the socket (the only way that role may
 // connect), from pg_hba_file_rules, so the file named by the server's hba_file is the one judged, not the data directory's.
-export const checkActiveHba = async (container: string, options: ServerOptions = {}): Promise<string[]> => {
+export const checkActiveHba = async (container: string, options: ServerOptions & { readonly withoutTemporal?: boolean } = {}): Promise<string[]> => {
 	const read = await tryPsql(container, BOOTSTRAP_ROLE, HBA_RULES_SQL, { database: "postgres", port: options.port });
 	if (read.code !== 0) return [`could not read the active rules: ${firstLine(read.stderr || read.stdout, `exit ${read.code}`)}`];
 	let parsed: { file: string; stale: boolean | null; rules: HbaRule[] };
@@ -58,7 +64,7 @@ export const checkActiveHba = async (container: string, options: ServerOptions =
 	// pg_hba_file_rules is the file on disk. It is the loaded set only when the file is not newer than the last load; the
 	// logins prove the loaded set from inside the container (loopback) only, so a rule for another source (the Docker
 	// subnet) is judged by the file, which must therefore be the loaded one. Anything but a plain false fails.
-	const problems = hbaRuleProblems(parsed.rules);
+	const problems = hbaRuleProblems(parsed.rules, options.withoutTemporal !== true);
 	if (parsed.stale !== false) problems.push("the file was modified after the server last loaded it (or its age is unknown): the rules shown are not proven to be the ones the server runs; reload or restart the server");
 	return problems.map((problem) => `${problem} (active file ${parsed.file})`);
 };
@@ -85,7 +91,7 @@ export const probeRefusedByRules = async (container: string, role: string, optio
 
 export const verifyInit = async (options: VerifyOptions = {}): Promise<CheckResult[]> => {
 	const container = options.container ?? (await findContainer(options.project ?? "agent-factory"));
-	const checks = CHECKS.filter((check) => !(check.kind === "shell" && check.isMarker && !options.withMarker));
+	const checks = (options.withoutTemporal ? buildChecks(false) : CHECKS).filter((check) => !(check.kind === "shell" && check.isMarker && !options.withMarker));
 	const sqlChecks = checks.filter((check): check is SqlCheck => check.kind === "sql");
 
 	// All catalog checks in one session; the answer is one line per check. A failing session (the role cannot log in, the
@@ -114,7 +120,7 @@ export const verifyInit = async (options: VerifyOptions = {}): Promise<CheckResu
 			return sqlProblem ? failure(check, sqlProblem) : verdict === "true" ? success(check) : failure(check, verdict === undefined ? "no answer" : "the postcondition does not hold");
 		}
 		if (check.kind === "hba") {
-			const problems = await checkActiveHba(container);
+			const problems = await checkActiveHba(container, { withoutTemporal: options.withoutTemporal });
 			return problems.length === 0 ? success(check) : failure(check, problems.join("; "));
 		}
 		if (check.kind === "refused") {
@@ -126,11 +132,11 @@ export const verifyInit = async (options: VerifyOptions = {}): Promise<CheckResu
 			return problems.length === 0 ? success(check) : failure(check, problems.join("; "));
 		}
 		if (check.kind === "login" && check.wrongPassword) {
-			const problem = await probeWrongPassword(container, check.role);
+			const problem = await probeWrongPassword(container, check.role, { database: check.database });
 			return problem === null ? success(check) : failure(check, problem);
 		}
 		if (check.kind === "login") {
-			const attempt = await tryPsql(container, check.role, "select 1;", { database: DATABASE, tcp: true });
+			const attempt = await tryPsql(container, check.role, "select 1;", { database: check.database ?? DATABASE, tcp: true });
 			return attempt.code === 0 && attempt.stdout.trim() === "1" ? success(check) : failure(check, firstLine(attempt.stderr, `exit ${attempt.code}`));
 		}
 		const attempt = await run("docker", ["exec", "-u", "postgres", container, "sh", "-c", check.script]);
@@ -144,18 +150,18 @@ export const formatResults = (results: readonly CheckResult[]): string[] =>
 
 if (import.meta.main) {
 	try {
-		const { values, present } = parseCliArgs(process.argv.slice(2), { flags: { "--project": "value", "--container": "value", "--with-marker": "boolean" } });
+		const { values, present } = parseCliArgs(process.argv.slice(2), { flags: { "--project": "value", "--container": "value", "--with-marker": "boolean", "--without-temporal": "boolean" } });
 		if (values["--project"] !== undefined && values["--container"] !== undefined) throw new UsageError("--container and --project cannot be used together");
-		const results = await verifyInit({ project: values["--project"] ?? "agent-factory", container: values["--container"], withMarker: present.has("--with-marker") });
+		const results = await verifyInit({ project: values["--project"] ?? "agent-factory", container: values["--container"], withMarker: present.has("--with-marker"), withoutTemporal: present.has("--without-temporal") });
 		for (const line of formatResults(results)) console.log(line);
 		const failed = results.filter((result) => !result.ok).length;
 		if (failed > 0) {
 			console.error(`${failed} of ${results.length} checks failed: this database is not completely initialised; do not mark it, restore from a known-good backup.`);
 			process.exitCode = 1;
 		} else {
-			console.log(`all ${results.length} checks passed (${APPLICATION_ROLES.length} application roles).`);
+			console.log(present.has("--without-temporal") ? `all ${results.length} checks passed (${APPLICATION_ROLES.length} application roles; Temporal not checked).` : `all ${results.length} checks passed (${APPLICATION_ROLES.length} application roles and the Temporal role).`);
 		}
 	} catch (error) {
-		reportCliFailure(error, "verify-init failed", "usage: node deploy/verify-init.ts [--project agent-factory | --container <container name>] [--with-marker]");
+		reportCliFailure(error, "verify-init failed", "usage: node deploy/verify-init.ts [--project agent-factory | --container <container name>] [--with-marker] [--without-temporal]");
 	}
 }

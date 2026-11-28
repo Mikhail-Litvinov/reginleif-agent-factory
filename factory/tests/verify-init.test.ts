@@ -12,14 +12,15 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { after, before, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
-import { CHECKS, FINISH_MARKER, FINISH_NO_TRUST_RULE, FINISH_REMOVES_SERVICE_FILE, MARKER_NAME, TRUST_RULE_PATTERN, statementsOfRolesScript, type Check } from "../deploy/init-postconditions.ts";
+import { CHECKS, FINISH_MARKER, buildChecks, FINISH_NO_TRUST_RULE, FINISH_REMOVES_SERVICE_FILE, MARKER_NAME, TRUST_RULE_PATTERN, statementsOfRolesScript, statementsOfTemporalScript, type Check } from "../deploy/init-postconditions.ts";
 import { psql, run } from "../deploy/lib.ts";
 import { formatResults, verifyInit, type CheckResult } from "../deploy/verify-init.ts";
 import { createTestStack, type TestStack } from "./helpers.ts";
 
 const factoryDir = fileURLToPath(new URL("..", import.meta.url));
 const rolesScript = fileURLToPath(new URL("../deploy/postgres/init/10-roles.sh", import.meta.url));
-const finishScript = fileURLToPath(new URL("../deploy/postgres/init/99-finish.sh", import.meta.url));
+const temporalSql = fileURLToPath(new URL("../deploy/postgres/init/lib/temporal.sql", import.meta.url));
+const finishScript =fileURLToPath(new URL("../deploy/postgres/init/99-finish.sh", import.meta.url));
 const FINISH_STEPS = [FINISH_REMOVES_SERVICE_FILE, FINISH_NO_TRUST_RULE, FINISH_MARKER];
 
 // What a statement list and a check list leave unmatched, in both directions.
@@ -37,7 +38,13 @@ describe("every statement of the init scripts has a check", () => {
 		const statementLines = source.split(/\r?\n/).filter((line) => /^\s*(printf )?"(CREATE|ALTER|REVOKE|GRANT|DROP) [A-Z]/.test(line));
 		assert.equal(statements.length, statementLines.length, "the parser found a different number of statements than the script has lines of them");
 		assert.equal(statements.length, 17);
-		assert.deepEqual(mismatch(statements, CHECKS), { uncovered: [], stale: [] });
+		// The Temporal statements live in lib/temporal.sql (run by init and by bootstrap-temporal.ts); the checks cover both files.
+		const temporalSource = await readFile(temporalSql, "utf8");
+		const temporalStatements = statementsOfTemporalScript(temporalSource);
+		const temporalLines = temporalSource.split(/\r?\n/).filter((line) => /^(CREATE|ALTER|REVOKE|GRANT|DROP) [A-Z]/.test(line));
+		assert.equal(temporalStatements.length, temporalLines.length, "the parser found a different number of statements than temporal.sql has lines of them");
+		assert.equal(temporalStatements.length, 8);
+		assert.deepEqual(mismatch([...statements, ...temporalStatements], CHECKS), { uncovered: [], stale: [] });
 	});
 
 	it("the comparison itself notices a new statement and a removed one", () => {
@@ -59,6 +66,25 @@ describe("every statement of the init scripts has a check", () => {
 		const names = CHECKS.map((c) => c.name);
 		assert.equal(new Set(names).size, names.length);
 		assert.ok(names.every((n) => !n.includes("|")));
+	});
+
+	it("the list without Temporal names nothing of Temporal, and is the full list minus exactly the Temporal checks", () => {
+		const legacy = buildChecks(false);
+		const text = (check: Check): string => JSON.stringify(check);
+		assert.ok(legacy.length < CHECKS.length);
+		// No login, refusal or catalog check of the Temporal role or its databases is left; the role-set check mentions
+		// af_temporal only to exclude it from the judgement.
+		assert.ok(legacy.every((check) => check.kind !== "login" || check.role !== "af_temporal"));
+		assert.ok(legacy.every((check) => check.kind !== "refused" || check.role !== "af_temporal"));
+		assert.ok(legacy.every((check) => check.kind !== "refused" || check.databases.every((d) => !d.startsWith("af_temporal"))));
+		assert.deepEqual(legacy.filter((check) => check.kind === "sql" && /af_temporal/.test((check as { expression: string }).expression) && !/rolname <> 'af_temporal'/.test((check as { expression: string }).expression)).map((c) => c.name), []);
+		// Everything the full list checks about the application stays checked: what is dropped, or replaced by its legacy
+		// variant (the role set and the database ownership, named differently), is about Temporal.
+		const kept = new Set(legacy.map((check) => check.name));
+		const dropped = CHECKS.filter((check) => !kept.has(check.name));
+		assert.ok(dropped.length > 0 && dropped.every((check) => /temporal/i.test(text(check))), dropped.map((c) => c.name).join("\n"));
+		// The marker, the trust rule and the service file steps are checked either way.
+		for (const step of FINISH_STEPS) assert.equal(legacy.filter((c) => c.covers.includes(step)).length, 1, step);
 	});
 });
 
@@ -140,6 +166,14 @@ describe("verify-init against a real database", { concurrency: false }, () => {
 		{ name: "no default select on new tables for the backup role", breakIt: () => asBootstrap("ALTER DEFAULT PRIVILEGES FOR ROLE af_migrator IN SCHEMA public REVOKE SELECT ON TABLES FROM af_backup;"), repair: () => asBootstrap("ALTER DEFAULT PRIVILEGES FOR ROLE af_migrator IN SCHEMA public GRANT SELECT ON TABLES TO af_backup;"), fails: ["new tables"] },
 		{ name: "the backup role may write to new tables", breakIt: () => asBootstrap("ALTER DEFAULT PRIVILEGES FOR ROLE af_migrator IN SCHEMA public GRANT INSERT ON TABLES TO af_backup;"), repair: () => asBootstrap("ALTER DEFAULT PRIVILEGES FOR ROLE af_migrator IN SCHEMA public REVOKE INSERT ON TABLES FROM af_backup;"), fails: ["new tables"] },
 		{ name: "the vector extension missing", breakIt: () => asBootstrap("DROP EXTENSION vector;"), repair: () => asBootstrap("CREATE EXTENSION vector;"), fails: ["extension vector"] },
+		// The Temporal role and its two databases: each way the separation can break is a failing check, and repairing it passes again.
+		{ name: "the Temporal role missing (renamed away; its databases stay)", breakIt: () => asBootstrap("ALTER ROLE af_temporal RENAME TO af_temporal_gone;", "postgres"), repair: () => asBootstrap("ALTER ROLE af_temporal_gone RENAME TO af_temporal;", "postgres"), fails: ["role af_temporal:", "role set", "database af_temporal exists and af_temporal owns it", "database af_temporal_visibility exists and af_temporal owns it"] },
+		{ name: "a Temporal role that may create databases", breakIt: () => asBootstrap("ALTER ROLE af_temporal CREATEDB;", "postgres"), repair: () => asBootstrap("ALTER ROLE af_temporal NOCREATEDB;", "postgres"), fails: ["role af_temporal:"] },
+		{ name: "a Temporal database owned by an application role", breakIt: () => asBootstrap("ALTER DATABASE af_temporal_visibility OWNER TO af_api;", "postgres"), repair: () => asBootstrap("ALTER DATABASE af_temporal_visibility OWNER TO af_temporal;", "postgres"), fails: ["database af_temporal_visibility exists and af_temporal owns it", "database ownership"] },
+		{ name: "PUBLIC may connect to a Temporal database", breakIt: () => asBootstrap("GRANT CONNECT ON DATABASE af_temporal TO PUBLIC;", "postgres"), repair: () => asBootstrap("REVOKE ALL ON DATABASE af_temporal FROM PUBLIC;", "postgres"), fails: ["database af_temporal: PUBLIC holds no right"] },
+		{ name: "an application role that may connect to a Temporal database", breakIt: () => asBootstrap("GRANT CONNECT ON DATABASE af_temporal TO af_api;", "postgres"), repair: () => asBootstrap("REVOKE ALL ON DATABASE af_temporal FROM af_api;", "postgres"), fails: ["no application role holds any right on a Temporal database"] },
+		{ name: "the Temporal role that may connect to the application database", breakIt: () => asBootstrap("GRANT CONNECT ON DATABASE agent_factory TO af_temporal;", "postgres"), repair: () => asBootstrap("REVOKE ALL ON DATABASE agent_factory FROM af_temporal;", "postgres"), fails: ["the Temporal role cannot connect to agent_factory"] },
+		{ name: "a Temporal password that is not the one of the secret file", breakIt: () => asBootstrap("ALTER ROLE af_temporal PASSWORD 'not-the-secret';", "postgres"), repair: async () => asBootstrap(`ALTER ROLE af_temporal PASSWORD '${(await stack.secret("af_temporal")).trim()}';`, "postgres"), fails: ["login as af_temporal to af_temporal "] },
 		// The whole intended policy, not only the grants init writes: a membership, a stray role, an extra right of any kind.
 		{ name: "an application role that is a member of another (the migrator granted to the reader)", breakIt: () => asBootstrap("GRANT af_migrator TO af_reader;"), repair: () => asBootstrap("REVOKE af_migrator FROM af_reader;"), fails: ["role memberships"] },
 		{ name: "a predefined role granted to an application role (it carries no object privilege of its own)", breakIt: () => asBootstrap("GRANT pg_monitor TO af_api;"), repair: () => asBootstrap("REVOKE pg_monitor FROM af_api;"), fails: ["role memberships"] },

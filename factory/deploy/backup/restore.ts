@@ -7,7 +7,8 @@
 // a name no one gave it (agent-factory-restored-<run id>), refuses when any container, volume or network of that name
 // exists (a failed listing is an error, never "nothing there"), labels everything it creates with the run id, and on
 // failure removes only what carries that label. It does not name an existing project, and it never drops or empties a
-// database: the new server's init makes an empty application database and the dump is restored into that one.
+// database: the new server's init makes an empty application database and the dump is restored into that one. The same
+// holds for the Temporal databases of a backup that has them (init makes them empty, the dumps go into them).
 //
 // The old stack and its volume are never touched, and no command removes the old volume. After success a person
 // switches over (docs/agent-factory/recovery.md): stop the old stack, start the new project on the real port.
@@ -17,7 +18,7 @@
 import { resolve } from "node:path";
 import { integerValue, parseCliArgs, reportCliFailure } from "../cli-args.ts";
 import { secretsReadiness } from "../setup-secrets.ts";
-import { applyDatabaseGrants, compareRestored, restoreDump, verifyBackupFiles } from "./restore-check.ts";
+import { applyDatabaseGrants, compareRestored, restoreDump, restoreTemporalDumps, verifyBackupFiles } from "./restore-check.ts";
 import { freePort, newRunId, projectResourcesExist, removeOwned, startStack, type StackOptions } from "../lib.ts";
 
 export interface RestoreOptions {
@@ -44,7 +45,7 @@ export const restore = async (options: RestoreOptions): Promise<RestoreResult> =
 	const project = restoredProjectName(runId);
 	const port = options.port ?? (await freePort());
 	const fail = (problems: string[]): RestoreResult => ({ ok: false, problems, project, port, runId });
-	// The secrets must be ready (all six files, valid, protected, outside a git checkout unless git ignores the place)
+	// The secrets must be ready (all seven files, valid, protected, outside a git checkout unless git ignores the place)
 	// before anything else happens and long before any resource exists: a stack started with a missing or exposed secret
 	// would fail late and leave a half-made project to clean up.
 	try {
@@ -75,6 +76,9 @@ export const restore = async (options: RestoreOptions): Promise<RestoreResult> =
 		const container = await startStack(stack);
 		const restoreError = await restoreDump(container, verified.dumpPath, verified.manifest.dump);
 		if (restoreError) throw new Error(restoreError);
+		// The Temporal databases the backup holds go into the empty ones the new server's init made (owned by af_temporal).
+		const temporalError = await restoreTemporalDumps(container, verified.temporalDumps);
+		if (temporalError) throw new Error(temporalError);
 		await applyDatabaseGrants(container);
 		const problems = await compareRestored(container, verified.manifest);
 		if (problems.length > 0) throw new Error(problems.join("; "));

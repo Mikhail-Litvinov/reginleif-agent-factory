@@ -2,8 +2,9 @@
 
 The application database of Agent Factory. Binding sources: [architecture.md](architecture.md) (decisions D1-D34, the
 task states, state ownership), [governance.md](governance.md) (the Decision Registry and the regulation, whose tables
-are listed below) and the task specification section 4. Status: design. Types are PostgreSQL 16. The
-Temporal database is separate and not described here. "Call" marks a design choice made here, open to veto. The schema
+are listed below) and the task specification section 4. Status: design. Types are PostgreSQL 16. Temporal keeps its own
+two databases on the same server; they hold Temporal's tables, not described here, and only their account, ownership and
+backup are (see "The Temporal databases"). "Call" marks a design choice made here, open to veto. The schema
 is written in Drizzle (D27): the table definitions live in `factory/db/schema/` and are the source of the migrations
 (see Migrations and backup); this document is the design the definitions follow.
 
@@ -520,7 +521,8 @@ later type is an expand step (an enum value).
 
 ## Accounts and rights
 
-Database accounts (none of these is a superuser; Temporal's account has no right on this database and the reverse).
+Database accounts (none of these is a superuser; Temporal's account `af_temporal` has no right on this database and no
+application account has one on Temporal's, see "The Temporal databases").
 The server also has one superuser, `af_bootstrap`. Only the init script and recovery use it, and only on the local socket
 inside the container (its network `pg_hba` line is a reject). No service, script, backup or person uses it in daily work:
 the backup and the restore check run as `af_backup`; only the scratch container of a restore check uses the superuser, to
@@ -533,6 +535,37 @@ restore into a database nobody else reads.
 | `af_control` | As `af_api`, plus the outbox lease updates and the projection updates of `tasks` and `task_runs`; in the registry only the inserts named in Registry tables below (migration 0010 added the gate's `registry_inquiry_results` insert) |
 | `af_backup` | `select` on everything (`pg_dump`) |
 | `af_reader` | Read-only for a person or a tool that looks at the data: sessions are read-only, a 30 s statement timeout, at most 5 connections; holds no table right until one is granted per table |
+| `af_temporal` | Owns `af_temporal` and `af_temporal_visibility` (Temporal's persistence and visibility stores) and has no right anywhere else; used only by the Temporal server and its schema tool |
+
+## The Temporal databases
+
+Temporal's server needs two databases of its own: the persistence store (workflow histories, tasks, timers) and the
+visibility store (the searchable list of executions). They live on the same PostgreSQL server as the application
+database and are separated from it by account, not by server, so one container, one volume and one backup cover both.
+
+- Account: the role `af_temporal` (login, not a superuser, no `createdb`, `createrole`, `replication` or `bypassrls`)
+  with its own secret file `af_temporal` (the seventh one of the secrets directory). Its password is set from that file
+  by `init/lib/temporal.sql`, so a rotated secret reaches the database by running the bootstrap again, never by hand.
+- Databases: `af_temporal` and `af_temporal_visibility`, both owned by `af_temporal`, with `connect` revoked from
+  `PUBLIC`. As owner it may create everything Temporal's schema tool creates in them, so no other account needs a right
+  there and none has one (`af_backup` included: the Temporal dumps are taken as `af_temporal`).
+- Separation in both directions, held twice. First by `pg_hba.conf`: the rule for `af_temporal` names exactly the two
+  databases, and the rule for the application roles names only `agent_factory`, so each side is refused by the rules
+  before a password is asked. Second by privileges: `connect` on `agent_factory`, `postgres` and `template1` is held by
+  nobody but the roles that need it, and `af_temporal` is none of them, and no application role holds `connect` on a
+  Temporal database. A loosened rule alone therefore does not open a door. `af_bootstrap` keeps its reject rule over the
+  network and reaches the Temporal databases over the local socket only, like everything else.
+- One definition: the statements live in `factory/deploy/postgres/init/lib/temporal.sql`, are idempotent (the role and
+  each database are made when missing, then ownership, attributes, password and the `PUBLIC` revoke are set again), and
+  are run by two callers. `init/20-temporal.sh` runs them when the data directory is new. `node
+  deploy/bootstrap-temporal.ts` runs the same file as `af_bootstrap` over the local socket on a data directory that
+  already exists (an installation made before Temporal came, or one whose Temporal objects were changed by hand); a
+  second run changes nothing, and a drifted state is repaired to the same result. It never touches the application
+  database. Steps and order are in [deployment.md](deployment.md) "Adding Temporal to an existing installation".
+- Checks: `deploy/verify-init.ts` proves the role's attributes, the owner and the grants of both databases, that the
+  password of the secret file is the one in force, and that the two sides of the separation hold (the refusal by the rules
+  and the missing `connect`); `tests/temporal-bootstrap.test.ts` runs it all on a real stack.
+- Backup and restore: below, in "Migrations and backup".
 
 Registry tables: `af_api` has `select` and `insert` on all six; `update` only on the columns `status`,
 `status_changed_at`, `status_changed_by` of `registry_records`, on the status and activation columns of
@@ -656,10 +689,16 @@ poll, takes the `pending` rows of `poll_answer_requests` and confirms or refuses
   "migration error" and its check.
 - Backup (spec 18.1): `pg_dump` custom format of the application database, taken with `af_backup`, plus the artifact
   files. Order: artifact files are copied first, then the dump, so every artifact row of the dump has its file (storage
-  keys are content-addressed and files are never changed). The Temporal database is dumped separately and restored as a
-  pair; the backup records both together with the schema version. A backup is not proof: the restore check loads it into
-  a separate environment, runs the migrations to head, checks foreign keys, row counts, artifact checksums, and the
-  reconciliation below.
+  keys are content-addressed and files are never changed). The two Temporal databases are dumped after the application
+  database, each with `pg_dump` custom format as `af_temporal` and in its own snapshot (the one account that may read
+  them), into `<name>.<database>.dump` files with a checksum each; the manifest lists them in an optional `temporal`
+  section with the row counts read in the same snapshot. Both databases are in a backup or neither: a server that has
+  only one is refused and repaired by the bootstrap command first, so a backup never quietly drops half of Temporal's
+  history. The Temporal dumps are not one snapshot with the application dump; the reconciliation below covers that gap.
+  A backup is not proof: the restore check loads it into a separate environment, restores the Temporal dumps into the
+  empty databases that init made there (owned by `af_temporal`), runs the migrations to head, checks foreign keys, row
+  counts of both kinds of database, artifact checksums, and the reconciliation below. Restore does the same into a new
+  project.
 - Reconciliation after a restore (scenario D): a restored database may lag Temporal. Outbox rows that were `done` after
   the backup are unknown, so decisions may be redelivered; this is safe because the Update id is the decision id (1:1 with its outbox row) and the
   workflow checks `used` from the decision row. `PersistTaskEvent` is idempotent by `(task_id, dedupe_key)`, so the

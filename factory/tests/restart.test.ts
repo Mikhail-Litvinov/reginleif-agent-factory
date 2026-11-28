@@ -1,6 +1,7 @@
 // Data survive every way the server container can go away and come back, short of deleting its volume.
 import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
+import { APPLICATION_ROLES } from "../deploy/init-postconditions.ts";
 import { psql, realClock, removeOwned, run, runChecked, waitHealthy, findContainer } from "../deploy/lib.ts";
 import { compose, createTestStack, type TestStack } from "./helpers.ts";
 
@@ -86,7 +87,8 @@ describe("restart", () => {
 
 	it("the init script does not run again on an existing volume (no second role set, same data)", async () => {
 		const count = await psql(stack.container, "af_backup", "SELECT count(*) FROM pg_roles WHERE rolname LIKE 'af\\_%';");
-		assert.equal(count, "6");
+		// The application roles, the bootstrap role and the Temporal role, each made once.
+		assert.equal(count, String(APPLICATION_ROLES.length + 2));
 		assert.equal(await rows(), expected());
 	});
 });
