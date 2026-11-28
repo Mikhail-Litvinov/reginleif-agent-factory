@@ -8,7 +8,7 @@ export { LoadSettings } from "./load-settings.ts";
 export { PersistTaskEvent, type PersistTaskEventInput } from "./persist-task-event.ts";
 export { ReadDecision, type ReadDecisionInput, type ReadDecisionResult } from "./read-decision.ts";
 export { RecordDecisionOutcome, type RecordDecisionOutcomeInput, type RecordDecisionOutcomeResult } from "./record-decision-outcome.ts";
-export { DecisionNotFoundError, isRefusalCode, refusalCodes, type RefusalCode } from "./refusal.ts";
+export { DecisionNotFoundError, isRefusalCode, refusalCodes, TASK_CLOSED, type RefusalCode } from "./refusal.ts";
 
 // The local activities bound to a repo (connected as af_control), keyed by their ActivityCatalog names. Each takes one
 // argument, as Temporal passes it. Timeouts come from the settings `act.<Name>.*` through the ActivityCatalog.

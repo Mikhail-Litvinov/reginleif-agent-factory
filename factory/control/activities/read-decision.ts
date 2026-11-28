@@ -1,5 +1,6 @@
+import { ApplicationFailure } from "@temporalio/activity";
 import type { Repo } from "../../db/repo/index.ts";
-import { DecisionNotFoundError, type RefusalCode } from "./refusal.ts";
+import { DecisionNotFoundError, TASK_CLOSED, type RefusalCode } from "./refusal.ts";
 
 export interface ReadDecisionInput {
 	decisionId: string;
@@ -13,8 +14,15 @@ export interface ReadDecisionResult {
 	deliveryState: string | null;
 	taskStatus: string | null;
 	currentRevision: number | null;
-	// The first refusal the handler's checks find, or null when the decision may be applied.
-	refusal: RefusalCode | null;
+	// Who decided (null: the chief engineer) and what the decision carries; the workflow checks block_kind_mismatch and
+	// block_handled again against its own memory, which is newer than the row.
+	actorId: string | null;
+	payload: unknown;
+	// The revision the actor saw (kinds in `revisionKinds`); the workflow compares it with its own, newer revision.
+	revisionNumber: number | null;
+	// The first refusal the handler's checks find, or null when the decision may be applied. `task_closed` is never a
+	// value here: a final or missing task fails the activity with TASK_CLOSED (the relay owns that outcome).
+	refusal: Exclude<RefusalCode, "task_closed"> | null;
 }
 
 // Kinds that carry the revision the deciding actor saw (temporal.md: approve, reject, request_changes, resolve_block,
@@ -32,10 +40,12 @@ export const ReadDecision = async (repo: Pick<Repo, "decisions" | "tasks" | "own
 	if (!decision) throw new DecisionNotFoundError(input.decisionId);
 	const task = decision.taskId === null ? undefined : await repo.tasks.get(decision.taskId, { includeDeleted: true });
 	const kind = decision.kind ?? "";
-	const base = { decisionId: decision.id, taskId: decision.taskId, kind: decision.kind, deliveryState: decision.deliveryState, taskStatus: task?.status ?? null, currentRevision: task?.currentRevision ?? null };
-	const refuse = (refusal: RefusalCode): ReadDecisionResult => ({ ...base, refusal });
+	const base = { decisionId: decision.id, taskId: decision.taskId, kind: decision.kind, deliveryState: decision.deliveryState, taskStatus: task?.status ?? null, currentRevision: task?.currentRevision ?? null, actorId: decision.actorId, payload: decision.payload, revisionNumber: decision.revisionNumber };
+	const refuse = (refusal: Exclude<RefusalCode, "task_closed">): ReadDecisionResult => ({ ...base, refusal });
 	if (decision.deliveryState === "applied" || decision.deliveryState === "refused") return refuse("already_resolved");
-	if (!task) return refuse("task_closed");
+	// task_closed belongs to the relay (temporal.md): a task that is gone or final has no workflow to answer, so the
+	// workflow side never writes it. Non-retryable: the rows do not come back.
+	if (!task) throw ApplicationFailure.nonRetryable(`task of decision ${decision.id} is gone`, TASK_CLOSED);
 
 	// Actor: an owner must be active; the chief engineer may only resolve a block that it handles.
 	if (decision.actorId !== null) {
@@ -43,7 +53,7 @@ export const ReadDecision = async (repo: Pick<Repo, "decisions" | "tasks" | "own
 	} else if (kind !== "resolve_block") return refuse("actor_not_allowed");
 	else if (task.blockHandler !== "chief_engineer") return refuse("block_handled");
 
-	if (finalStates.has(task.status ?? "")) return refuse("task_closed");
+	if (finalStates.has(task.status ?? "")) throw ApplicationFailure.nonRetryable(`task ${decision.taskId} is ${task.status}`, TASK_CLOSED);
 	const required = onlyIn[kind];
 	if (required !== undefined && task.status !== required) return refuse("not_allowed_in_state");
 	if (task.status === "PAUSED" && !pausedAllows.has(kind)) return refuse("not_allowed_in_state");

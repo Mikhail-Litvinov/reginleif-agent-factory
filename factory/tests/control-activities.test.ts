@@ -4,6 +4,7 @@ import { drizzle } from "drizzle-orm/postgres-js";
 import type { TestWorkflowEnvironment } from "@temporalio/testing";
 import { allTimeoutKeys, createActivityCatalog } from "../control/activity-catalog.ts";
 import { createControlActivities, DecisionNotFoundError, ReadDecision, RecordDecisionOutcome, refusalCodes, type RefusalCode } from "../control/activities/index.ts";
+import { TASK_CLOSED } from "../control/activities/refusal.ts";
 import { migrate } from "../db/migrate.ts";
 import { createRepo, type Repo } from "../db/repo/index.ts";
 import { connectBench, createDatabaseBench } from "./database-bench.ts";
@@ -158,9 +159,10 @@ describe("ReadDecision refusals (stub rows)", () => {
 		assert.equal(await run(stub({ kind: "approve", actorId: null }, { status: "AWAITING_APPROVAL" })), "actor_not_allowed");
 	});
 
-	test("task_closed: a final task and a task that is gone", async () => {
-		assert.equal(await run(stub({ kind: "pause" }, { status: "CANCELLED" })), "task_closed");
-		assert.equal(await run(stub({ kind: "pause" }, undefined)), "task_closed");
+	test("task_closed is not a ReadDecision outcome: a final task and a task that is gone fail with TaskClosed (the relay owns it)", async () => {
+		const isTaskClosed = (e: unknown) => (e as { type?: string; nonRetryable?: boolean }).type === TASK_CLOSED && (e as { nonRetryable?: boolean }).nonRetryable === true;
+		await assert.rejects(run(stub({ kind: "pause" }, { status: "CANCELLED" })), isTaskClosed);
+		await assert.rejects(run(stub({ kind: "pause" }, undefined)), isTaskClosed);
 	});
 
 	test("not_allowed_in_state: PAUSED allows only resume, cancel, add_feedback, revise_requirements", async () => {
