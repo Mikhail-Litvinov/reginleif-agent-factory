@@ -35,6 +35,15 @@ export const decisionRepo = (db: PostgresJsDatabase<any>) => ({
 	byEngineerKey: async (engineerRunId: string, idempotencyKey: string): Promise<Decision | undefined> =>
 		(await db.select().from(taskDecisions).where(and(eq(taskDecisions.engineerRunId, engineerRunId), eq(taskDecisions.idempotencyKey, idempotencyKey))).limit(1))[0],
 	listForTask: async (taskId: string): Promise<Decision[]> => db.select().from(taskDecisions).where(eq(taskDecisions.taskId, taskId)).orderBy(asc(taskDecisions.recordedAt), asc(taskDecisions.id)),
+	// First outcome wins: the row changes only while the decision is unresolved (recorded or delivering), so a repeat
+	// or a late contradicting call writes nothing and gets null. Writes only the four columns af_control may change
+	// (plus updated_at and row_version); the state transitions are checked by the database triggers.
+	resolveOutcome: async (id: string, outcome: { deliveryState: "applied" | "refused"; refusalReason: string | null }): Promise<Decision | null> =>
+		(await db.update(taskDecisions).set({
+			deliveryState: outcome.deliveryState, refusalReason: outcome.refusalReason,
+			deliveredAt: sql`coalesce(${taskDecisions.deliveredAt}, now())`, resolvedAt: sql`now()`,
+			updatedAt: sql`now()`, rowVersion: sql`${taskDecisions.rowVersion} + 1`,
+		}).where(and(eq(taskDecisions.id, id), or(eq(taskDecisions.deliveryState, "recorded"), eq(taskDecisions.deliveryState, "delivering")))).returning())[0] ?? null,
 	updateDelivery: async (id: string, patch: Pick<DecisionInsert, "deliveryState" | "refusalReason" | "deliveredAt" | "resolvedAt">): Promise<Decision | null> =>
 		(await db.update(taskDecisions).set({ ...patch, updatedAt: sql`now()`, rowVersion: sql`${taskDecisions.rowVersion} + 1` }).where(eq(taskDecisions.id, id)).returning())[0] ?? null,
 });

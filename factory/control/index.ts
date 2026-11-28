@@ -2,8 +2,6 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
-import type { SettingsReader } from "../db/repo/settings.ts";
-import type { TaskEventWriter } from "../db/repo/decisions.ts";
 import { createRepo } from "../db/repo/index.ts";
 
 export interface ControlConnectionOptions {
@@ -25,18 +23,6 @@ export const connectControl = async (options: ControlConnectionOptions = {}) => 
 	return { client, db, repo: createRepo(db), close: () => client.end() };
 };
 
-export const LoadSettings = (settings: SettingsReader, keys: readonly string[]): Promise<Record<string, unknown>> => settings.snapshot(keys);
-
-export interface PersistTaskEventInput {
-	id: string;
-	taskId: string;
-	runId: string | null;
-	eventType: string;
-	actorType: "owner" | "worker" | "workflow" | "system";
-	actorId: string | null;
-	payload: unknown;
-	correlationId: string | null;
-	dedupeKey: string;
-}
-
-export const PersistTaskEvent = (taskEvents: TaskEventWriter, event: PersistTaskEventInput) => taskEvents.persist(event);
+// The activities live in ./activities; these re-exports keep existing callers working.
+export { LoadSettings } from "./activities/load-settings.ts";
+export { PersistTaskEvent, type PersistTaskEventInput } from "./activities/persist-task-event.ts";
