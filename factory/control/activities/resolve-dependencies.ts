@@ -10,7 +10,11 @@ export interface ResolvedDependencies {
 	/** Dependencies not yet ACCEPTED: non-empty means WAITING_DEPENDENCIES. */
 	open: string[];
 	satisfied: string[];
+	/** Dependencies that ended in a final state other than ACCEPTED and so never will be accepted (D15): BLOCKED `dependency`. Not in `open`. */
+	failed: string[];
 }
+
+const FAILED_DEPENDENCY_STATUSES: readonly string[] = ["REJECTED", "CANCELLED", "FAILED"];
 
 /** Depth-first search over live edges from `taskId`; returns the cycle path (first node repeated at the end) or null. */
 export const findCycle = async (edges: (id: string) => Promise<string[]>, taskId: string): Promise<string[] | null> => {
@@ -34,10 +38,12 @@ export const ResolveDependencies = async (repo: Pick<Repo, "tasks">, { taskId }:
 	if (cycle) throw ApplicationFailure.nonRetryable(`dependency cycle ${cycle.join(" -> ")}`, DEPENDENCY_CYCLE, cycle);
 	const open: string[] = [];
 	const satisfied: string[] = [];
+	const failed: string[] = [];
 	for (const edge of await repo.tasks.dependencies(taskId)) {
 		const dependency = await repo.tasks.get(edge.dependsOnTaskId);
 		// A deleted or missing dependency task can never become ACCEPTED, so it stays open and the owner sees the wait.
-		(dependency?.status === "ACCEPTED" ? satisfied : open).push(edge.dependsOnTaskId);
+		const status = dependency?.status;
+		(status === "ACCEPTED" ? satisfied : typeof status === "string" && FAILED_DEPENDENCY_STATUSES.includes(status) ? failed : open).push(edge.dependsOnTaskId);
 	}
-	return { open, satisfied };
+	return { open, satisfied, failed };
 };

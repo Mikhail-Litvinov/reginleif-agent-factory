@@ -1,6 +1,7 @@
 // In-memory state of TaskWorkflow (temporal.md "TaskWorkflow keeps in memory") and the names it is made of. Workflow-side
 // module: pure data and types, no clock, no randomness, no I/O, so it bundles with the workflow code and the tests use it too.
 import type { RefusalCode } from "../control/activities/refusal.ts";
+import type { TaskProjection } from "../db/repo/decisions.ts";
 
 /** The 16 states of the architecture table (architecture.md, task state machine). */
 export const TASK_STATUSES = [
@@ -85,18 +86,41 @@ export interface TaskState {
 	readonly regulationVersionId: string | null;
 	readonly budgetUsed: number;
 	readonly contractVersion: number;
+	/** The agent the current attempt was routed to (null before SelectAgent); projected to `tasks.assigned_agent_id`. */
+	readonly agentId: string | null;
+	/** Count of lifecycle events written: the dedupe key `lifecycle:<n>` of the next one, so a replay or a Continue-As-New repeats the same key. */
+	readonly eventSeq: number;
+	/** Set once the whole `no_eligible_agent` wait of this attempt was announced, so the notice goes out once per attempt. */
+	readonly noAgentNoticeAttempt: number | null;
+	/** The question or limit the last run ended with, kept for the BLOCKED reason and the gate. */
+	readonly runOutcome: string | null;
+	/** Runs started since the last rework round began: bounded by `attempt.max`. `attempt` itself only grows. */
+	readonly attemptsInRound: number;
+	/** Counts the SelectAgent calls made so far: the `attempt` field of its key, so a wake or `allow_agent` selects again under a new key. */
+	readonly selectionSeq: number;
+	/** The last run's execution id, kept after `executionId` is cleared: the publish after ACCEPTED goes to that run's machine. */
+	readonly lastExecutionId: string | null;
 }
 
 /** The start argument of the workflow (`[{taskId}]`); `carried` is set only by Continue-As-New. */
 export interface TaskWorkflowInput {
 	readonly taskId: string;
 	readonly carried?: TaskState;
+	/** Run only the operation matrix and decisions, not the lifecycle (package 54's bench; tests of the matrix alone). Carried over Continue-As-New. */
+	readonly decisionsOnly?: boolean;
 }
 
 /** The Update argument: only the decision id (the relay never carries the payload; ReadDecision reads it, D23). */
 export interface DecisionUpdateInput {
 	readonly decisionId: string;
 }
+
+/** The columns of the `tasks` row that follow the workflow (temporal.md "The task row follows the workflow"). */
+export const projectionOf = (state: TaskState): TaskProjection => ({
+	status: state.status, currentRevision: state.revision, blockKind: state.blockKind, blockReason: state.blockReason,
+	blockHandler: state.blockHandler, resumeTo: state.resumeTo, pauseRequested: state.pauseRequested, stopping: state.stopping,
+	endUnconfirmed: state.endUnconfirmed, assignedAgentId: state.agentId, completed: isFinal(state.status),
+});
 
 /** Revision of the contract of the carried state; a Continue-As-New into code with another one is a patch concern (PatchGate). */
 export const CONTRACT_VERSION = 1;
@@ -108,4 +132,6 @@ export const initialState = (taskId: string): TaskState => ({
 	blockKind: null, blockHandler: null, blockReason: null, revisionStored: false, reselectAgent: false,
 	allowedAgents: [], dependencyIds: [], childIds: [], handled: {}, settings: null,
 	regulationVersionId: null, budgetUsed: 0, contractVersion: CONTRACT_VERSION,
+	agentId: null, eventSeq: 0, noAgentNoticeAttempt: null, runOutcome: null, attemptsInRound: 0, selectionSeq: 0,
+	lastExecutionId: null,
 });

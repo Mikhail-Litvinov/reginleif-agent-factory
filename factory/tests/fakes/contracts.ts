@@ -77,6 +77,8 @@ export const AgentReport = z.strictObject({
 	uncheckedScenarios: z.array(z.string()),
 	requirementDeviations: z.array(z.string()),
 	finalStatus: z.enum(["done", "partial", "failed"]),
+	/** Only a planner run fills it: the child task proposals CreateChildTasks takes (temporal.md "Planning"). */
+	proposals: z.array(z.strictObject({ id: ref, title: z.string(), requirements: z.string(), covers: z.array(z.string()) })).optional(),
 });
 
 /** Result of CollectResults and of the adapter's collectResult: a report, or a schema finding that is data, not an error. */

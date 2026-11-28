@@ -178,5 +178,18 @@ export const memoryRefusal = (state: TaskState, kind: UpdateKind, read: Decision
 		if (typeof asked === "string" && (!isBlockKind(asked) || asked !== state.blockKind)) return "block_kind_mismatch";
 	}
 	if (REVISION_KINDS.includes(kind) && read.revisionNumber !== state.revision) return "revision_stale";
+	return payloadRefusal(kind, read.payload);
+};
+
+/** The payload forms of the two kinds that carry a value (temporal.md "Refusal codes", `invalid_payload`): last, after every state check. */
+const payloadRefusal = (kind: UpdateKind, payload: unknown): "invalid_payload" | null => {
+	if (kind === "change_priority") {
+		const priority = payloadField(payload, "priority");
+		return typeof priority === "number" && Number.isFinite(priority) ? null : "invalid_payload";
+	}
+	if (kind === "allow_agent") {
+		const agent = payloadField(payload, "agent_id");
+		return typeof agent === "string" && agent !== "" ? null : "invalid_payload";
+	}
 	return null;
 };

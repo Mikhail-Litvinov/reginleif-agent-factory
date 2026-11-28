@@ -126,6 +126,20 @@ describe("memoryRefusal (order of checks)", () => {
 		for (const status of FINAL_STATUSES) assert.equal(memoryRefusal(sample(status), "pause", { actorId: "o", payload: {}, revisionNumber: 1 }), "not_allowed_in_state");
 	});
 
+	it("a payload the cell cannot apply is invalid_payload, checked last (after the state checks)", () => {
+		const read = (payload: Record<string, unknown>) => ({ actorId: "o", payload, revisionNumber: null });
+		for (const payload of [{}, { priority: "5" }, { priority: null }, { priority: Number.NaN }, { priority: Number.POSITIVE_INFINITY }]) {
+			assert.equal(memoryRefusal(sample("ASSIGNED"), "change_priority", read(payload)), "invalid_payload", JSON.stringify(payload));
+			assert.equal(memoryRefusal(sample("RUNNING", { executionId: "e1" }), "change_priority", read(payload)), "invalid_payload", JSON.stringify(payload));
+		}
+		for (const priority of [0, 5, -1, 2.5]) assert.equal(memoryRefusal(sample("ASSIGNED"), "change_priority", read({ priority })), null, String(priority));
+		for (const payload of [{}, { agent_id: "" }, { agent_id: 3 }, { agent_id: null }]) {
+			assert.equal(memoryRefusal(sample("ASSIGNED"), "allow_agent", read(payload)), "invalid_payload", JSON.stringify(payload));
+		}
+		assert.equal(memoryRefusal(sample("ASSIGNED"), "allow_agent", read({ agent_id: "agent-7" })), null);
+		assert.equal(memoryRefusal(sample("ACCEPTED"), "change_priority", read({})), "not_allowed_in_state");
+	});
+
 	it("pause/resume flags follow the state: resume without a pending pause is not allowed", () => {
 		assert.equal(memoryRefusal(sample("RUNNING", { executionId: "e1" }), "resume", { actorId: "o", payload: {}, revisionNumber: null }), "not_allowed_in_state");
 		assert.equal(memoryRefusal(sample("RUNNING", { executionId: "e1", pauseRequested: true }), "resume", { actorId: "o", payload: {}, revisionNumber: null }), null);

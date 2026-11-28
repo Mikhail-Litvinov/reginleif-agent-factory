@@ -172,7 +172,7 @@ describe("ReadDecision refusals (stub rows)", () => {
 	});
 
 	test("every refusal code is a code the handler can name", () => {
-		const named: RefusalCode[] = ["not_allowed_in_state", "revision_stale", "actor_not_allowed", "already_resolved", "block_kind_mismatch", "block_handled", "task_closed"];
+		const named: RefusalCode[] = ["not_allowed_in_state", "revision_stale", "actor_not_allowed", "already_resolved", "block_kind_mismatch", "block_handled", "task_closed", "invalid_payload"];
 		assert.deepEqual([...refusalCodes], named);
 	});
 });
@@ -193,7 +193,7 @@ describe("local activities on the temporal bench", () => {
 		const catalog = createActivityCatalog(await controlRepo.settings.snapshot(allTimeoutKeys()));
 		const decision = await seedDecision("revise_requirements", { revisionNumber: 999 });
 		const result = await withWorker(
-			{ env, taskQueue: "control-activities", workflowsPath: workflowsPathOf(new URL("./temporal/read-decision-workflow.ts", import.meta.url).href), activities: createControlActivities(controlRepo) },
+			{ env, taskQueue: "control-activities", workflowsPath: workflowsPathOf(new URL("./temporal/read-decision-workflow.ts", import.meta.url).href), activities: createControlActivities(controlRepo, drizzle(controlClient)) },
 			() => env.client.workflow.execute("ReadDecisionWorkflow", { taskQueue: "control-activities", workflowId: "read-decision-bench", args: [{ decisionId: decision.id, startToCloseSeconds: catalog.timeouts("ReadDecision").S }] }),
 		);
 		assert.equal(result.decisionId, decision.id);

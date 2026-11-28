@@ -3,6 +3,7 @@ import type { PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import { deviceSessions } from "../schema/device-sessions.ts";
 import { confirmations, idempotencyKeys, outboxEvents, taskDecisions } from "../schema/decisions.ts";
 import { taskEvents } from "../schema/runs.ts";
+import { tasks } from "../schema/tasks.ts";
 
 type DecisionInsert = typeof taskDecisions.$inferInsert;
 type Decision = typeof taskDecisions.$inferSelect;
@@ -138,10 +139,32 @@ export const idempotencyKeyRepo = (db: PostgresJsDatabase<any>) => ({
 
 export type DecisionRepository = ReturnType<typeof decisionRepo>;
 
+/** The columns of a task's row the workflow owns (temporal.md "The task row follows the workflow"): the same names af_control may update. */
+export interface TaskProjection {
+	status: string;
+	currentRevision: number;
+	blockKind: string | null;
+	blockReason: string | null;
+	blockHandler: string | null;
+	resumeTo: string | null;
+	pauseRequested: boolean;
+	stopping: boolean;
+	endUnconfirmed: boolean;
+	assignedAgentId: string | null;
+	/** Set (to now) when the projected status is final. */
+	completed: boolean;
+}
+
 export const taskEventRepo = (db: PostgresJsDatabase<any>) => ({
-	persist: async (event: typeof taskEvents.$inferInsert & { taskId: string; dedupeKey: string }): Promise<typeof taskEvents.$inferSelect> => db.transaction(async (tx) => {
+	// With `projection` the task's row is brought to it in the same transaction as the event, only when the event is new
+	// (a replayed event already committed its projection). The status change is checked by the af_task_guard trigger, the
+	// activity writes no transition row.
+	persist: async (event: typeof taskEvents.$inferInsert & { taskId: string; dedupeKey: string }, projection?: TaskProjection): Promise<typeof taskEvents.$inferSelect> => db.transaction(async (tx) => {
 		const inserted = (await tx.insert(taskEvents).values(event).onConflictDoNothing({ target: [taskEvents.taskId, taskEvents.dedupeKey] }).returning())[0];
-		if (inserted) return inserted;
+		if (inserted) {
+			if (projection) await projectTask(tx, event.taskId, projection);
+			return inserted;
+		}
 		const existing = (await tx.select().from(taskEvents).where(and(eq(taskEvents.taskId, event.taskId), eq(taskEvents.dedupeKey, event.dedupeKey))).limit(1))[0];
 		if (!existing) throw new Error("task event id conflicts with a different event");
 		return existing;
@@ -158,3 +181,18 @@ export const taskEventRepo = (db: PostgresJsDatabase<any>) => ({
 });
 
 export type TaskEventWriter = Pick<ReturnType<typeof taskEventRepo>, "persist">;
+
+const projectTask = async (tx: PostgresJsDatabase<any>, taskId: string, p: TaskProjection): Promise<void> => {
+	const row = (await tx.select().from(tasks).where(eq(tasks.id, taskId)).for("no key update").limit(1))[0];
+	if (!row) throw new Error(`task ${taskId} not found`);
+	const same = row.status === p.status && row.currentRevision === p.currentRevision && row.blockKind === p.blockKind && row.blockReason === p.blockReason
+		&& row.blockHandler === p.blockHandler && row.resumeTo === p.resumeTo && row.pauseRequested === p.pauseRequested && row.stopping === p.stopping
+		&& row.endUnconfirmed === p.endUnconfirmed && row.assignedAgentId === p.assignedAgentId;
+	if (same) return;
+	await tx.update(tasks).set({
+		status: p.status, currentRevision: p.currentRevision, blockKind: p.blockKind, blockReason: p.blockReason, blockHandler: p.blockHandler, resumeTo: p.resumeTo,
+		pauseRequested: p.pauseRequested, stopping: p.stopping, endUnconfirmed: p.endUnconfirmed, assignedAgentId: p.assignedAgentId,
+		...(p.completed && row.completedAt === null ? { completedAt: sql`now()` } : {}),
+		updatedAt: sql`now()`, rowVersion: sql`${tasks.rowVersion} + 1`,
+	}).where(eq(tasks.id, taskId));
+};

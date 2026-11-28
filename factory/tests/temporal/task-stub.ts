@@ -97,7 +97,7 @@ export const withControlWorker = async <T>(env: TestWorkflowEnvironment, stub: S
 /** Starts a TaskWorkflow, optionally from a carried state (what Continue-As-New hands on), under a fresh task id. */
 export const startTask = async (client: Client, carried?: Partial<TaskState>) => {
 	const taskId = carried?.taskId ?? randomUUID();
-	const input = carried === undefined ? { taskId } : { taskId, carried: { ...initialState(taskId), ...carried, taskId } };
+	const input = carried === undefined ? { taskId, decisionsOnly: true } : { taskId, decisionsOnly: true, carried: { ...initialState(taskId), ...carried, taskId } };
 	const handle = await client.workflow.start("TaskWorkflow", { taskQueue: CONTROL_QUEUE, workflowId: taskWorkflowId(taskId), args: [input] });
 	return { taskId, handle };
 };
@@ -113,7 +113,7 @@ export const updateWithStart = (client: Client, taskId: string, carried: Partial
 		args: [{ decisionId }],
 		startWorkflowOperation: new WithStartWorkflowOperation("TaskWorkflow", {
 			taskQueue: CONTROL_QUEUE, workflowId: taskWorkflowId(taskId), workflowIdConflictPolicy: "USE_EXISTING",
-			args: [{ taskId, carried: { ...initialState(taskId), ...carried, taskId } }],
+			args: [{ taskId, decisionsOnly: true, carried: { ...initialState(taskId), ...carried, taskId } }],
 		}),
 	});
 

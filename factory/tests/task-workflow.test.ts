@@ -134,10 +134,17 @@ describe("TaskWorkflow: refusal codes", () => {
 			code: "block_handled", kind: "resolve_block", extra: { actorId: null, revisionNumber: 1 },
 			carried: { status: "BLOCKED", blockKind: "scope", blockHandler: "owner", blockReason: "scope unclear" },
 		},
+		// A payload the cell cannot apply is refused, never applied tolerantly (the cell is `prio` before RUNNING, `prioLater` after).
+		{ code: "invalid_payload", kind: "change_priority", carried: { status: "ASSIGNED" }, extra: { payload: {} } },
+		{ code: "invalid_payload", kind: "change_priority", carried: { status: "ASSIGNED" }, extra: { payload: { priority: "5" } } },
+		{ code: "invalid_payload", kind: "change_priority", carried: { status: "RUNNING", executionId: "e1" }, extra: { payload: { priority: null } } },
+		{ code: "invalid_payload", kind: "allow_agent", carried: { status: "ASSIGNED" }, extra: { payload: {} } },
+		{ code: "invalid_payload", kind: "allow_agent", carried: { status: "ASSIGNED" }, extra: { payload: { agent_id: "" } } },
+		{ code: "invalid_payload", kind: "allow_agent", carried: { status: "ASSIGNED" }, extra: { payload: { agent_id: 3 } } },
 	];
 
 	it("the cases name every code the workflow can find, task_closed is the validator's (next test)", () => {
-		assert.deepEqual([...new Set(cases.map((c) => c.code))].sort(), ["actor_not_allowed", "already_resolved", "block_handled", "block_kind_mismatch", "not_allowed_in_state", "revision_stale"]);
+		assert.deepEqual([...new Set(cases.map((c) => c.code))].sort(), ["actor_not_allowed", "already_resolved", "block_handled", "block_kind_mismatch", "invalid_payload", "not_allowed_in_state", "revision_stale"]);
 	});
 
 	for (const c of cases) {
