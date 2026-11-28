@@ -479,11 +479,16 @@ Names in the other documents map to one place:
 |---|---|
 | `attempt.max`, `autoFix.max`, `rework.maxRounds`, `run.maxSeconds`, `child.maxDepth`, `child.maxPerParent` | Policy columns `max_attempts`, `max_auto_fixes`, `max_rework_rounds`, `max_run_seconds`, `max_child_depth`, `max_children_per_task` |
 | Budgets (tokens, cost) | Policy columns `max_tokens`, `max_cost` |
-| `retry.*`, `act.*`, `limit.maxWait`, `gpu.maxSeconds`, `history.maxEvents`, `disk.minFreeGb`, `clock.maxSkew`, `confirm.windowSeconds`, `stop.orderSeconds`, `token.overlapSeconds`, `rate.*`, `page.*`, `notice.repeatHours` | Table `settings`, global |
+| `retry.*`, `act.*`, `liveness.intervalSeconds`, `liveness.silenceSeconds`, `limit.maxWait`, `gpu.maxSeconds`, `history.maxEvents`, `disk.minFreeGb`, `clock.maxSkew`, `confirm.windowSeconds`, `stop.orderSeconds`, `token.overlapSeconds`, `rate.*`, `page.*`, `notice.repeatHours` | Table `settings`, global |
 | `registry.*`: `enabled` (default off, G1), `gateTimeoutMs`, `clauseMaxBytes`, `embeddingModel`, `searchLimit`, the text and vector thresholds, `draftNoticeHours` | Table `settings`, global; thresholds are set in phase 2 by the measurement of `registry-search` |
 | `personnel.*`: `mode` (`observe` or `enforce`, default `observe`; the owner's switch), `minFacts`, `weights`, `terms.*` | Table `settings`, global; starting values calibrated on real data in phase 8 |
 
 The workflow reads both through `LoadSettings` into its snapshot.
+
+The liveness keys: `liveness.intervalSeconds` is the interval of the Temporal Schedule that starts `MachineLivenessWorkflow`,
+and `liveness.silenceSeconds` is the silence after which a worker's last heartbeat (`workers.last_seen_at`) makes it OFFLINE.
+No document fixes a heartbeat interval, so no default is derived: both are measured in the measuring phase, as `act.*` are,
+and an absent or non-positive value stops the Control Worker at start (`factory/control/worker.ts`).
 
 ## Notifications
 
@@ -491,7 +496,10 @@ The workflow reads both through `LoadSettings` into its snapshot.
 `task_blocked:<task id>:<blocked_at>`); `task_id`/`worker_id` nullable; `state` enum (`open`, `resolved`);
 `occurrences int`; `first_raised_at`; `last_raised_at`; `delivered_at`; `resolved_at`. Unique index on `dedup_key where
 state = 'open'`: raising an open notice only bumps `occurrences` and `last_raised_at`, so one outage gives one message.
-A resolved notice allows a new one. Repeating an open notice is the setting `notice.repeatHours`, empty (never) until
+A resolved notice allows a new one. The liveness activity of `MachineLivenessWorkflow` resolves the open `worker_offline`
+notice of a worker when that worker's heartbeat returns (`state = 'resolved'`, `resolved_at` set), so each outage raises its
+own notice: the next silence of the same worker creates a new row, and continued silence only bumps the open one. The status a recovering worker gets is derived, not stored: `online` when its `contract_version` is in the supported range (the current contract, or the one before it when the current is above 1: the same rule as the API header check in `factory/api/handlers/tasks.ts`, shared as `factory/contracts/contract-range.ts`), `outdated` otherwise, so recovery never writes plain `online` over an unsupported contract. The contract version is already a column of `workers`, so this needs no migration.
+Repeating an open notice is the setting `notice.repeatHours`, empty (never) until
 its phase (see Open, decided in its phase). Index `(commit_xid, seq)` (the stream cursor: a client reads only the
 notices older than the oldest running transaction, see Conventions).
 

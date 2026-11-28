@@ -1,7 +1,8 @@
 import type { HandlerDeps, HandlerRegistrar } from './shared.ts';
 import { apiRow, apiRows, id, query, response, writeAudit } from './shared.ts';
+import { isContractSupported } from '../../contracts/contract-range.ts';
 
-export function registerWorkerHandlers(api: HandlerRegistrar, { repo, now = () => new Date(), queueGatewayEnabled = false }: HandlerDeps): void {
+export function registerWorkerHandlers(api: HandlerRegistrar, { repo, now = () => new Date(), queueGatewayEnabled = false, contractVersion = 1 }: HandlerDeps): void {
   api.register('GET', '/workers', async context => {
     const params = query(context);
     const rows = await repo.workers.list({ status: params.get('status') ?? undefined, platform: params.get('platform') ?? undefined });
@@ -45,7 +46,7 @@ export function registerWorkerHandlers(api: HandlerRegistrar, { repo, now = () =
       const registered = await tx.workers.register({
         id: ownId, machineId: input.machine_id,
         name: input.name, platform: input.platform, capabilities: input.capabilities, version: input.version,
-        contractVersion: input.contract_version, status: 'online', concurrencyLimit: own.concurrencyLimit,
+        contractVersion: input.contract_version, status: isContractSupported(input.contract_version, contractVersion) ? 'online' : 'outdated', concurrencyLimit: own.concurrencyLimit,
       });
       if (!registered) return null;
       await writeAudit(tx, context, 'worker.register', 'worker', registered.id, 'ok', { machine_id: input.machine_id });

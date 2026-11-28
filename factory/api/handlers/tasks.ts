@@ -6,6 +6,7 @@ import * as resource from '../../contracts/schemas/resources.ts';
 import { DependencyCreate } from '../../contracts/schemas/requests.ts';
 import { routes } from '../../contracts/routes.ts';
 import { phaseTwoBlockKinds } from '../../contracts/states.ts';
+import { isContractSupported } from '../../contracts/contract-range.ts';
 import { driverError } from '../../db/repo/errors.ts';
 import { principalOf } from '../../db/repo/audit.ts';
 import type { Repo } from '../../db/repo/index.ts';
@@ -418,7 +419,7 @@ export function registerTasks(api: Api, repo: Repo, { clock = () => new Date(), 
 
 function checkContract(context: HandlerContext, current: number) {
   const version = header(context, 'x-factory-contract');
-  if (version !== String(current) && (current === 1 || version !== String(current - 1))) fail('contract_unsupported', 426);
+  if (!isContractSupported(version, current)) fail('contract_unsupported', 426);
 }
 
 function mappedOwner(repo: Repo, press: unknown, telegramId: unknown) {
