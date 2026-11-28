@@ -173,6 +173,9 @@ the registry exists.
 
 Interfaces: `WorkflowClient` (api and relay to Temporal; updates carry only a decision id); `ActivityCatalog` (names and
 queues, shared with the worker); `PatchGate` (`patched()` use, until Worker Versioning is confirmed, audit 8.5).
+Files: `factory/control/workflow-client.ts`, `factory/control/activity-catalog.ts` (settings `act.<Name>.<S|Q|H|C>`, seconds),
+`factory/workflows/patch-gate.ts` (in `workflows/` because the workflow bundle imports it). Workflow files bundle under type
+stripping with `.ts` imports; see testing.md, "Workflow test bench".
 Migrations: none new. Rig files: none. Proving check: `state-exit`, `review-provider`, `check-not-run`,
 `relay-press-once`, `control-no-queue`, failure scenarios F1-F6 (server side), replay test, the Temporal restart checks
 (history survives a reboot and a restart), S6 against the real proxy, and the server path of the registry:

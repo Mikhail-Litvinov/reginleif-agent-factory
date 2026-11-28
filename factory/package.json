@@ -22,6 +22,11 @@
 		"typescript": "^5.9.0"
 	},
 	"dependencies": {
+		"@temporalio/activity": "1.27.0",
+		"@temporalio/client": "1.27.0",
+		"@temporalio/testing": "1.27.0",
+		"@temporalio/worker": "1.27.0",
+		"@temporalio/workflow": "1.27.0",
 		"drizzle-orm": "0.45.4",
 		"postgres": "3.4.9",
 		"zod": "4.6.7"

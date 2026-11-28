@@ -13,5 +13,5 @@
 		"noUncheckedIndexedAccess": true,
 		"skipLibCheck": true
 	},
-	"include": ["db/**/*.ts", "deploy/**/*.ts", "tests/**/*.ts"]
+	"include": ["db/**/*.ts", "deploy/**/*.ts", "tests/**/*.ts", "control/**/*.ts", "workflows/**/*.ts"]
 }

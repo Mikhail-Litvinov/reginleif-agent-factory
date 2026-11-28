@@ -35,6 +35,22 @@ fail: each has a pass criterion and a fail criterion, and a new check is first s
 
 Factory tests live in `factory/tests` with their own commands; the Rig suite never imports them.
 
+### Workflow test bench
+
+`factory/tests/temporal/bench.ts` starts one `TestWorkflowEnvironment.createTimeSkipping()` per test file and runs a Worker with
+`enableNonLocalActivities: false` (D28: workflows call server steps only through `proxyLocalActivities`). The workflow file is bundled
+by the Worker's webpack under Node's type stripping; a workflow file may import `@temporalio/workflow`, other workflow modules with
+the `.ts` extension (for example `workflows/patch-gate.ts`) and `import type` of activity modules, nothing else. `workflowsPath` is
+absolute with forward slashes (`workflowsPathOf`). `tests/temporal-bench.test.ts` proves bundle, local activity, PatchGate and
+environment together.
+
+The time-skipping server is a binary. The SDK's default fetches it from `temporal.download` into the system temp dir (here the
+project `.tmp`, swept after 3 days) with a 1 day ttl, then fetches again. On the owner's machine `temporal.download` resets
+connections, so the bench uses the same binary from GitHub: asset `temporal-test-server_<ver>_<os>_<arch>` of the
+`temporalio/sdk-java` release (1.41.1 was used), unpacked as `~/.agent-factory/temporal-test-server/temporal-test-server[.exe]`
+(`AF_TEMPORAL_TEST_CACHE` moves the folder, `AF_TEMPORAL_TEST_SERVER` names the file). With the file there the run is offline; without
+it the bench falls back to the SDK's cached download into that same folder with a 3650 day ttl, which needs the network once.
+
 ## State, decision and queue checks
 
 Table-driven where the rule is data; each can fail (a cell removed, a check dropped).
