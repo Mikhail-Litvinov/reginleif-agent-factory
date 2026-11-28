@@ -1,7 +1,7 @@
 // Package 53 on the server path: the activities are called the way a workflow calls them, against a real database.
-// Roles: RecordPrecedent, CaptureRegulationVersion and the fail-open event run as af_control (the Control Worker's role);
-// the question gate attaches found records to the inquiry (registry_inquiry_results), which migration 0006 grants to af_api
-// only, so the gate here runs on an af_api repo (the API process's role).
+// Roles: the question gate, RecordPrecedent, CaptureRegulationVersion and the fail-open event run as af_control (the Control
+// Worker's role). The gate attaches found records to the inquiry (registry_inquiry_results), which migration 0010 grants to
+// af_control with a trigger guard; setup and the inquiry service calls of the API side stay on af_api.
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { after, before, describe, it } from "node:test";
@@ -55,7 +55,7 @@ before(async () => {
 });
 after(async () => { await Promise.all([migrator?.end(), api?.end(), control?.end()]); });
 
-const searchOf = () => createRegistrySearch(apiRepo, () => undefined);
+const searchOf = () => createRegistrySearch(controlRepo,() => undefined);
 const agentActor = { tokenId: agentSession.tokenId, sessionRef: agentSession.sessionRef, runId: run };
 const persistEvent = (event: Parameters<typeof controlRepo.taskEvents.persist>[0]) => controlRepo.taskEvents.persist(event);
 
@@ -67,7 +67,7 @@ describe("registry-first (server path)", () => {
 		const opened = await service.openInquiry(actor, { id: randomUUID(), tokenId: agentSession.tokenId, sessionRef: agentSession.sessionRef, runId: run, problem: "Other words", category: "general" }, [
 			{ id: randomUUID(), recordId: owner.id, recordVersion: owner.version, foundBy: "inquiry", ranking: "fulltext", score: "1", matchedFields: ["problem"] },
 		]);
-		const gate = createQuestionGate({ repo: apiRepo, search: searchOf(), persistEvent, timer: { set: () => 1, clear: () => {} } });
+		const gate = createQuestionGate({ repo: controlRepo, search: searchOf(), persistEvent, timer: { set: () => 1, clear: () => {} } });
 		const blocked = await gate({ taskId: task, runId: run, kind: "agent_question", actor: agentActor, inquiryId: opened.inquiry.id, question: "Amber lantern" });
 		assert.equal(blocked.gated, true);
 		assert.equal(blocked.gated && blocked.pass, false);
@@ -77,7 +77,7 @@ describe("registry-first (server path)", () => {
 	});
 
 	it("a block that is not a question never touches the registry", async () => {
-		const gate = createQuestionGate({ repo: apiRepo, search: (() => { throw new Error("the registry must not be asked"); }) as any, persistEvent });
+		const gate = createQuestionGate({ repo: controlRepo, search: (() => { throw new Error("the registry must not be asked"); }) as any, persistEvent });
 		assert.deepEqual(await gate({ taskId: task, runId: run, kind: "execution", actor: agentActor, inquiryId: randomUUID(), question: "x" }), { gated: false });
 	});
 });
@@ -92,7 +92,7 @@ describe("registry-fail-open (server path)", () => {
 			let armed!: (callback: () => void) => void;
 			const timerArmed = new Promise<() => void>(resolve => { armed = resolve; });
 			const gate = createQuestionGate({
-				repo: apiRepo, search: () => new Promise(() => {}), persistEvent,
+				repo: controlRepo, search: () => new Promise(() => {}), persistEvent,
 				timer: { set: (callback, ms) => { assert.equal(ms, gateTimeoutMs); armed(callback); return 1; }, clear: () => {} },
 			});
 			const result = gate({ taskId: task, runId: run, kind: "scope", raisedByQuestion: true, actor: agentActor, inquiryId: opened.inquiry.id, question: "Slow question" });
@@ -172,5 +172,26 @@ describe("registry-capture (server path)", () => {
 
 	it("a missing run is an error, not a silent no-op", async () => {
 		await assert.rejects(capture()({ runId: randomUUID() }), RangeError);
+	});
+});
+
+describe("af_control grants of migration 0010", () => {
+	it("attaches a gate-found record without a verdict, and nothing more", async () => {
+		const service = createRegistryService(apiRepo);
+		const actor = { type: "agent" as const, id: randomUUID(), ...agentSession, runId: run };
+		const opened = await service.openInquiry(actor, { id: randomUUID(), tokenId: agentSession.tokenId, sessionRef: agentSession.sessionRef, runId: run, problem: "Grant boundary", category: "general" }, []);
+		const inquiry = opened.inquiry.id;
+		const resultId = randomUUID();
+		await control`INSERT INTO registry_inquiry_results (id, inquiry_id, record_id, record_version, found_by, ranking, score) VALUES (${resultId}, ${inquiry}, ${ownerRecordId}, 1, 'gate', 'fulltext', 1)`;
+		// No verdict, no found_by other than the gate: the verdict stays af_api's.
+		await assert.rejects(control`INSERT INTO registry_inquiry_results (id, inquiry_id, record_id, record_version, found_by, ranking, score) VALUES (${randomUUID()}, ${inquiry}, ${ownerRecordId}, 1, 'inquiry', 'fulltext', 1)`, /gate-found records/i);
+		await assert.rejects(control`INSERT INTO registry_inquiry_results (id, inquiry_id, record_id, record_version, found_by, ranking, score, verdict) VALUES (${randomUUID()}, ${inquiry}, ${ownerRecordId}, 1, 'gate', 'fulltext', 1, 'applies')`, /gate-found records/i);
+		// No update of any column, no delete, no insert into the inquiry itself.
+		await assert.rejects(control`UPDATE registry_inquiry_results SET verdict = 'applies' WHERE id = ${resultId}`, /permission denied/i);
+		await assert.rejects(control`UPDATE registry_inquiry_results SET ranking = 'trigram' WHERE id = ${resultId}`, /permission denied/i);
+		await assert.rejects(control`DELETE FROM registry_inquiry_results WHERE id = ${resultId}`, /permission denied/i);
+		await assert.rejects(control`INSERT INTO registry_inquiries (id) VALUES (${randomUUID()})`, /permission denied/i);
+		// af_api still sets the verdict on the row control attached.
+		await service.setVerdict(actor, inquiry, ownerRecordId, { verdict: "not_applicable", difference: "Different situation" });
 	});
 });

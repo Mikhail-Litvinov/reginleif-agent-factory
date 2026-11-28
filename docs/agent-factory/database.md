@@ -528,7 +528,7 @@ restore into a database nobody else reads.
 |---|---|
 | `af_migrator` | Owns the schema; DDL; used only by the migration step, never by a running service |
 | `af_api` | `select`; `insert` and `update` on mutable tables; `insert` and `select` only on immutable ones; no `delete` anywhere |
-| `af_control` | As `af_api`, plus the outbox lease updates and the projection updates of `tasks` and `task_runs` |
+| `af_control` | As `af_api`, plus the outbox lease updates and the projection updates of `tasks` and `task_runs`; in the registry only the inserts named in Registry tables below (migration 0010 added the gate's `registry_inquiry_results` insert) |
 | `af_backup` | `select` on everything (`pg_dump`) |
 | `af_reader` | Read-only for a person or a tool that looks at the data: sessions are read-only, a 30 s statement timeout, at most 5 connections; holds no table right until one is granted per table |
 
@@ -538,7 +538,9 @@ Registry tables: `af_api` has `select` and `insert` on all six; `update` only on
 `registry_inquiry_results` and on `consumed_at` of `registry_records` of kind `permission` (the single use of a permission
 record, set by the rights check in the transaction of the action it allows; all three once) and on nothing else; no
 `delete`. `af_control` inserts precedents and drafts only (a check on
-`source`). The status triggers write `audit_log` as the table owner, so no account needs more. The `registry` token has no
+`source`), and, since migration 0010, rows of `registry_inquiry_results` that the registry-first gate adds (a trigger
+refuses any other `found_by` and any verdict column for it; the Control Worker runs the gate and holds only `af_control`);
+it has no `update` and no `delete` there. The status triggers write `audit_log` as the table owner, so no account needs more. The `registry` token has no
 database account: it reaches these tables only through the API routes.
 
 Rights tables: `af_api` has `select` and `insert` on all six; `update` only on the status columns of `roles` (changed with

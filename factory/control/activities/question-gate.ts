@@ -45,9 +45,9 @@ const eventId = (key: string): string => {
  * Registry-first gate of governance G9 for agent_question and for scope blocks raised by an agent's question.
  * The registry is asked before the question reaches the chief engineer or the owner. After registry.gateTimeoutMs, or when
  * the search is down, the question passes (registry-fail-open) and the fail-open is recorded as a task event.
- * The gate attaches newly found records to the inquiry (registry_inquiry_results insert), which migration 0006 grants
- * to af_api and not to af_control: the repo passed here must be one with that right (the API process's repo), otherwise
- * the first newly found record fails the activity.
+ * The gate attaches newly found records to the inquiry (registry_inquiry_results insert). Migration 0006 granted that to
+ * af_api; migration 0010 grants it to af_control too, limited by a trigger to found_by 'gate' without a verdict, so the
+ * gate runs on the Control Worker's af_control repo.
  */
 export const createQuestionGate = (deps: QuestionGateDeps) => async (input: QuestionGateInput): Promise<QuestionGateResult> => {
 	if (!goesThroughQuestionGate(input.kind, input.raisedByQuestion)) return { gated: false };
