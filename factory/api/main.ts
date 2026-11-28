@@ -14,14 +14,15 @@ import { createApiServer } from "./server.ts";
 import { registerAllHandlers } from "./handlers/register-all.ts";
 
 // Cleartext is served on loopback only; every other address takes TLS (api.md "Authentication", security.md T25 and the
-// row "Switch on a non-loopback bind of the API", client.md "Network"). The TLS proxy is phase 3 (F/deploy/proxy/) and is not
-// built, so a non-loopback address is refused outright. createApiServer().listen binds 127.0.0.1 whatever the setting says,
+// row "Switch on a non-loopback bind of the API", client.md "Network"). The TLS proxy (F/deploy/proxy/, deployment.md "TLS
+// proxy") is the external entrance and reaches this process on the loopback, so the process itself never binds anything else
+// and a non-loopback address is refused outright. createApiServer().listen binds 127.0.0.1 whatever the setting says,
 // so the only accepted spellings are the ones that mean exactly that address.
 const LOOPBACK_HOSTS: readonly string[] = ["127.0.0.1", "localhost"];
 
 export class NonLoopbackRefused extends UsageError {
 	constructor(host: string) {
-		super(`AF_API_HOST ${host} is not loopback: cleartext is served on 127.0.0.1 only and TLS is not built yet (docs/agent-factory/security.md T25, "Switch on a non-loopback bind of the API": refused until TLS is configured)`);
+		super(`AF_API_HOST ${host} is not loopback: the API is served on 127.0.0.1 only and the external entrance is the TLS proxy (docs/agent-factory/security.md T25, "Switch on a non-loopback bind of the API": refused; see deployment.md "TLS proxy")`);
 	}
 }
 

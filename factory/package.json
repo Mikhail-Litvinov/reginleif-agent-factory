@@ -12,6 +12,7 @@
 		"typecheck": "tsc --noEmit",
 		"start": "node api/main.ts",
 		"setup-secrets": "node deploy/setup-secrets.ts",
+		"proxy-certs": "node deploy/proxy/certs.ts",
 		"backup": "node deploy/backup/backup.ts",
 		"restore-check": "node deploy/backup/restore-check.ts",
 		"restore": "node deploy/backup/restore.ts"

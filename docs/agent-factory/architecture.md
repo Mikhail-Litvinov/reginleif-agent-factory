@@ -290,7 +290,10 @@ Numbers (attempts, timeouts, budgets, depth) are settings with defaults set in t
 ## Security
 
 - Temporal authorizes nobody by default: the frontend needs mTLS with required client certificates and a private network
-  before it leaves the PC. PostgreSQL and the UI are never published.
+  before it leaves the PC. PostgreSQL and the UI are never published. The one entrance from outside is the TLS proxy
+  (an Envoy container, [deployment.md](deployment.md), "TLS proxy"): Temporal gRPC with mTLS and the API with TLS of the
+  PC's own certificate; Temporal and the API process stay on loopback behind it, and the proxy's external address is a
+  setting that defaults to loopback.
 - API tokens are stored as hashes and carry a role: owner, worker, relay, reader, registry. An agent process gets no
   token that can decide; the only token it may hold is `registry` (search, inquiry, verdict, draft; security.md T5). The Telegram client has the relay role: it may submit a decision (dangerous ones after the hub's second press) only with the hub's press id and a Telegram user
   that is mapped to an owner, and each press id works once. The client holds a device session, a revocable token that

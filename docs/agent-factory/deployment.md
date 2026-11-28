@@ -173,9 +173,9 @@ with exit 1; a bad setting is exit 2.
 | `AF_REEMBED_INTERVAL_MS` | 60000 | pause between passes |
 | `AF_API_STOP_TIMEOUT_MS` | 10000 | longest time a stop may take; after it the process ends with exit 1 |
 
-Cleartext is served on loopback only. Any other address in `AF_API_HOST` is refused with exit 2, because TLS is not built
-yet (`security.md` T25, the row "Switch on a non-loopback bind of the API"; `api.md` "Authentication"; `client.md`
-"Network").
+Cleartext is served on loopback only. Any other address in `AF_API_HOST` is refused with exit 2, because the API itself
+never speaks TLS: a client on another machine reaches it through the TLS proxy ("TLS proxy" below), which is the only
+process that listens on an external address (`security.md` T25; `api.md` "Authentication"; `client.md` "Network").
 
 Stop: Ctrl+C (SIGINT) or SIGTERM. The server stops taking requests, finishes the running ones, stops the re-embedding
 loop and closes the database pool, then exits 0. Windows cannot deliver SIGTERM to a process, so a supervisor that
@@ -646,21 +646,23 @@ way the Postgres image is:
 | `temporal` | `temporalio/server:1.32.2` (digest `sha256:7bf69188...`) | the server, frontend gRPC on `127.0.0.1:7233` |
 | `temporal-ui` | `temporalio/ui:2.58.1` (digest `sha256:ac3c13ed...`) | the web UI, only with the profile `ui`, `127.0.0.1:8233` |
 
-All ports are published on `127.0.0.1` only. `AF_TEMPORAL_PORT` and `AF_TEMPORAL_UI_PORT` change the two host ports (the
+The ports of Postgres and Temporal are published on `127.0.0.1` only; the only service that can be published on another
+address is the TLS proxy ("TLS proxy", `AF_PROXY_BIND`). `AF_TEMPORAL_PORT` and `AF_TEMPORAL_UI_PORT` change the two host ports (the
 same way `AF_PG_PORT` does for Postgres). The Python and TypeScript SDK of the application connects to
 `127.0.0.1:7233`. The stack creates no namespace: the application registers its own.
 
 **Start.** The `af_temporal` secret and the role and databases must exist (Install, or "Adding Temporal to an existing
 installation"). Then, from the repository root, with `AF_SECRETS_DIR` set as above:
 
-`docker compose -p agent-factory -f factory/deploy/compose.yml up -d temporal`
+`$env:AF_SECRETS_DIR = $secrets; & $proveVolume 'agent-factory'; docker compose -p agent-factory -f factory/deploy/compose.yml up -d temporal`
 
 This starts Postgres if it is not running, waits until it is `healthy`, runs the schema step to its end, and only then
 starts the server, which becomes `healthy` when its HTTP API answers a request that needs the cluster record in the
-database. `docker compose ... up -d` without a service name starts everything but the UI. The UI is started with the
-profile:
+database. Starting the stack without a service name starts everything but the UI, the TLS proxy included, which needs its
+certificate files ("TLS proxy"); name the services (`postgres`, `temporal`) to start without it. The UI is started with
+the profile:
 
-`docker compose -p agent-factory -f factory/deploy/compose.yml --profile ui up -d temporal-ui`
+`$env:AF_SECRETS_DIR = $secrets; & $proveVolume 'agent-factory'; docker compose -p agent-factory -f factory/deploy/compose.yml --profile ui up -d temporal-ui`
 
 **The schema step** runs at every `up`, not only at the first. `temporal-sql-tool` creates the versioning tables when
 they are missing and then applies every versioned file above the version stored in the database, for the persistence
@@ -698,6 +700,81 @@ touched by an upgrade.
 
 **Recovery order.** PostgreSQL restored and healthy, then the schema step, then the server, then workers and the API;
 `recovery.md` ("Temporal server") has the steps, and "Temporal in backup and recovery" below says what the backup holds.
+
+## TLS proxy
+
+The proxy is the one entrance of the stack from outside the machine (`security.md` T25). It is an Envoy container, the
+service `proxy` in `compose.yml`, pinned by version and digest like the others (`envoyproxy/envoy:v1.34.1`, digest
+`sha256:007da57c...`). Temporal and the API stay on `127.0.0.1`; nothing else listens on an external address.
+
+| Listener (in the container) | Host port setting | Default | What it does |
+|---|---|---|---|
+| `7234` | `AF_PROXY_TEMPORAL_PORT` | `7234` | Temporal gRPC with mutual TLS: a client without a certificate of the proxy's CA is refused in the handshake. Calls are checked against a method allowlist per certificate identity ("Allowlist" below), then passed to `temporal:7233`. |
+| `8443` | `AF_PROXY_API_PORT` | `8443` | the API over TLS with the proxy's server certificate. No client certificate: the API authenticates by device token (`security.md` D5). Passed to the API on the host loopback. |
+
+`AF_PROXY_BIND` is the address both ports are published on. Its default is `127.0.0.1`, so nothing leaves the machine
+until the operator names an address (for example the LAN address of the machine); the Windows firewall rule that lets
+that address in is the operator's. `AF_API_PORT` (default 8787, the port of the API process) tells the proxy where the
+API is: the container reaches it through the name `host.docker.internal`, which Docker Desktop for Windows maps to the
+host and which `compose.yml` also maps to the host gateway. On a native Linux Docker the host gateway is not the
+loopback, so a loopback-bound API is not reachable from the container there; that setup is not covered.
+
+**Certificates.** One CA signs everything; the files are made by one command, and no certificate is made by hand. The
+files are written into `proxy` under the secrets directory, the key files restricted the way the secrets directory is
+(a key file that cannot be restricted is not written), and nothing is overwritten: to issue again, remove the old file
+first. The algorithm is ECDSA P-256 with SHA-256; the lifetimes are 5 years for the CA, 1 year for the server
+certificate and 90 days for a worker certificate (a short life is the only way to retire a worker certificate, see
+"Rotation").
+
+1. The CA, once. `ca.key` stays in this directory only; it is not given to the proxy container or to any worker:
+
+   `npm --prefix factory run proxy-certs -- ca --dir "$secrets/proxy"`
+
+2. The server certificate, for the names and IPv4 addresses a client connects to (the first is the common name). A
+   client that connects to a name that is not in the list refuses the certificate:
+
+   `npm --prefix factory run proxy-certs -- server --dir "$secrets/proxy" --names "192.168.1.20,af.example.lan"`
+
+3. One worker certificate per worker machine. Its identity is the URI `spiffe://agent-factory/worker/<id>` in the
+   certificate, and the allowlist is written on the prefix `spiffe://agent-factory/worker/`. `--out` is the directory
+   to copy to the worker machine: it receives `worker-<id>.crt`, `worker-<id>.key` and `ca.crt` (the public half):
+
+   `npm --prefix factory run proxy-certs -- worker --dir "$secrets/proxy" --id worker-1 --out "$secrets/worker-1"`
+
+A worker connects to `<name>:7234` with TLS, `ca.crt` as the root, and its certificate and key as the client pair.
+
+**Start.** The three files the proxy reads (`ca.crt`, `server.crt`, `server.key`) are compose secrets of the `proxy`
+service only: `up -d postgres` and `up -d temporal` work before they exist, and `up -d proxy` without them refuses to
+start the proxy. They are copied into tmpfs at the start and the wrapper `factory/deploy/proxy/entrypoint.sh` renders
+the configuration (`factory/deploy/proxy/envoy.yaml.tmpl`) there, so no key is in the image, in `docker inspect` or in
+a command line. From the repository root:
+
+`$env:AF_SECRETS_DIR = $secrets; & $proveVolume 'agent-factory'; docker compose -p agent-factory -f factory/deploy/compose.yml up -d proxy`
+
+The proxy starts after the Temporal server is `healthy` and becomes `healthy` itself when its listeners are up (the
+admin port, `127.0.0.1` inside the container, is not published). Starting the stack without naming a service starts
+the proxy too, so that start needs the three files.
+
+**Allowlist (`security.md` S6).** The rule is default deny: a call that matches no entry is answered
+`PERMISSION_DENIED` (HTTP 403, gRPC status 7). The identities with an entry are the worker certificates. A worker may
+call `PollActivityTaskQueue`, the `RespondActivityTask` calls (`Completed`, `Failed`, `Canceled`, each also by id),
+`RecordActivityTaskHeartbeat` (also by id), and the three calls the TypeScript worker makes around its polling
+(`GetSystemInfo`, `DescribeNamespace`, `ShutdownWorker`). It is refused everything else, in particular
+`StartWorkflowExecution`, `UpdateWorkflowExecution`, `PollWorkflowTaskQueue` and `RespondWorkflowTaskCompleted`, so a
+worker can neither start nor decide a workflow. The owner does not use the proxy: the owner's tools reach Temporal on
+the loopback port 7233. The proxy sees method names, not task queue names, so it cannot refuse a worker a queue; what
+keeps the queue `control` away from workers is that no activity task is ever put on it: the server steps are local
+activities of the workflow worker (`security.md` D28, T26). Each call is logged to the container's output with the
+certificate identity, the method, the HTTP status and the gRPC status (`docker compose -p agent-factory -f factory/deploy/compose.yml logs proxy`).
+
+**Rotation.** The proxy reads its files once, at the start; a changed file takes effect with
+the "Start" line run again with `--force-recreate` added before `proxy` (and the same proof).
+A worker certificate is renewed before its 90 days end: issue a new one under a new id (or remove the old files and
+issue the same id again) and copy it to the worker machine. There is no revocation list: a worker certificate that must
+stop working before it expires is retired by replacing the CA (remove the `proxy` directory's `ca.*` files, make the CA,
+the server certificate and every worker certificate again, start the proxy again), and a leaked `ca.key` means exactly
+that. The server certificate is renewed the same way before its year ends; clients that pin `ca.crt` need no change
+while the CA stays.
 
 ## Temporal in backup and recovery
 
@@ -812,7 +889,15 @@ directions, the bootstrap command run twice and its repair of drift. `factory/te
 mounts or removes the data volume against a same-name volume that compose did not make: each must refuse and leave it
 whole. `factory/tests/docs-commands.test.ts` runs the emergency volume copy of `recovery.md` (existing name, full disk,
 interruption, unprotected directory), and `factory/tests/upgrade-rehearsal.test.ts` the upgrade, rollback and
-restart-loop procedures described above. A file
+restart-loop procedures described above. `factory/tests/proxy.test.ts` starts the real proxy with certificates made by
+the documented command (in a temporary directory, deleted afterwards) and checks `security.md` S6 against it: a
+connection without a certificate and one with a certificate of another CA are refused; a worker certificate runs an
+activity of its own queue to its end through the proxy (the workflow worker on the loopback port, the activity worker
+through the proxy) and is refused `StartWorkflowExecution`, `UpdateWorkflowExecution`, `PollWorkflowTaskQueue` and
+`RespondWorkflowTaskCompleted`, while the same calls of the owner on the loopback port are answered by the server (the
+controls that show the refusal comes from the proxy, which also names the identity and method in its log); a workflow
+on the queue `control` runs with no activity task on any queue (D28); the API answers over TLS through the proxy and
+on no other address. A file
 shares one started server across its tests where they do not change it; `streams.test.ts` needs no docker and uses an
 injected clock, so nothing waits in real time. `npm --prefix factory run typecheck` checks the types. From the root,
 `bun test tests/factory-isolation.test.ts` checks that the factory package does not reach into the product code.
@@ -826,5 +911,9 @@ injected clock, so nothing waits in real time. `npm --prefix factory run typeche
 - Temporal workers and the application's workflows: not part of this package. The Temporal server, its schema step and
   its Postgres side are covered ("Temporal server", "Adding Temporal to an existing installation" and "Temporal in
   backup and recovery").
+- The TLS proxy: no revocation list (a worker certificate is retired by expiry or by replacing the CA), no rate limit, no
+  filtering by task queue name (it sees method names only), and no native Linux Docker setup (the container reaches the
+  loopback-bound API through `host.docker.internal`, which is the host loopback only on Docker Desktop). The firewall
+  rule for the external address is the operator's.
 - Reboot and Docker restart behaviour of the Postgres container alone: not tested. The Temporal stack's restart and
   reboot cases are tested ("Temporal server").

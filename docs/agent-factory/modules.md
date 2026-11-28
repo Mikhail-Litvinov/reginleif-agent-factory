@@ -163,7 +163,7 @@ the registry exists.
 |---|---|---|
 | `F/deploy/compose.yml` (Temporal services) | Temporal server and Temporal UI (off by default) added to the compose file; ports on loopback only | phase 1 compose |
 | `F/deploy/compose.yml` (setup service) | A one-shot admin-tools container creates and updates the Temporal schema (auto-setup is deprecated; schema updates are manual with `temporal-sql-tool`) | compose |
-| `F/deploy/proxy/` | TLS front for API and Temporal gRPC (mTLS plus a method allowlist per certificate, S6); the D28 part that the trial did not cover is proven here | compose |
+| `F/deploy/proxy/` | TLS front for API and Temporal gRPC (Envoy: `envoy.yaml.tmpl` with the method allowlist per certificate identity, `entrypoint.sh` that renders it, `certs.ts` that makes the CA, server and worker certificates; S6); the D28 part that the trial did not cover is proven here (`tests/proxy.test.ts`) | compose |
 | `F/control/activities/record-precedent.ts` | `RecordPrecedent`, a local activity (D28): after a settled dispute, a resolved block or an answered question `TaskWorkflow` writes a precedent or a draft through `RegistryService`; `agent_question` and BLOCKED `scope` go through `QuestionGate` before the owner is asked; the workflow sets `block_handler` on entering BLOCKED through the rule of `F/rights/blocks.ts` (one rule in code, not in the workflow), and a standing task has no workflow | registry, repo, rights |
 | `F/workflows/task.ts` | TaskWorkflow (queue `control`, id `task-<uuid>`): states, 12 update kinds, signal `wake` | contracts |
 | `F/workflows/machine-liveness.ts` | MachineLivenessWorkflow, a Schedule; marks machines offline | contracts |
