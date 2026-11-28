@@ -102,6 +102,9 @@ visual quality and story conformance are never recorded as automatically confirm
 
 Stored per execution: `provider`, `model`, `startedAt`, `endedAt`, `wallSeconds`, tokens in and out where given,
 `costEstimate` with its price-table version, `outputs`, and `source` (`reported` or `estimated`).
+In `task_runs.usage_metrics` the result maps to three keys: tokens in to `tokens_in`, tokens out to `tokens_out`,
+`costEstimate` to `cost_estimate` (a number in the currency of the policy's `max_cost`). An adapter that does not report
+a number leaves its key out; the run is then unmeasured for budgets (database.md, `CreateChildTasks`), never zero.
 - Claude: wall time and token counts from the result event of the stream (field names to be checked in S3); cost is an
   estimate from the price table setting.
 - Codex: wall time from `state.json`; tokens from the events where present (unversioned, to be checked); cost estimate.
