@@ -1,6 +1,7 @@
 // In-memory state of TaskWorkflow (temporal.md "TaskWorkflow keeps in memory") and the names it is made of. Workflow-side
 // module: pure data and types, no clock, no randomness, no I/O, so it bundles with the workflow code and the tests use it too.
 import type { RefusalCode } from "../control/activities/refusal.ts";
+import { CONTRACT_VERSION } from "../contracts/contract-version.ts";
 
 /** The 16 states of the architecture table (architecture.md, task state machine). */
 export const TASK_STATUSES = [
@@ -99,7 +100,7 @@ export interface DecisionUpdateInput {
 }
 
 /** Revision of the contract of the carried state; a Continue-As-New into code with another one is a patch concern (PatchGate). */
-export const CONTRACT_VERSION = 1;
+export { CONTRACT_VERSION };
 
 export const initialState = (taskId: string): TaskState => ({
 	taskId, status: "CREATED", revision: 1, attempt: 0, rework: 0, autoFix: 0, priority: null,

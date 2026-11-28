@@ -7,6 +7,7 @@ import { DependencyCreate } from '../../contracts/schemas/requests.ts';
 import { routes } from '../../contracts/routes.ts';
 import { phaseTwoBlockKinds } from '../../contracts/states.ts';
 import { isContractSupported } from '../../contracts/contract-range.ts';
+import { CONTRACT_VERSION } from '../../contracts/contract-version.ts';
 import { driverError } from '../../db/repo/errors.ts';
 import { principalOf } from '../../db/repo/audit.ts';
 import type { Repo } from '../../db/repo/index.ts';
@@ -188,7 +189,7 @@ async function addDependency(tx: Transaction, taskId: string, dependsOnId: strin
   }
 }
 
-export function registerTasks(api: Api, repo: Repo, { clock = () => new Date(), contractVersion = 1 } = {}) {
+export function registerTasks(api: Api, repo: Repo, { clock = () => new Date(), contractVersion = CONTRACT_VERSION } = {}) {
   const register = (method: Parameters<Api['register']>[0], path: string, handler: Handler,
     authorizeScope?: NonNullable<Parameters<Api['register']>[3]>['authorizeScope']) => api.register(method, path, async context => {
     const respond = async (): Promise<Result> => {

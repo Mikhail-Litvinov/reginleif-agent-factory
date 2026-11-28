@@ -1,8 +1,9 @@
 import type { HandlerDeps, HandlerRegistrar } from './shared.ts';
 import { apiRow, apiRows, id, query, response, writeAudit } from './shared.ts';
 import { isContractSupported } from '../../contracts/contract-range.ts';
+import { CONTRACT_VERSION } from '../../contracts/contract-version.ts';
 
-export function registerWorkerHandlers(api: HandlerRegistrar, { repo, now = () => new Date(), queueGatewayEnabled = false, contractVersion = 1 }: HandlerDeps): void {
+export function registerWorkerHandlers(api: HandlerRegistrar, { repo, now = () => new Date(), queueGatewayEnabled = false, contractVersion = CONTRACT_VERSION }: HandlerDeps): void {
   api.register('GET', '/workers', async context => {
     const params = query(context);
     const rows = await repo.workers.list({ status: params.get('status') ?? undefined, platform: params.get('platform') ?? undefined });
