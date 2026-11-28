@@ -31,6 +31,10 @@ export const ACTIVITIES = {
 	RequestReview: local(),
 	LoadSettings: local(["S"]),
 	RecordPrecedent: local(),
+	// Package 53: registry-first gate, block handler choice, regulation version captured at a run's start (temporal.md block rule, G9).
+	AskQuestionGate: local(),
+	ChooseBlockHandler: local(["S"]),
+	CaptureRegulationVersion: local(),
 	PrepareWorkspace: machine(["S", "Q", "C"]),
 	InspectWorkspace: machine(["S", "Q"]),
 	StartAgentExecution: machine(["S", "Q", "C"]),
